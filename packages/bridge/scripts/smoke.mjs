@@ -1,0 +1,474 @@
+#!/usr/bin/env node
+/**
+ * Bridge dev smoke test. Runs the real bridge against scripts/fake-omp.mjs in a
+ * throwaway target dir, drives it over WebSocket, and asserts the wire contract.
+ *
+ * Usage (from packages/bridge): node scripts/smoke.mjs
+ */
+
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import WebSocket from "ws";
+
+const PORT = Number(process.env.SMOKE_PORT ?? 4409);
+const results = [];
+let failed = 0;
+
+function check(name, ok, detail = "") {
+  results.push(`${ok ? "PASS" : "FAIL"}  ${name}${detail === "" ? "" : ` — ${detail}`}`);
+  if (!ok) failed++;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitFor(label, predicate, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const hit = predicate();
+    if (hit) return hit;
+    if (Date.now() > deadline) throw new Error(`timeout waiting for ${label}`);
+    await sleep(20);
+  }
+}
+
+/** frames the fake omp received, in order */
+function ompFrames(path) {
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line));
+}
+
+
+/**
+ * A committed pnpm workspace in the target dir: gives the bridge a real git HEAD
+ * so the reality-refresh trigger fires on terminal agent_end. `scope` names the
+ * workspace packages (@<scope>/auth, @<scope>/db) so two seeded projects are
+ * distinguishable on the wire.
+ */
+async function seedWorkspace(dir, scope) {
+  await mkdir(join(dir, "packages", "auth", "src"), { recursive: true });
+  await mkdir(join(dir, "packages", "db", "src"), { recursive: true });
+  await writeFile(join(dir, "pnpm-workspace.yaml"), 'packages:\n  - "packages/*"\n');
+  await writeFile(join(dir, "package.json"), JSON.stringify({ name: scope, private: true }, null, 2));
+  await writeFile(
+    join(dir, "packages", "auth", "package.json"),
+    JSON.stringify({ name: `@${scope}/auth`, version: "0.0.1", dependencies: { [`@${scope}/db`]: "workspace:*" } }, null, 2),
+  );
+  await writeFile(join(dir, "packages", "db", "package.json"), JSON.stringify({ name: `@${scope}/db`, version: "0.0.1" }, null, 2));
+  await writeFile(join(dir, "packages", "auth", "src", "index.ts"), `import { users } from "@${scope}/db";\nexport const login = () => users;\n`);
+  await writeFile(join(dir, "packages", "db", "src", "index.ts"), "export const users = [];\n");
+  const git = (...args) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+  git("init", "-q");
+  git("add", "-A");
+  git("-c", "user.email=smoke@example.com", "-c", "user.name=smoke", "commit", "-q", "-m", "init");
+}
+
+/** the fake child logs to <its cwd>/fake-omp.log */
+const ompLogIn = (dir) => join(dir, "fake-omp.log");
+
+const target = await mkdtemp(join(tmpdir(), "vh-smoke-a-"));
+const targetB = await mkdtemp(join(tmpdir(), "vh-smoke-b-"));
+const fakeHome = await mkdtemp(join(tmpdir(), "vh-smoke-home-"));
+await seedWorkspace(target, "t");
+await seedWorkspace(targetB, "b");
+// HOME is pointed at fakeHome for the bridge child, so "~/proj" is this dir
+const homeProj = join(fakeHome, "proj");
+await mkdir(homeProj, { recursive: true });
+await seedWorkspace(homeProj, "h");
+
+// a second worktree of target A's repo, on its own branch — the toggle target
+const worktree = join(tmpdir(), `vh-smoke-wt-${process.pid}`);
+execFileSync("git", ["worktree", "add", "-b", "variation", worktree], { cwd: target, stdio: "ignore" });
+const ompLog = ompLogIn(target);
+const frames = [];
+let bridge = null;
+let socket = null;
+
+try {
+  bridge = spawn(
+    process.execPath,
+    ["src/index.ts", "--cwd", target, "--port", String(PORT), "--omp", "node scripts/fake-omp.mjs"],
+    {
+      cwd: process.cwd(),
+      // held turns keep the session streaming long enough to test the steer branch;
+      // VISUAL_HARNESS_HOME/HOME keep recents.json and "~" out of the real home dir
+      env: { ...process.env, FAKE_OMP_TURN_HOLD_MS: "1200", VISUAL_HARNESS_HOME: fakeHome, HOME: fakeHome },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let stderr = "";
+  bridge.stderr.setEncoding("utf8");
+  bridge.stderr.on("data", (d) => {
+    stderr += d;
+    process.stderr.write(`[bridge] ${d}`);
+  });
+  bridge.stdout.setEncoding("utf8");
+  bridge.stdout.on("data", (d) => process.stderr.write(`[bridge:out] ${d}`));
+
+  await waitFor("bridge listening", () => stderr.includes("canvas at ws://"));
+  check("bridge registered the canvas host tool", stderr.includes("registered host tool: canvas"));
+
+  socket = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
+  socket.on("message", (data) => frames.push(JSON.parse(data.toString())));
+  const opened = Promise.withResolvers();
+  socket.once("open", opened.resolve);
+  socket.once("error", opened.reject);
+  await opened.promise;
+
+  const hello = await waitFor("hello", () => frames.find((f) => f.type === "hello"));
+  check(
+    "hello carries graph + session + agent state",
+    hello.graph !== undefined && hello.session?.cwd === target && hello.agent === "idle",
+    `session=${JSON.stringify(hello.session)}`,
+  );
+  check("hello reports an empty intent layer", hello.graph.nodes.length === 0 && hello.graph.edges.length === 0);
+
+  // --- startup reality extraction -------------------------------------------
+  if (existsSync("src/reality.ts")) {
+    const pkgs = hello.graph.reality.nodes.map((n) => n.id).sort();
+    check("reality extracted before the first hello", pkgs.length === 2, pkgs.join(","));
+    check("reality layer records git HEAD", typeof hello.graph.reality.head === "string", String(hello.graph.reality.head).slice(0, 8));
+    check("targetHasCode from workspace packages", hello.session.targetHasCode === true);
+  } else {
+    check("targetHasCode from the source-file fallback", hello.session.targetHasCode === true);
+  }
+
+  // --- worktree detection ---------------------------------------------------
+  const wtPath = realpathSync(worktree);
+  const mainPath = realpathSync(target);
+  const wtList = hello.session.worktrees;
+  const mainEntry = wtList.find((w) => w.path === mainPath);
+  const variation = wtList.find((w) => w.path === wtPath);
+  check("hello lists every worktree of the target's repo", wtList.length === 2, JSON.stringify(wtList.map((w) => `${w.path}@${w.branch}`)));
+  check(
+    "the targeted worktree is the current one",
+    mainEntry?.current === true && variation?.current === false,
+    JSON.stringify(wtList.map((w) => `${w.branch}:${w.current}`)),
+  );
+  check(
+    "worktree branch and head are reported",
+    variation?.branch === "variation" && typeof variation.head === "string" && variation.head.length === 40 &&
+      typeof mainEntry?.branch === "string" && mainEntry.branch.length > 0,
+    JSON.stringify({ branch: variation?.branch, head: variation?.head?.slice(0, 8), main: mainEntry?.branch }),
+  );
+  check(
+    "`.visual-harness/` was added to the repo's shared info/exclude",
+    readFileSync(join(target, ".git", "info", "exclude"), "utf8").split("\n").filter((l) => l.trim() === ".visual-harness/").length === 1,
+  );
+
+  // --- onboarding stage 1: mechanical skeleton ------------------------------
+  socket.send(JSON.stringify({ type: "onboard", focus: "the auth path" }));
+
+  const skeleton = await waitFor("skeleton graph", () =>
+    frames.find((f) => f.type === "graph" && f.graph.nodes.some((n) => n.id === "t-auth")),
+  );
+  const skeletonIds = skeleton.graph.nodes.map((n) => n.id).sort();
+  const tAuth = skeleton.graph.nodes.find((n) => n.id === "t-auth");
+  check("skeleton has one node per workspace package", skeletonIds.join(",") === "t-auth,t-db", skeletonIds.join(","));
+  check(
+    "skeleton nodes are built with real codeRefs and a placeholder promise",
+    tAuth.phase === "built" && tAuth.codeRefs.join(",") === "packages/auth" && tAuth.label === "auth" && tAuth.summary === "Workspace package at packages/auth — survey pending.",
+    JSON.stringify(tAuth),
+  );
+  check(
+    "skeleton has a depends edge per reality edge",
+    skeleton.graph.edges.length === 1 && skeleton.graph.edges[0].id === "t-auth--t-db" && skeleton.graph.edges[0].kind === "depends",
+    JSON.stringify(skeleton.graph.edges),
+  );
+
+  // --- onboarding stage 2: survey prompt ------------------------------------
+  const survey = await waitFor("survey prompt", () =>
+    ompFrames(ompLog).find((f) => f.type === "prompt" && f.message.includes("<onboarding-survey>")),
+  );
+  check("survey prompt carried the preamble (first delivery of the process)", survey.message.includes("<canvas-harness>"));
+  check(
+    "survey prompt states the anti-diary rule and the boundary test verbatim",
+    survey.message.includes("NOT from README or doc prose") &&
+      survey.message.includes("can you state what it promises to the rest of the system in one sentence, and would deleting it break a named set of importers?"),
+  );
+  check("survey prompt states the altitude bound", survey.message.includes("5-15 top-level bubbles"));
+  check("survey prompt lists the mechanical skeleton", /- t-auth "auth" — "Workspace package at packages\/auth/.test(survey.message));
+  check("survey prompt carries the user focus", survey.message.includes('User focus for this survey: "the auth path"'));
+
+  // --- plain-English register (CONTRACTS.md §Graph document) ----------------
+  check(
+    "preamble carries the register rule with a contrasting example",
+    survey.message.includes("Register — PLAIN ENGLISH, NO JARGON.") &&
+      survey.message.includes('BAD:  "Minimal JSONL RPC client, protocol v1, id-correlated request()"') &&
+      survey.message.includes('GOOD: "Talks to the coding agent: sends it instructions and listens to everything it does"') &&
+      survey.message.includes("`codeRefs` are the one exception"),
+  );
+  check(
+    "survey prompt repeats the register rule for the summaries it asks for",
+    survey.message.includes("2. PLAIN ENGLISH, NO JARGON.") &&
+      survey.message.includes("outcomes, not mechanisms") &&
+      survey.message.includes("replace every one of them with a plain-English promise"),
+  );
+  const registration = ompFrames(ompLog).find((f) => f.type === "set_host_tools");
+  check(
+    "canvas tool description states the register rule",
+    registration.tools[0].description.includes("PLAIN ENGLISH, NO JARGON:") &&
+      registration.tools[0].description.includes("Only codeRefs stay technical."),
+    registration.tools[0].name,
+  );
+
+  // --- onboarding validation mode -------------------------------------------
+  const surveyResult = await waitFor("survey canvas result", () =>
+    ompFrames(ompLog).find((f) => f.type === "host_tool_result" && f.result.content[0].text.includes("op[1] rejected")),
+  );
+  const resultText = surveyResult.result.content[0].text;
+  check("valid enrich applied, unpointable node rejected", resultText.startsWith("applied 1 op(s);"), JSON.stringify(resultText));
+  check(
+    "rejection names the missing path and why",
+    resultText.includes('op[1] rejected: onboarding survey: node "ghost" codeRefs path "packages/nope" does not exist under the target project'),
+    resultText.split("\n")[1],
+  );
+
+  const enriched = await waitFor("enriched graph", () =>
+    frames.find((f) => f.type === "graph" && f.graph.nodes.some((n) => n.id === "t-auth" && n.status !== undefined)),
+  );
+  const surveyed = enriched.graph.nodes.find((n) => n.id === "t-auth");
+  check("survey enrichment kept phase built and set status", surveyed.phase === "built" && surveyed.status === "reading how the other parts use it", JSON.stringify(surveyed));
+  check("survey enrichment replaced the placeholder summary", surveyed.summary.startsWith("Validates credentials"), surveyed.summary);
+  check("rejected node never entered the graph", !enriched.graph.nodes.some((n) => n.id === "ghost"));
+
+  const persistedSurvey = JSON.parse(await readFile(join(target, ".visual-harness", "graph.json"), "utf8"));
+  check(
+    "status persisted to graph.json",
+    persistedSurvey.nodes.find((n) => n.id === "t-auth")?.status === "reading how the other parts use it",
+  );
+
+  await waitFor("agent:idle after the survey", () => frames.find((f) => f.type === "agent" && f.state === "idle"));
+  check("survey turn ended", true);
+
+  socket.send(JSON.stringify({ type: "onboard" }));
+  const reonboard = await waitFor("second onboard refused", () =>
+    frames.find((f) => f.type === "error" && f.message.startsWith("onboard rejected")),
+  );
+  check("onboard refused once the canvas has bubbles", reonboard.message.includes("already has bubbles"), reonboard.message);
+
+  // --- turn 1: normal utterance (validation mode must be off again) ---------
+  socket.send(JSON.stringify({ type: "utterance", referent: null, text: "build me an auth service" }));
+
+  await waitFor("agent:streaming", () => frames.find((f) => f.type === "agent" && f.state === "streaming"));
+  check("agent -> streaming", true);
+
+  const assistant = await waitFor("assistant transcript", () =>
+    frames.find((f) => f.type === "transcript" && f.role === "assistant" && f.text.startsWith("ack: ")),
+  );
+  check(
+    "assistant transcript coalesced on message_end",
+    assistant.text.endsWith(" — sketching the canvas."),
+    JSON.stringify(assistant.text),
+  );
+
+  const graph = await waitFor("graph with the new stub nodes", () =>
+    frames.find((f) => f.type === "graph" && f.graph.nodes.some((n) => n.id === "user-db")),
+  );
+  const ids = graph.graph.nodes.map((n) => n.id).sort();
+  const edgeIds = graph.graph.edges.map((e) => e.id);
+  check("graph broadcast contains the stub nodes", ids.join(",") === "auth-service,t-auth,t-db,user-db", ids.join(","));
+  check("graph broadcast contains the stub edge", edgeIds.includes("auth-service--user-db"), edgeIds.join(","));
+
+  const normalResult = await waitFor("normal-mode canvas result", () =>
+    ompFrames(ompLog).find((f) => f.type === "host_tool_result" && f.result.content[0].text.startsWith("applied 3 op(s);")),
+  );
+  check(
+    "validation mode reset: codeRefs-less node accepted after agent_end",
+    !normalResult.result.content[0].text.includes("rejected") &&
+      graph.graph.nodes.find((n) => n.id === "user-db")?.codeRefs === undefined,
+    normalResult.result.content[0].text,
+  );
+
+  const toolLine = frames.find((f) => f.type === "transcript" && f.role === "tool" && f.text === "canvas: initial decomposition");
+  check("canvas tool transcript line", toolLine !== undefined);
+
+  const activity = await waitFor("activity", () =>
+    frames.find((f) => f.type === "activity" && f.nodeIds.includes("auth-service")),
+  );
+  check("activity mapped tool path -> codeRefs node", activity.nodeIds.sort().join(",") === "auth-service,t-auth", activity.nodeIds.join(","));
+
+  await waitFor("activity cleared", () => frames.find((f) => f.type === "activity" && f.nodeIds.length === 0));
+  check("activity cleared on turn_end", true);
+
+  // --- turn 2: utterance WITH referent --------------------------------------
+  socket.send(
+    JSON.stringify({
+      type: "utterance",
+      referent: { kind: "node", id: "auth-service" },
+      text: "this should also handle token refresh",
+    }),
+  );
+
+  const addressed = await waitFor("omp received the addressed instruction", () =>
+    ompFrames(ompLog).find((f) => (f.type === "prompt" || f.type === "steer") && f.message.includes("token refresh")),
+  );
+
+  check("delivered as prompt or steer", addressed.type === "prompt" || addressed.type === "steer", addressed.type);
+  check("message contains <canvas-steering>", addressed.message.includes("<canvas-steering>"));
+  check("message contains the node label", addressed.message.includes("Auth Service"));
+  check("message contains the utterance", addressed.message.includes("this should also handle token refresh"));
+  check(
+    "message contains the neighbor line",
+    /Neighbors: user-db \[dataflow "credentials"\]/.test(addressed.message),
+    addressed.message.split("\n")[2],
+  );
+  check("later deliveries did not repeat the preamble", !addressed.message.includes("<canvas-harness>"));
+
+  // --- turn 3: utterance with an EDGE referent while the turn is streaming ---
+  await waitFor("turn 2 streaming", () =>
+    frames.filter((f) => f.type === "transcript" && f.role === "assistant" && f.text.startsWith("ack: ")).length >= 2,
+  );
+  socket.send(
+    JSON.stringify({
+      type: "utterance",
+      referent: { kind: "edge", id: "auth-service--user-db" },
+      text: "make this async with a queue in between",
+    }),
+  );
+
+  const steered = await waitFor("mid-stream delivery", () =>
+    ompFrames(ompLog).find((f) => (f.type === "prompt" || f.type === "steer") && f.message.includes("make this async")),
+  );
+  check("mid-stream utterance delivered as steer", steered.type === "steer", steered.type);
+  check(
+    "edge referent resolved with endpoints",
+    steered.message.includes("<canvas-steering>") &&
+      /Referent: edge "credentials" \(id: auth-service--user-db\) — dataflow from auth-service to user-db/.test(steered.message) &&
+      steered.message.includes('auth-service "Auth Service"'),
+    steered.message.split("\n")[1],
+  );
+  await waitFor("steer echoed back to the panel", () =>
+    frames.find((f) => f.type === "transcript" && f.role === "assistant" && f.text.startsWith("steered:")),
+  );
+  check("steer acknowledgement reached the transcript", true);
+
+  // --- persistence ----------------------------------------------------------
+  const persisted = JSON.parse(await readFile(join(target, ".visual-harness", "graph.json"), "utf8"));
+  check(
+    "graph.json persisted in the target dir",
+    persisted.rev >= 1 && persisted.nodes.length === 4 && persisted.edges.length === 2,
+    `rev=${persisted.rev} nodes=${persisted.nodes.length} edges=${persisted.edges.length}`,
+  );
+
+  // --- abort ----------------------------------------------------------------
+  socket.send(JSON.stringify({ type: "abort" }));
+  await waitFor("abort forwarded", () => ompFrames(ompLog).some((f) => f.type === "abort"), 3000);
+  check("abort forwarded to omp", true);
+
+  // --- recents + project switching ------------------------------------------
+  check("hello carries recentProjects", Array.isArray(hello.recentProjects) && hello.recentProjects[0] === target, JSON.stringify(hello.recentProjects));
+  const childA = ompFrames(ompLog).find((f) => f.type === "__start");
+
+  socket.send(JSON.stringify({ type: "switch_project", path: targetB }));
+  const helloB = await waitFor("hello after switch", () =>
+    frames.find((f) => f.type === "hello" && f.session.cwd === targetB),
+  );
+  check("switch_project re-hellos with the new target", helloB.session.cwd === targetB);
+  check("new target starts from its own (empty) graph", helloB.graph.nodes.length === 0 && helloB.graph.rev !== persisted.rev, `rev=${helloB.graph.rev} nodes=${helloB.graph.nodes.length}`);
+  check(
+    "new target's reality layer was extracted before the hello",
+    helloB.graph.reality.nodes.map((n) => n.id).sort().join(",") === "r:@b/auth,r:@b/db",
+    helloB.graph.reality.nodes.map((n) => n.id).join(","),
+  );
+  check("recents are most-recent-first and deduped", helloB.recentProjects.join(" | ") === `${targetB} | ${target}`, helloB.recentProjects.join(" | "));
+  check(
+    "recents.json written under VISUAL_HARNESS_HOME",
+    JSON.parse(await readFile(join(fakeHome, ".visual-harness", "recents.json"), "utf8"))[0] === targetB,
+  );
+
+  const persistedA = JSON.parse(await readFile(join(target, ".visual-harness", "graph.json"), "utf8"));
+  check("the old project's graph was persisted before switching away", persistedA.nodes.length === 4 && persistedA.edges.length === 2, `nodes=${persistedA.nodes.length}`);
+
+  await waitFor("old child exited", () => ompFrames(ompLog).some((f) => f.type === "__exit"));
+  let oldAlive = true;
+  try {
+    process.kill(childA.pid, 0);
+  } catch {
+    oldAlive = false;
+  }
+  check("old omp child is gone and the bridge survived it", !oldAlive && bridge.exitCode === null, `pid=${childA.pid} bridgeExit=${bridge.exitCode}`);
+
+  socket.send(JSON.stringify({ type: "switch_project", path: join(targetB, "does-not-exist") }));
+  const badSwitch = await waitFor("bad switch refused", () =>
+    frames.find((f) => f.type === "error" && f.message.startsWith("switch_project rejected")),
+  );
+  check("non-directory path refused", badSwitch.message.includes("is not an existing directory"), badSwitch.message);
+  check("no extra hello after the refused switch", frames.filter((f) => f.type === "hello").length === 2);
+
+  socket.send(JSON.stringify({ type: "utterance", referent: null, text: "start the b project" }));
+  const bPrompt = await waitFor("utterance reached the new child", () =>
+    ompFrames(ompLogIn(targetB)).find((f) => f.type === "prompt" && f.message.includes("start the b project")),
+  );
+  check("post-switch utterance served by the new child", bPrompt !== undefined);
+  check("new session earns the preamble again", bPrompt.message.includes("<canvas-harness>"));
+  const childB = ompFrames(ompLogIn(targetB)).find((f) => f.type === "__start");
+  check(
+    "the new child is a different process in the new cwd",
+    childB.pid !== childA.pid && childB.cwd === realpathSync(targetB),
+    `A=${childA.pid} B=${childB.pid} cwd=${childB.cwd}`,
+  );
+
+  // --- "~" expansion + a switch cannot race another switch ------------------
+  socket.send(JSON.stringify({ type: "switch_project", path: "~/proj" }));
+  socket.send(JSON.stringify({ type: "switch_project", path: target }));
+  const busy = await waitFor("concurrent switch refused", () =>
+    frames.find((f) => f.type === "error" && f.message.includes("already in progress")),
+  );
+  check("second switch refused while one is in progress", busy.message.startsWith("switch_project rejected"), busy.message);
+
+  const helloHome = await waitFor("hello for the home-relative target", () =>
+    frames.find((f) => f.type === "hello" && f.session.cwd === homeProj),
+  );
+  check('"~" expanded against the home dir', helloHome.session.cwd === homeProj, helloHome.session.cwd);
+  check(
+    "home-relative project brought its own reality layer",
+    helloHome.graph.reality.nodes.map((n) => n.id).sort().join(",") === "r:@h/auth,r:@h/db",
+    helloHome.graph.reality.nodes.map((n) => n.id).join(","),
+  );
+  check("recents now lead with the home-relative project", helloHome.recentProjects[0] === homeProj, helloHome.recentProjects.length.toString());
+
+  // --- toggling a worktree is just switch_project ---------------------------
+  socket.send(JSON.stringify({ type: "switch_project", path: worktree }));
+  const helloWt = await waitFor("hello for the worktree", () =>
+    frames.find((f) => f.type === "hello" && f.session.cwd === worktree),
+  );
+  const toggled = helloWt.session.worktrees;
+  check(
+    "current flipped to the worktree we switched into",
+    toggled.find((w) => w.path === wtPath)?.current === true &&
+      toggled.find((w) => w.path === mainPath)?.current === false,
+    JSON.stringify(toggled.map((w) => `${w.branch}:${w.current}`)),
+  );
+  const wtPersisted = JSON.parse(await readFile(join(worktree, ".visual-harness", "graph.json"), "utf8"));
+  check(
+    "the worktree carries its own canvas state, empty and separate from the original's",
+    helloWt.graph.nodes.length === 0 && wtPersisted.nodes.length === 0 && wtPersisted.reality.nodes.length === 2,
+    `nodes=${wtPersisted.nodes.length} realityPkgs=${wtPersisted.reality.nodes.length}`,
+  );
+  check(
+    "info/exclude stayed idempotent across both startups",
+    readFileSync(join(target, ".git", "info", "exclude"), "utf8").split("\n").filter((l) => l.trim() === ".visual-harness/").length === 1,
+  );
+
+  console.log(`\n--- addressed instruction as omp received it ---\n${addressed.message}\n---`);
+} catch (err) {
+  check("smoke run completed", false, String(err));
+} finally {
+  socket?.close();
+  bridge?.kill("SIGKILL");
+  await sleep(100);
+  await rm(target, { recursive: true, force: true });
+  await rm(targetB, { recursive: true, force: true });
+  await rm(fakeHome, { recursive: true, force: true });
+  await rm(worktree, { recursive: true, force: true });
+}
+
+console.log(`\n${results.join("\n")}\n`);
+console.log(failed === 0 ? "SMOKE OK" : `SMOKE FAILED (${failed})`);
+process.exit(failed === 0 ? 0 : 1);

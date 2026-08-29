@@ -1,0 +1,2451 @@
+/* ==========================================================================
+   visual-harness design system
+   Direction: dark observatory instrument. Blue-tinted neutrals (never pure
+   black), hairline borders, one hue per lifecycle phase, monospace reserved
+   for machine identifiers (slugs, paths, revs). No decorative blur, no
+   gradients-as-decoration.
+   ========================================================================== */
+
+:root {
+  /* --- neutrals (all tinted toward blue; never #000 / #fff) --- */
+  --bg: #0c0f13;
+  --bg-grid: #1b222c;
+  --surface: #12171e;
+  --surface-2: #171d26;
+  --surface-3: #1d242f;
+  --line: #242c38;
+  --line-strong: #313b49;
+
+  --text: #e3e8ef;
+  --text-dim: #9aa5b4;
+  --text-faint: #6b7686;
+  --focus: #dce4f0;
+  /** ink for text sitting on a filled accent colour */
+  --on-accent: #17121f;
+
+  /* --- phase palette --- */
+  --phase-idea: #a98bf5;
+  --phase-concept: #5fa8fa;
+  --phase-component: #93a3b8;
+  --phase-building: #f2b03c;
+  --phase-built: #4bcf85;
+  --phase-failed: #f4726f;
+
+  --drift: #ff8a3d;
+
+  /* --- relation strokes --- */
+  --edge-depends: #7f8ea6;
+  --edge-relates: #5d6879;
+
+  /* --- spacing (4px base) --- */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  /* --- radii --- */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 18px;
+  --r-pill: 999px;
+
+  /* --- type --- */
+  --font-ui: "Avenir Next", "Avenir", "Segoe UI Variable Display", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Berkeley Mono", Menlo, monospace;
+  --t-xs: 10px;
+  --t-sm: 11px;
+  --t-md: 13px;
+  --t-lg: 15px;
+  --t-xl: 19px;
+
+  /* --- motion: exponential ease-out, never elastic --- */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 130ms;
+  --dur: 220ms;
+
+  /* --- elevation: shadow as depth cue, not decoration --- */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 8px 24px -8px rgba(0, 0, 0, 0.7);
+  --shadow-3: 0 24px 60px -20px rgba(0, 0, 0, 0.85);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--t-md);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-feature-settings: "ss01";
+}
+
+/* ==========================================================================
+   shell
+   ========================================================================== */
+
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  height: 100%;
+}
+
+.stage {
+  position: relative;
+  min-width: 0;
+  display: grid;
+  /* row 1 is the focus card when drilled in, row 2 is always the canvas */
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.canvas-row {
+  position: relative;
+  min-height: 0;
+  /* explicit row: the focus card is absent at the project root, and
+     auto-placement would otherwise drop the canvas into the 0-height auto row */
+  grid-row: 2;
+}
+
+
+/* ==========================================================================
+   header overlay — left aligned, instrument label
+   ========================================================================== */
+
+.header {
+  position: absolute;
+  z-index: 6;
+  top: var(--s4);
+  left: var(--s4);
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  pointer-events: none;
+}
+
+.header > * {
+  pointer-events: auto;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+}
+
+.brand-mark {
+  font-size: var(--t-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.brand-meta {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+  letter-spacing: 0.04em;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: currentColor;
+  flex: none;
+}
+
+/* --- project selector --- */
+
+.project {
+  position: relative;
+}
+
+.project-current {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 24px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.04em;
+  transition:
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.project-current:hover,
+.project-current[aria-expanded="true"] {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+}
+
+.project-caret {
+  font-size: 8px;
+  color: var(--text-faint);
+}
+
+.project-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 380px;
+  padding: var(--s3) var(--s4) var(--s4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-3);
+  animation: rise var(--dur) var(--ease);
+}
+
+.project-menu-title {
+  margin: 0 0 var(--s2);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.project-menu-title + * {
+  margin-bottom: var(--s4);
+}
+
+.project-recents {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-recent {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  width: 100%;
+  padding: 6px var(--s2);
+  border-radius: var(--r-sm);
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.project-recent:hover {
+  background: var(--surface-3);
+}
+
+.project-recent-name {
+  font-size: var(--t-md);
+  color: var(--text);
+  flex: none;
+}
+
+.project-recent-path {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.project-recent-tag {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--phase-built);
+}
+
+.project-recent[data-current="true"] .project-recent-name {
+  color: var(--phase-built);
+}
+
+.project-open {
+  display: flex;
+  gap: var(--s2);
+}
+
+.project-path {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--t-sm);
+}
+
+.project-path::placeholder {
+  color: var(--text-faint);
+}
+
+.project-path:focus {
+  outline: none;
+  border-color: color-mix(in oklab, var(--focus) 45%, var(--line-strong));
+}
+
+.project-error {
+  margin: var(--s3) 0 0;
+  padding: var(--s2) 10px;
+  border-left: 2px solid var(--phase-failed);
+  background: color-mix(in oklab, var(--phase-failed) 10%, transparent);
+  font-size: var(--t-sm);
+  line-height: 1.45;
+  color: color-mix(in oklab, var(--phase-failed) 40%, var(--text));
+}
+
+/* --- breadcrumb: project › ancestor › focus --- */
+
+.crumbs {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.crumb-step {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.crumb {
+  padding: 2px 6px;
+  border-radius: var(--r-sm);
+  font-size: var(--t-sm);
+  color: var(--text-faint);
+  white-space: nowrap;
+  transition:
+    color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+
+.crumb:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.crumb[aria-current="true"] {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.crumb-sep {
+  color: var(--line-strong);
+  font-size: var(--t-sm);
+}
+
+.conn-connecting {
+  color: var(--phase-building);
+}
+.conn-live {
+  color: var(--phase-built);
+}
+.conn-lost {
+  color: var(--phase-failed);
+}
+.conn-mock {
+  color: var(--phase-idea);
+}
+
+/* fixture warning: solid fill, dark text — reads as a label on the build, not
+   as one more status pill the eye can skip */
+.badge-mock {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 24px;
+  padding: 0 11px;
+  border-radius: var(--r-pill);
+  background: var(--phase-idea);
+  color: var(--on-accent);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--phase-idea) 22%, transparent);
+}
+
+.badge-mock .dot {
+  width: 7px;
+  height: 7px;
+  background: var(--on-accent);
+  animation: breathe 1.6s var(--ease) infinite;
+}
+
+.conn-connecting .dot,
+.agent-streaming .dot {
+  animation: breathe 1.1s var(--ease) infinite;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* ==========================================================================
+   canvas surface
+   ========================================================================== */
+
+.react-flow {
+  background: var(--bg);
+}
+
+.react-flow__attribution {
+  display: none;
+}
+
+.react-flow__controls {
+  box-shadow: var(--shadow-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.react-flow__controls-button {
+  width: 28px;
+  height: 28px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  fill: var(--text-dim);
+}
+
+.react-flow__controls-button:hover {
+  background: var(--surface-3);
+  fill: var(--text);
+}
+
+.react-flow__minimap {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+
+.react-flow__minimap-mask {
+  fill: rgba(8, 10, 14, 0.62);
+}
+
+.mm-idea {
+  fill: var(--phase-idea);
+}
+.mm-concept {
+  fill: var(--phase-concept);
+}
+.mm-component {
+  fill: var(--phase-component);
+}
+.mm-building {
+  fill: var(--phase-building);
+}
+.mm-built {
+  fill: var(--phase-built);
+}
+.mm-failed {
+  fill: var(--phase-failed);
+}
+.mm-reality {
+  fill: var(--line-strong);
+}
+
+/* ==========================================================================
+   bubble node
+   ========================================================================== */
+
+.react-flow__node {
+  font-family: var(--font-ui);
+  cursor: pointer;
+}
+
+.bubble {
+  --accent: var(--phase-component);
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: 10px var(--s3) var(--s3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+  transition:
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease),
+    transform 260ms var(--ease);
+}
+
+.bubble::before {
+  /* phase wash: a whisper of hue, top-anchored so the label sits in it */
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(180deg, color-mix(in oklab, var(--accent) 13%, transparent), transparent 62%);
+  pointer-events: none;
+}
+
+.bubble[data-phase="idea"] {
+  --accent: var(--phase-idea);
+}
+.bubble[data-phase="concept"] {
+  --accent: var(--phase-concept);
+}
+.bubble[data-phase="component"] {
+  --accent: var(--phase-component);
+}
+.bubble[data-phase="building"] {
+  --accent: var(--phase-building);
+}
+.bubble[data-phase="built"] {
+  --accent: var(--phase-built);
+}
+.bubble[data-phase="failed"] {
+  --accent: var(--phase-failed);
+}
+
+.bubble:hover {
+  border-color: color-mix(in oklab, var(--accent) 55%, var(--line-strong));
+  background: var(--surface-2);
+}
+
+.bubble[data-selected="true"] {
+  border-color: color-mix(in oklab, var(--accent) 70%, var(--focus));
+  background: var(--surface-2);
+  box-shadow:
+    0 0 0 2px var(--focus),
+    var(--shadow-2);
+}
+
+.bubble-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.bubble-label {
+  font-size: var(--t-md);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bubble[data-tier="min"] .bubble-label {
+  font-size: var(--t-xl);
+}
+
+.phase-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 22%, transparent);
+}
+
+.bubble[data-phase="building"] .phase-dot {
+  animation: breathe 1.6s var(--ease) infinite;
+}
+
+.bubble-summary {
+  margin: 0;
+  font-size: var(--t-sm);
+  line-height: 1.45;
+  color: var(--text-dim);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+/* the volatile "now" line, shown in place of the promise while work is inside */
+.bubble-status {
+  color: color-mix(in oklab, var(--accent) 30%, var(--text));
+}
+
+.bubble-status::before {
+  content: "now — ";
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--accent) 70%, var(--text-faint));
+}
+
+/* Drill affordance. Sits half outside the bubble's bottom edge so it reads as a
+   door into the next layer rather than another badge inside the card. */
+.drill-chip {
+  position: absolute;
+  bottom: -11px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 21px;
+  padding: 0 5px 0 9px;
+  border: 1px solid color-mix(in oklab, var(--accent) 40%, var(--line-strong));
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  color: color-mix(in oklab, var(--accent) 55%, var(--text));
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  box-shadow: var(--shadow-1);
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.drill-chip:hover {
+  background: color-mix(in oklab, var(--accent) 24%, var(--surface-3));
+  border-color: color-mix(in oklab, var(--accent) 75%, var(--line-strong));
+  color: var(--text);
+}
+
+.drill-caret {
+  font-size: var(--t-md);
+  line-height: 1;
+  opacity: 0.8;
+}
+
+.drill-chip:hover .drill-caret {
+  transform: translateX(1px);
+}
+
+.bubble-foot {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.bubble-phase {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--accent) 72%, var(--text-dim));
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-3);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.badge-role {
+  border-color: color-mix(in oklab, var(--accent) 40%, var(--line-strong));
+  color: color-mix(in oklab, var(--accent) 60%, var(--text));
+}
+
+.bubble-refs {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- activity: the bubble the agent is inside right now --- */
+.bubble[data-active="true"] {
+  border-color: color-mix(in oklab, var(--accent) 70%, var(--line-strong));
+}
+
+.activity-ring {
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 55%, transparent);
+  animation: pulse-ring 1.9s var(--ease) infinite;
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 50%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 12px color-mix(in oklab, var(--accent) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 0%, transparent);
+  }
+}
+
+/* --- drift: intent diverged from code. orange, loud, hoverable --- */
+.bubble[data-drift="true"] {
+  border-color: color-mix(in oklab, var(--drift) 60%, var(--line-strong));
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--drift) 35%, transparent),
+    0 0 22px -4px color-mix(in oklab, var(--drift) 45%, transparent),
+    var(--shadow-1);
+}
+
+.drift-flag {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  height: 16px;
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  border: 1px solid color-mix(in oklab, var(--drift) 45%, var(--line-strong));
+  background: color-mix(in oklab, var(--drift) 16%, var(--surface-3));
+  color: var(--drift);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.04em;
+}
+
+.drift-tip {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 8px);
+  right: -4px;
+  width: 268px;
+  padding: 10px var(--s3);
+  border: 1px solid color-mix(in oklab, var(--drift) 35%, var(--line-strong));
+  border-radius: var(--r-md);
+  background: var(--surface-3);
+  box-shadow: var(--shadow-3);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  letter-spacing: normal;
+  text-align: left;
+  opacity: 0;
+  transform: translateY(3px);
+  transition:
+    opacity var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+  pointer-events: none;
+}
+
+.drift-flag:hover .drift-tip,
+.drift-flag:focus-visible .drift-tip {
+  opacity: 1;
+  transform: none;
+}
+
+.drift-tip-title {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--drift);
+  margin-bottom: var(--s2);
+}
+
+.drift-tip ul {
+  margin: 0;
+  padding-left: var(--s4);
+}
+
+.drift-tip li + li {
+  margin-top: var(--s1);
+}
+
+/* --- press-and-hold voice capture --- */
+.bubble[data-holding="true"] {
+  border-color: var(--focus);
+  box-shadow:
+    0 0 0 3px color-mix(in oklab, var(--focus) 30%, transparent),
+    var(--shadow-2);
+}
+
+.hold-bar {
+  position: absolute;
+  right: var(--s3);
+  bottom: 10px;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+}
+
+.hold-bar i {
+  display: block;
+  width: 2px;
+  height: 100%;
+  background: var(--focus);
+  transform-origin: bottom;
+  animation: wave 780ms var(--ease) infinite;
+}
+
+.hold-bar i:nth-child(2) {
+  animation-delay: 120ms;
+}
+.hold-bar i:nth-child(3) {
+  animation-delay: 240ms;
+}
+.hold-bar i:nth-child(4) {
+  animation-delay: 360ms;
+}
+
+@keyframes wave {
+  0%,
+  100% {
+    transform: scaleY(0.25);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.react-flow__handle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ==========================================================================
+   edges — steering targets, equal to nodes
+   ========================================================================== */
+
+.react-flow__edge .rel-path {
+  stroke: var(--line-strong);
+  stroke-width: 1.5;
+  fill: none;
+  transition: stroke var(--dur) var(--ease);
+}
+
+.react-flow__edge:hover .rel-path,
+.react-flow__edge.rel-selected .rel-path {
+  stroke: var(--focus);
+  stroke-width: 2;
+}
+
+/* a lifted line is an approximation: the relation lives one or more levels down,
+   so it is dashed even when the relation itself is still steerable */
+.rel-lifted .rel-path {
+  stroke-dasharray: 5 4;
+  opacity: 0.78;
+}
+
+.rel-depends .rel-path {
+  stroke: var(--edge-depends);
+  stroke-width: 2;
+}
+
+.rel-dataflow .rel-path {
+  stroke: var(--phase-concept);
+  stroke-width: 2;
+  stroke-dasharray: 7 5;
+  animation: flow 620ms linear infinite;
+}
+
+.rel-relates .rel-path {
+  stroke: var(--edge-relates);
+  stroke-width: 1.25;
+  stroke-dasharray: 2 5;
+  stroke-linecap: round;
+}
+
+@keyframes flow {
+  to {
+    stroke-dashoffset: -12;
+  }
+}
+
+/* arrow heads referenced by url(#…) from the edge components */
+.arrow-depends {
+  fill: var(--edge-depends);
+}
+
+.arrow-dataflow {
+  fill: var(--phase-concept);
+}
+
+.rel-label {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 190px;
+  padding: 3px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-1);
+  color: var(--text-dim);
+  font-family: var(--font-ui);
+  font-size: var(--t-sm);
+  white-space: nowrap;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+
+.rel-label:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.rel-label[data-selected="true"] {
+  border-color: var(--focus);
+  background: var(--surface-3);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--focus);
+}
+
+.rel-kind {
+  width: 12px;
+  height: 2px;
+  flex: none;
+  border-radius: 2px;
+  background: currentColor;
+  opacity: 0.65;
+}
+
+.rel-dataflow .rel-kind {
+  background: var(--phase-concept);
+  opacity: 1;
+}
+
+.rel-relates .rel-kind {
+  background: none;
+  height: 0;
+  border-top: 2px dotted currentColor;
+}
+
+.rel-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rel-text-empty {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+
+/* ==========================================================================
+   reality layer — mechanically derived, visually subordinate
+   ========================================================================== */
+
+.strip-note {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  white-space: nowrap;
+  color: var(--text-faint);
+  opacity: 0.75;
+}
+
+.strip-note-rule {
+  flex: 1;
+  min-width: 20px;
+  height: 1px;
+  background: linear-gradient(90deg, var(--line-strong), transparent);
+}
+
+.strip-note-label {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.ghost {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 0 var(--s3);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-md);
+  background: color-mix(in oklab, var(--surface) 70%, transparent);
+  opacity: 0.55;
+}
+
+.ghost-label {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ghost-dir {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.react-flow__node-ghost,
+.react-flow__node-strip {
+  pointer-events: none;
+}
+
+.react-flow__edge.rel-ghost .rel-path {
+  stroke: var(--line-strong);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+  opacity: 0.5;
+}
+
+/* ==========================================================================
+   canvas controls (top right of stage)
+   ========================================================================== */
+
+.stage-tools {
+  position: absolute;
+  z-index: 6;
+  top: var(--s4);
+  right: var(--s4);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--s2);
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition:
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.toggle:hover {
+  color: var(--text-dim);
+  border-color: var(--line-strong);
+}
+
+.toggle[aria-pressed="true"] {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+}
+
+.toggle-box {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  border: 1px solid currentColor;
+}
+
+.toggle[aria-pressed="true"] .toggle-box {
+  background: currentColor;
+}
+
+.errors {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  max-width: 340px;
+}
+
+.error-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border: 1px solid color-mix(in oklab, var(--phase-failed) 40%, var(--line-strong));
+  border-radius: var(--r-md);
+  background: color-mix(in oklab, var(--phase-failed) 12%, var(--surface-2));
+  box-shadow: var(--shadow-2);
+  font-size: var(--t-sm);
+  line-height: 1.45;
+  animation: rise var(--dur) var(--ease);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+.error-dismiss {
+  margin-left: var(--s2);
+  color: var(--text-faint);
+  line-height: 1;
+}
+
+.error-dismiss:hover {
+  color: var(--text);
+}
+
+/* --- legend: teaches the color system without a manual --- */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 3px var(--s3);
+  max-width: 300px;
+  padding: 2px 2px 0 0;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+
+.legend-item i {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: currentColor;
+}
+
+.legend-idea i {
+  color: var(--phase-idea);
+}
+.legend-concept i {
+  color: var(--phase-concept);
+}
+.legend-component i {
+  color: var(--phase-component);
+}
+.legend-building i {
+  color: var(--phase-building);
+}
+.legend-built i {
+  color: var(--phase-built);
+}
+.legend-failed i {
+  color: var(--phase-failed);
+}
+
+/* ==========================================================================
+   empty state — guides, does not shrug
+   ========================================================================== */
+
+.empty {
+  position: absolute;
+  z-index: 3;
+  top: 50%;
+  left: max(var(--s7), 9vw);
+  transform: translateY(-50%);
+  max-width: 420px;
+  pointer-events: none;
+}
+
+.empty-kicker {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.empty-title {
+  margin: var(--s3) 0 var(--s3);
+  font-size: 30px;
+  font-weight: 500;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.empty-body {
+  font-size: var(--t-md);
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--text-dim);
+}
+
+/* ==========================================================================
+   steering bar
+   ========================================================================== */
+
+.steer {
+  position: absolute;
+  z-index: 8;
+  right: var(--s5);
+  bottom: var(--s5);
+  left: var(--s5);
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: 10px 10px 10px var(--s4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg);
+  background: color-mix(in oklab, var(--surface) 94%, transparent);
+  box-shadow: var(--shadow-3);
+}
+
+.steer::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  border: 1px solid transparent;
+  pointer-events: none;
+  transition: border-color var(--dur) var(--ease);
+}
+
+.steer[data-armed="true"]::before {
+  border-color: color-mix(in oklab, var(--accent, var(--focus)) 45%, transparent);
+}
+
+.referent {
+  --accent: var(--text-faint);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 28px;
+  padding: 0 10px 0 8px;
+  border: 1px solid color-mix(in oklab, var(--accent) 35%, var(--line-strong));
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--accent) 10%, var(--surface-3));
+  flex: none;
+  max-width: 340px;
+}
+
+.referent[data-phase="idea"] {
+  --accent: var(--phase-idea);
+}
+.referent[data-phase="concept"] {
+  --accent: var(--phase-concept);
+}
+.referent[data-phase="component"] {
+  --accent: var(--phase-component);
+}
+.referent[data-phase="building"] {
+  --accent: var(--phase-building);
+}
+.referent[data-phase="built"] {
+  --accent: var(--phase-built);
+}
+.referent[data-phase="failed"] {
+  --accent: var(--phase-failed);
+}
+.referent[data-kind="edge"] {
+  --accent: var(--phase-concept);
+}
+
+.referent-kind {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--accent) 65%, var(--text-dim));
+}
+
+.referent-id {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.referent-clear {
+  margin-left: 2px;
+  color: var(--text-faint);
+  font-size: var(--t-md);
+  line-height: 1;
+}
+
+.referent-clear:hover {
+  color: var(--text);
+}
+
+.steer-input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--t-lg);
+  letter-spacing: -0.005em;
+}
+
+.steer-input::placeholder {
+  color: var(--text-faint);
+}
+
+.steer-input:focus {
+  outline: none;
+}
+
+.steer-hint {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 30px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: var(--t-sm);
+  white-space: nowrap;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.btn:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.btn-send {
+  border-color: color-mix(in oklab, var(--focus) 30%, var(--line-strong));
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.btn-send:disabled {
+  opacity: 0.4;
+  cursor: default;
+  background: var(--surface-2);
+  color: var(--text-faint);
+}
+
+.btn-abort {
+  border-color: color-mix(in oklab, var(--phase-failed) 45%, var(--line-strong));
+  background: color-mix(in oklab, var(--phase-failed) 14%, var(--surface-2));
+  color: color-mix(in oklab, var(--phase-failed) 70%, var(--text));
+}
+
+.btn-abort:hover {
+  background: color-mix(in oklab, var(--phase-failed) 24%, var(--surface-2));
+  color: var(--text);
+}
+
+/* ==========================================================================
+   transcript rail
+   ========================================================================== */
+
+.rail {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 344px;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  transition: width var(--dur) var(--ease);
+}
+
+.rail[data-collapsed="true"] {
+  width: 46px;
+}
+
+.rail-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 46px;
+  padding: 0 var(--s3);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.rail[data-collapsed="true"] .rail-head {
+  justify-content: center;
+  padding: 0;
+}
+
+.rail-title {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  flex: 1;
+}
+
+.rail-toggle {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-sm);
+  color: var(--text-faint);
+}
+
+.rail-toggle:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.agent-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.agent-idle {
+  color: var(--text-faint);
+}
+.agent-streaming {
+  color: var(--phase-built);
+}
+.agent-compacting {
+  color: var(--phase-building);
+}
+
+.rail-collapsed-spine {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s4);
+  padding-top: var(--s4);
+}
+
+.rail-collapsed-spine span {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  writing-mode: vertical-rl;
+}
+
+.rail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--s3) var(--s4) var(--s6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.entry {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  animation: rise var(--dur) var(--ease);
+}
+
+.entry-role {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.entry-text {
+  font-size: var(--t-md);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.entry-user .entry-text {
+  padding-left: 10px;
+  border-left: 2px solid color-mix(in oklab, var(--focus) 55%, var(--line-strong));
+  color: var(--text);
+}
+
+.entry-user .entry-role {
+  color: color-mix(in oklab, var(--focus) 55%, var(--text-faint));
+}
+
+.entry-assistant .entry-text {
+  color: var(--text);
+}
+
+.entry-tool .entry-text {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.entry-tool .entry-role {
+  color: var(--phase-concept);
+  opacity: 0.7;
+}
+
+/* ==========================================================================
+   onboarding call to action (brownfield entry)
+   ========================================================================== */
+
+.onboard {
+  margin-top: var(--s5);
+  pointer-events: auto;
+}
+
+.onboard-or {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-bottom: var(--s4);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.onboard-or span {
+  height: 1px;
+  background: var(--line-strong);
+}
+
+.onboard-or span:first-child {
+  width: 20px;
+}
+
+.onboard-or span:last-child {
+  flex: 1;
+}
+
+.onboard-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-top: var(--s4);
+}
+
+.btn-onboard {
+  height: 34px;
+  padding: 0 var(--s4);
+  flex: none;
+  border-color: color-mix(in oklab, var(--phase-built) 45%, var(--line-strong));
+  background: color-mix(in oklab, var(--phase-built) 16%, var(--surface-2));
+  color: var(--text);
+  font-size: var(--t-md);
+}
+
+.btn-onboard:hover {
+  background: color-mix(in oklab, var(--phase-built) 26%, var(--surface-2));
+}
+
+.onboard-focus {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--t-md);
+}
+
+.onboard-focus::placeholder {
+  color: var(--text-faint);
+}
+
+.onboard-focus:focus {
+  outline: none;
+  border-color: color-mix(in oklab, var(--focus) 45%, var(--line-strong));
+}
+
+/* ==========================================================================
+   side panel: tldr
+   ========================================================================== */
+
+.rail-back {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+
+.rail-back:hover {
+  color: var(--text);
+}
+
+.tl-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding-bottom: var(--s4);
+  border-bottom: 1px solid var(--line);
+}
+
+.tl-block:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.tl-title {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.tl-title-drift {
+  color: var(--drift);
+}
+
+.tl-empty {
+  margin: 0;
+  font-size: var(--t-sm);
+  line-height: 1.55;
+  color: var(--text-faint);
+}
+
+/* --- now: which bubbles are being worked, and what is happening in them --- */
+
+.tl-working {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tl-working-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+}
+
+.tl-status {
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--text);
+  padding-left: 2px;
+}
+
+.tl-status-absent {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* --- clickable bubble reference --- */
+
+.node-chip {
+  --accent: var(--phase-component);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  max-width: 100%;
+  height: 22px;
+  padding: 0 9px 0 7px;
+  border: 1px solid color-mix(in oklab, var(--accent) 32%, var(--line-strong));
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--accent) 9%, var(--surface-2));
+  color: var(--text);
+  font-size: var(--t-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.node-chip:hover {
+  background: color-mix(in oklab, var(--accent) 22%, var(--surface-2));
+  border-color: color-mix(in oklab, var(--accent) 60%, var(--line-strong));
+}
+
+.node-chip-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+}
+
+.node-chip[data-phase="idea"],
+.tl-subject[data-phase="idea"],
+.tl-tally[data-phase="idea"],
+.tl-working-item[data-phase="idea"] {
+  --accent: var(--phase-idea);
+}
+.node-chip[data-phase="concept"],
+.tl-subject[data-phase="concept"],
+.tl-tally[data-phase="concept"],
+.tl-working-item[data-phase="concept"] {
+  --accent: var(--phase-concept);
+}
+.node-chip[data-phase="component"],
+.tl-subject[data-phase="component"],
+.tl-tally[data-phase="component"],
+.tl-working-item[data-phase="component"] {
+  --accent: var(--phase-component);
+}
+.node-chip[data-phase="building"],
+.tl-subject[data-phase="building"],
+.tl-tally[data-phase="building"],
+.tl-working-item[data-phase="building"] {
+  --accent: var(--phase-building);
+}
+.node-chip[data-phase="built"],
+.tl-subject[data-phase="built"],
+.tl-tally[data-phase="built"],
+.tl-working-item[data-phase="built"] {
+  --accent: var(--phase-built);
+}
+.node-chip[data-phase="failed"],
+.tl-subject[data-phase="failed"],
+.tl-tally[data-phase="failed"],
+.tl-working-item[data-phase="failed"] {
+  --accent: var(--phase-failed);
+}
+
+/* --- shape: phase tallies and the drift headline --- */
+
+.tl-tallies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s3);
+}
+
+.tl-tally {
+  --accent: var(--phase-component);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.tl-tally i {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+}
+
+.tl-note {
+  margin: 0;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+}
+
+.tl-note-ok {
+  color: var(--text-faint);
+}
+
+.tl-note-drift {
+  color: color-mix(in oklab, var(--drift) 70%, var(--text));
+}
+
+/* --- selected subject --- */
+
+.tl-subject {
+  --accent: var(--phase-component);
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+.tl-subject-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 22%, transparent);
+}
+
+.tl-subject-label {
+  margin: 0;
+  font-size: var(--t-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.tl-subject-phase {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--accent) 72%, var(--text-dim));
+}
+
+.tl-live {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 7px;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--phase-built) 22%, var(--surface-3));
+  color: color-mix(in oklab, var(--phase-built) 75%, var(--text));
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  animation: breathe 1.6s var(--ease) infinite;
+}
+
+.tl-promise {
+  margin: 0;
+  font-size: var(--t-md);
+  line-height: 1.55;
+  color: var(--text);
+}
+
+/* the "now" line is the volatile half of a bubble; the promise above is stable */
+.tl-now {
+  display: flex;
+  gap: var(--s2);
+  margin: 0;
+  padding: var(--s2) 10px;
+  border-left: 2px solid color-mix(in oklab, var(--phase-building) 60%, var(--line-strong));
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  background: color-mix(in oklab, var(--phase-building) 8%, var(--surface-2));
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.tl-now-tag {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--phase-building) 80%, var(--text-dim));
+  padding-top: 1px;
+}
+
+.tl-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+}
+
+.tl-drift {
+  margin: 0;
+  padding-left: var(--s4);
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.tl-drift li + li {
+  margin-top: var(--s1);
+}
+
+/* --- rows, hierarchy, relations --- */
+
+.tl-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+}
+
+.tl-row-key {
+  flex: none;
+  width: 66px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+
+.tl-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.tl-relations {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tl-relation {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+.tl-relation-kind {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.tl-relation-kind.rel-dataflow {
+  color: var(--phase-concept);
+}
+
+.tl-relation-kind.rel-depends {
+  color: var(--edge-depends);
+}
+
+.tl-relation-kind.rel-relates {
+  color: var(--edge-relates);
+}
+
+.tl-relation-dir {
+  color: var(--text-faint);
+}
+
+.tl-relation-label {
+  font-size: var(--t-sm);
+  color: var(--text-dim);
+}
+
+.tl-refs {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--t-xs);
+  color: var(--text-dim);
+}
+
+.tl-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+/* --- demoted raw transcript --- */
+
+.tl-transcript {
+  padding-bottom: var(--s6);
+}
+
+.tl-disclose {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.tl-disclose:hover {
+  color: var(--text-dim);
+}
+
+.tl-disclose-caret {
+  width: 10px;
+}
+
+.tl-disclose-count {
+  padding: 0 5px;
+  border-radius: var(--r-sm);
+  background: var(--surface-3);
+  color: var(--text-faint);
+  letter-spacing: 0.04em;
+}
+
+.tl-stream {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--s2) 0;
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+/* ==========================================================================
+   single-layer navigation
+   ========================================================================== */
+
+/* The focused bubble is not one of its own peers, so it gets a card above the
+   layer instead of a place inside it. It occupies a real grid row, which is what
+   keeps React Flow's own fit from ever drawing underneath it. The top padding
+   clears the absolutely positioned header. */
+.focus-card {
+  --accent: var(--phase-component);
+  display: flex;
+  align-items: stretch;
+  gap: var(--s3);
+  margin: 56px var(--s4) var(--s2);
+  max-width: 520px;
+  padding: var(--s3) var(--s4) var(--s3) var(--s2);
+  border: 1px solid color-mix(in oklab, var(--accent) 30%, var(--line-strong));
+  border-radius: var(--r-lg);
+  background: color-mix(in oklab, var(--accent) 5%, var(--surface-2));
+  box-shadow: var(--shadow-2);
+}
+
+.focus-card[data-phase="idea"] {
+  --accent: var(--phase-idea);
+}
+.focus-card[data-phase="concept"] {
+  --accent: var(--phase-concept);
+}
+.focus-card[data-phase="component"] {
+  --accent: var(--phase-component);
+}
+.focus-card[data-phase="building"] {
+  --accent: var(--phase-building);
+}
+.focus-card[data-phase="built"] {
+  --accent: var(--phase-built);
+}
+.focus-card[data-phase="failed"] {
+  --accent: var(--phase-failed);
+}
+
+.focus-up {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  flex: none;
+  border-radius: var(--r-md);
+  color: var(--text-faint);
+  font-size: var(--t-xl);
+  line-height: 1;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.focus-up:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.focus-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.focus-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.focus-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 22%, transparent);
+}
+
+.focus-label {
+  font-size: var(--t-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  padding: 0;
+}
+
+.focus-label:hover {
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--accent) 60%, transparent);
+  text-underline-offset: 3px;
+}
+
+.focus-phase {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--accent) 72%, var(--text-dim));
+}
+
+.focus-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.focus-promise {
+  margin: 0;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.focus-now {
+  display: flex;
+  gap: var(--s2);
+  margin: var(--s1) 0 0;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--text);
+}
+
+/* --- lifted relation bundles --- */
+
+.rel-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: var(--r-pill);
+  background: var(--line-strong);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0;
+}
+
+.rel-label[data-bundle="true"] {
+  border-style: dashed;
+}
+
+/* --- liveness and drift bubbled up from hidden descendants --- */
+
+/* an ancestor standing in for the working bubble: same pulse, softer fill */
+.bubble[data-active-inside="true"] .activity-ring {
+  animation-duration: 2.6s;
+  opacity: 0.7;
+}
+
+.bubble-status[data-inside="true"]::before {
+  content: "inside — ";
+}
+
+/* descendant drift is a real warning about a place you cannot see yet */
+.bubble[data-drift-inside="true"] {
+  border-color: color-mix(in oklab, var(--drift) 32%, var(--line-strong));
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--drift) 14%, transparent),
+    var(--shadow-1);
+}
+
+.drift-flag[data-inside="true"] {
+  border-style: dashed;
+  opacity: 0.85;
+}
+
+.drift-tip-inside {
+  display: block;
+  margin-top: var(--s2);
+  color: var(--text-dim);
+}
+
+.badge-failed {
+  border-color: color-mix(in oklab, var(--phase-failed) 45%, var(--line-strong));
+  color: color-mix(in oklab, var(--phase-failed) 60%, var(--text));
+}
+
+/* --- panel: which on-screen bubble contains the working one --- */
+
+.tl-working-where {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+.tl-inside {
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+}
+
+.tl-inside-link {
+  font-size: var(--t-xs);
+  color: var(--text-dim);
+  text-decoration: underline;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 2px;
+}
+
+.tl-inside-link:hover {
+  color: var(--text);
+}
+
+/* ==========================================================================
+   motion choreography
+
+   Positions and the viewport are interpolated in JS on one clock (see
+   canvas/motion.ts) because React Flow measures node positions to route its
+   edges. Only opacity and inner scale live here — neither affects measurement,
+   so edges stay glued to their bubbles throughout.
+   ========================================================================== */
+
+/* layer swap: the outgoing layer dissolves, then the new one arrives already in
+   motion. The dissolve is on the pane, so edges fade with their nodes. */
+.react-flow__viewport {
+  transition: opacity 150ms var(--ease);
+}
+
+.react-flow__viewport[data-swap="out"] {
+  opacity: 0;
+}
+
+.react-flow__viewport[data-swap="out"] .bubble {
+  transform: scale(0.97);
+}
+
+.react-flow__viewport[data-swap="in"],
+.react-flow__viewport[data-swap="none"] {
+  opacity: 1;
+}
+
+/* within-layer arrivals and departures: survivors glide via the JS clock, these
+   two fade so a graph edit never pops */
+.bubble[data-motion="enter"] {
+  animation: bubble-enter 300ms var(--ease) both;
+}
+
+.bubble[data-motion="leave"] {
+  animation: bubble-leave 200ms var(--ease) both;
+  pointer-events: none;
+}
+
+@keyframes bubble-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes bubble-leave {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+}
+
+/* Snap rather than animate. The JS clock checks the same query and lands in one
+   frame, so this only has to disable the CSS half. */
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__viewport,
+  .bubble {
+    transition: none;
+  }
+
+  .react-flow__viewport[data-swap="out"] {
+    opacity: 1;
+  }
+
+  .react-flow__viewport[data-swap="out"] .bubble {
+    transform: none;
+  }
+
+  .bubble[data-motion="enter"],
+  .bubble[data-motion="leave"] {
+    animation: none;
+  }
+
+  .activity-ring,
+  .hold-bar i,
+  .phase-dot,
+  .dot,
+  .tl-live,
+  .rel-dataflow .rel-path {
+    animation: none !important;
+  }
+}
+
+/* a hairline from the curve to a label that had to step aside, so the label
+   still reads as belonging to its stroke rather than floating */
+.rel-tether {
+  position: absolute;
+  height: 1px;
+  background: var(--line-strong);
+  opacity: 0.7;
+  pointer-events: none;
+  transform-origin: center;
+}
+
+/* --- variation switcher: which copy of the project you are looking at --- */
+
+.variation .project-menu {
+  width: 420px;
+}
+
+.variation-kicker {
+  font-size: var(--t-xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.variation-detached {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* the current variation is shown, not offered: retargeting to where you already
+   are would throw the session away for nothing */
+.project-recent[data-current="true"] {
+  cursor: default;
+}
+
+.project-recent[data-current="true"]:hover {
+  background: none;
+}

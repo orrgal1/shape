@@ -20,29 +20,78 @@ Plugin / alternative frontend over the **omp** harness (omp already supports ins
 into running sessions), used *instead of* the default text interface. Not a standalone agent
 runtime.
 
-## Immediate next steps (where the previous session stopped)
+## Progress (2026-08-28, later session)
 
-1. **Map omp's integration surface.** Read harness docs (`omp://` in an omp session), most
-   relevant: `rpc.md`, `sdk.md`, `extensions.md`, `extension-loading.md`, `custom-tools.md`,
-   `hooks.md`, `mcp-server-tool-authoring.md`, `ttsr-injection-lifecycle.md`. Determine: how a
-   frontend attaches to / spawns a session, how to observe the event stream, and the supported
-   way to inject a steering instruction mid-run.
-2. **Settle the cross-slice contracts before fanning out implementation:**
-   - **Graph document schema** — nodes: id, parentId, label, summary, phase
-     (idea | concept | component | building | built | failed), layer (intent | reality), status,
-     drift flag, modelRole; edges: id, source, target, label, kind. Two-layer graph per vision.
-   - **Mutation protocol** the agent emits (upsert_node / remove_node / upsert_edge /
-     remove_edge / set_status …) — likely exposed to the agent as a custom tool or MCP server.
-   - **Steering message format** — { referent: {type: node|edge, id}, utterance } composed into
-     an addressed instruction injected into the session.
-   - **Transport** — WebSocket server ↔ browser; server ↔ agent via the omp surface found in
-     step 1.
-3. **Scaffold** — web client (Vite + React + @xyflow/react + elkjs + Zustand), bridge server
-   (Bun), agent-side graph-maintenance skill/tool, voice capture (Tier-4 focused input + Tier-2
-   `wispr-flow://` URI scheme first).
-4. **v1 slice** (vision.md §"Plausible v1 slice"): speak/type an idea → live ideation graph →
-   click+speak steering → one branch crosses into build with execution state → reality layer at
-   first commit, drift rendered.
+Step 1 done — integration surface mapped (omp://rpc.md is canonical). **Decision: RPC mode.**
+Bridge spawns `omp --mode rpc`; `set_host_tools` exposes a `canvas` graph-mutation tool whose
+handler lives in the bridge; `steer`/`prompt` deliver addressed steering; event stream gives
+liveness. No SDK embed, no extension files in the target project.
+
+Step 2 done — contracts settled in `CONTRACTS.md` + `packages/shared/src/index.ts` (types,
+`applyOps`, `CANVAS_TOOL_SCHEMA`, WS protocol). Toolchain: Node 26 bridge (no Bun on this
+machine), pnpm workspace, Vite 7 + React 19 + React Flow 12 + elkjs + Zustand web client.
+
+Step 3 done — v1 slice built and proven end-to-end (2026-08-28):
+
+- `packages/bridge` — Node 26, spawns `omp --mode rpc`, WS on 127.0.0.1:4400/ws, graph store
+  persisted to `<target>/.visual-harness/graph.json`, steering composer, reality extractor +
+  drift differ. Dev smoke: `pnpm --filter @visual-harness/bridge smoke` (24 protocol checks,
+  runs against `scripts/fake-omp.mjs`).
+- `packages/web` — Vite/React Flow canvas. Hierarchy renders as a tree/DAG (user decision:
+  no nested bubbles), depth policy = top level + active/drifted/selected + "+N" expansion
+  chips, elk-reserved edge-label space + collision sweep. `?mock=1` fixture mode (badged).
+- Proven with a real model turn: idea prompt → live decomposition → agent built a pomodoro
+  CLI in a temp dir, advancing bubble phases to `built` via the canvas tool as it worked.
+  Deictic steering (click bubble → chip → utterance → `<canvas-steering>` injection) verified.
+
+Step 4 done — project onboarding (design: `onboarding.md`; contract deltas in CONTRACTS.md):
+mechanical skeleton from extractReality → agent survey turn under anti-diary constraints
+(codeRefs-must-exist gate) → drift verification. Plus `IntentNode.status` ("what's happening
+now", clears on omission) and the TLDR side panel (project mode / selected-bubble mode,
+raw transcript demoted to a disclosure). Dogfood-verified by onboarding this very repo:
+skeleton (bridge, web) in <1s, survey added the `shared` seam mechanics missed, 10 bubbles,
+accurate relations, zero drift. Bridge smoke now 43 checks.
+
+Step 5 done — navigation (user-directed): project switcher (`switch_project` retargets the
+bridge: fresh omp child, per-project graph, recents in `~/.visual-harness/recents.json`,
+re-hello to all clients; bridge smoke now 58 checks) and single-layer drill-down as THE
+default view (depth selector removed): canvas shows only the focused bubble's children,
+drill chip + breadcrumb, edge lifting to visible ancestors, liveness/drift bubbling
+(`packages/web/src/layer.ts`). Verified live: drilled bridge → 4 children with focus card;
+switched visual-harness ↔ /tmp/vh-e2e-target with clean state reset. Fixed en route:
+`.canvas-row` grid-row pin (blank canvas at root) and drill refit racing async elk.
+
+Step 6 done — motion + register (user-directed): (a) one-choreography canvas motion
+(`packages/web/src/canvas/motion.ts`) — node boxes AND viewport interpolate in a single
+rAF loop with one easing; always-fit on every content change (drill, rev, activity,
+resize), manual pan suspends until the next change; layer swaps dissolve out then fade in;
+prefers-reduced-motion snaps. Verified by transform sampling: zero direction-reversals,
+containment asserted programmatically. (b) Plain-English register: all agent-written
+canvas text (labels/summaries/statuses/edge labels/notes) must be non-technical
+(CONTRACTS.md §Register), enforced in preamble, survey prompt, and canvas tool
+description. Bridge smoke 61 checks. NOTE: graphs onboarded before the register rule
+(this repo's own map included) carry jargon summaries — re-onboard or steer to refresh.
+
+Step 7 done — layout spread + worktrees (user-directed): (a) per-layer-shape arrangement
+(`chooseArrangement`): ≤3 nodes → triangle/spread, ≥4 with a real chain → layered,
+else ellipse/grid, aspect-aware; single geometry source for edges+labels
+(`canvas/geometry.ts`); edge clearance is an asserted invariant (sampled paths never pass
+under non-endpoint bubbles); parallel edges merge with count badges. (b) Worktrees =
+architecture variations (CONTRACTS.md §Worktrees): `SessionInfo.worktrees` from
+`git worktree list --porcelain`, toggle reuses `switch_project`, per-worktree
+`.visual-harness/graph.json`, bridge appends `.visual-harness/` to git common-dir
+info/exclude; UI shows a plain-English "variation" pill (worktrees ≥ 2). Compare/side-by-
+side views deferred by design. Bridge smoke 68 checks. Fixed en route: zustand selector
+minting fresh `[]` per snapshot (`?? []` on null session) crashed live loads — stable
+module-level empties required; verify web changes once without mock.
+
+Run: `pnpm bridge -- --cwd <target-project>` + `pnpm web`, open http://localhost:5173.
+Known nit: empty-state copy overlaps reality ghosts when the reality layer is non-empty.
+Next candidates: drift UX on real drift, Wispr Tier-2 press-hold field test, model-role →
+subtree binding, session-info repush frame (sessionName changes aren't rebroadcast),
+per-language reality extractors.
+
+
 
 ## Long-term memory
 

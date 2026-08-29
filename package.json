@@ -1,0 +1,11 @@
+{
+  "name": "visual-harness",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Voice-driven, canvas-first frontend for the omp harness",
+  "scripts": {
+    "bridge": "pnpm --filter @visual-harness/bridge start",
+    "web": "pnpm --filter @visual-harness/web dev"
+  }
+}
