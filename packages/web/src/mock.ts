@@ -240,6 +240,9 @@ export function sampleGraph(): GraphDoc {
       { id: "entry-store--export-kit", source: "entry-store", target: "export-kit", kind: "dataflow", label: "note batches" },
       { id: "taxonomy--field-map", source: "taxonomy", target: "field-map", kind: "relates", label: "shared vocabulary" },
       { id: "field-map--export-kit", source: "field-map", target: "export-kit", kind: "relates" },
+      // third relation into export-kit, so the sample exercises the vendored
+      // port spread: three anchors fanned along one side instead of one point
+      { id: "taxonomy--export-kit", source: "taxonomy", target: "export-kit", kind: "dataflow", label: "tag sheets" },
     ],
     reality: {
       nodes: [

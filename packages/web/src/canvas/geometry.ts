@@ -10,11 +10,20 @@
  *
  * Two invariants it enforces:
  *  - no stroke passes through a bubble it does not terminate at;
+ *  - parallel strokes into one bubble fan out along its side (vendored archify
+ *    port spread) instead of stacking on the midpoint;
  *  - a label sits on its own curve (or a hair off it, with a tether) and never
- *    on top of a bubble or another label.
+ *    on top of a bubble, another label, or another relation's stroke.
  */
 import type { LayerEdge } from "../layer.ts";
 import type { Box, BoxMap } from "../layout.ts";
+import {
+  automaticPortSpread,
+  collectLabelRouteClearance,
+  type SpreadRect,
+  type SpreadRelation,
+  type Vec2,
+} from "./vendor/archify-geometry.ts";
 
 export interface Point {
   x: number;
@@ -267,6 +276,17 @@ export interface GeometryInput {
   obstacles: readonly Obstacle[];
 }
 
+/** sides in the vocabulary the vendored archify helpers speak */
+const SIDE_NAME: Record<Side, "top" | "right" | "bottom" | "left"> = {
+  t: "top",
+  r: "right",
+  b: "bottom",
+  l: "left",
+};
+
+/** points sampled along a curve when testing labels against other strokes */
+const ROUTE_SAMPLES = 16;
+
 export function computeEdgeGeometry({ edges, boxes, obstacles }: GeometryInput): Record<string, EdgeGeom> {
   const out: Record<string, EdgeGeom> = {};
 
@@ -283,28 +303,95 @@ export function computeEdgeGeometry({ edges, boxes, obstacles }: GeometryInput):
     seen.add(forward);
   }
 
-  const placedLabels: Box[] = [];
-  // widest labels choose first; they are the hardest to fit
-  const order = [...edges].sort((a, b) => {
-    const at = a.label !== null && a.label.length > 0 ? a.label : a.kind;
-    const bt = b.label !== null && b.label.length > 0 ? b.label : b.kind;
-    return labelWidth(bt) - labelWidth(at);
+  // vendored archify port spread: edges sharing a bubble side fan out along it,
+  // ordered by where their counterpart sits, instead of piling on the midpoint
+  const rects = new Map<string, SpreadRect>();
+  for (const [id, box] of Object.entries(boxes)) {
+    rects.set(id, {
+      id,
+      x: box.x,
+      y: box.y,
+      width: box.w,
+      height: box.h,
+      cx: box.x + box.w / 2,
+      cy: box.y + box.h / 2,
+    });
+  }
+  const relationById = new Map<string, SpreadRelation>();
+  const sidesByRelation = new Map<SpreadRelation, { source: Side; target: Side }>();
+  for (const edge of edges) {
+    const source = boxes[edge.source];
+    const target = boxes[edge.target];
+    if (source === undefined || target === undefined) continue;
+    const relation: SpreadRelation = { id: edge.id, from: edge.source, to: edge.target };
+    relationById.set(edge.id, relation);
+    sidesByRelation.set(relation, sidesFor(source, target));
+  }
+  const ports = automaticPortSpread([...relationById.values()], rects, {
+    sideFor: (relation, endpoint) => {
+      const sides = sidesByRelation.get(relation);
+      if (sides === undefined) return undefined;
+      return SIDE_NAME[endpoint === "source" ? sides.source : sides.target];
+    },
   });
 
-  for (const edge of order) {
+  // pass one: anchors and bows for every edge, plus a sampled polyline of each
+  // stroke so the label pass can keep labels off the other relations' routes
+  interface SolvedEdge {
+    edge: LayerEdge;
+    a: Point;
+    b: Point;
+    bow: Bow;
+    c1: Point;
+    c2: Point;
+    route: Vec2[];
+  }
+  const solved: SolvedEdge[] = [];
+  for (const edge of edges) {
     const source = boxes[edge.source];
     const target = boxes[edge.target];
     if (source === undefined || target === undefined) continue;
 
-    const sides = sidesFor(source, target);
-    const a = anchorOf(source, sides.source);
-    const b = anchorOf(target, sides.target);
+    const relation = relationById.get(edge.id);
+    if (relation === undefined) continue;
+    const sides = sidesByRelation.get(relation);
+    if (sides === undefined) continue;
+    const spread = ports.get(relation);
+    const a = spread?.from !== undefined ? { x: spread.from[0], y: spread.from[1] } : anchorOf(source, sides.source);
+    const b = spread?.to !== undefined ? { x: spread.to[0], y: spread.to[1] } : anchorOf(target, sides.target);
     const blockers = obstacles.filter((entry) => entry.id !== edge.source && entry.id !== edge.target);
 
     const base = opposed.has(`${edge.source}\u0000${edge.target}`) ? 58 : 0;
     const bow = solveBow(a, b, blockers, base);
     const [c1, c2] = cubicControls(a, b, bow);
 
+    const route: Vec2[] = [];
+    for (let i = 0; i <= ROUTE_SAMPLES; i += 1) {
+      const point = cubicPoint(a, c1, c2, b, i / ROUTE_SAMPLES);
+      route.push([point.x, point.y]);
+    }
+    solved.push({ edge, a, b, bow, c1, c2, route });
+  }
+
+  // each entry's index doubles as its relationIndex, so the vendored clearance
+  // check skips a label's own stroke without any filtering
+  const routes = solved.map((entry) => ({
+    relation: { id: entry.edge.id, from: entry.edge.source, to: entry.edge.target },
+    points: entry.route,
+  }));
+
+  const placedLabels: Box[] = [];
+  // widest labels choose first; they are the hardest to fit
+  const order = solved
+    .map((entry, index) => ({ entry, index }))
+    .sort(({ entry: a }, { entry: b }) => {
+      const at = a.edge.label !== null && a.edge.label.length > 0 ? a.edge.label : a.edge.kind;
+      const bt = b.edge.label !== null && b.edge.label.length > 0 ? b.edge.label : b.edge.kind;
+      return labelWidth(bt) - labelWidth(at);
+    });
+
+  for (const { entry, index } of order) {
+    const { edge, a, b, bow, c1, c2 } = entry;
     const text = edge.label !== null && edge.label.length > 0 ? edge.label : edge.kind;
     const width = labelWidth(text);
 
@@ -318,8 +405,16 @@ export function computeEdgeGeometry({ edges, boxes, obstacles }: GeometryInput):
         const normal = cubicNormal(a, c1, c2, b, t);
         const centre = { x: point.x + normal.x * off, y: point.y + normal.y * off };
         const rect: Box = { x: centre.x - width / 2, y: centre.y - LABEL_H / 2, w: width, h: LABEL_H };
-        if (obstacles.some((entry) => rectsOverlap(rect, entry.box, LABEL_MARGIN))) continue;
+        if (obstacles.some((blocker) => rectsOverlap(rect, blocker.box, LABEL_MARGIN))) continue;
         if (placedLabels.some((other) => rectsOverlap(rect, other, LABEL_MARGIN))) continue;
+        // vendored archify clearance: a spot on someone else's stroke reads as
+        // labelling that relation, so it is rejected like any other collision
+        const crowded = collectLabelRouteClearance({
+          labels: [{ rect: { x: rect.x, y: rect.y, width: rect.w, height: rect.h }, relationIndex: index }],
+          routedRelations: routes,
+          threshold: LABEL_MARGIN,
+        });
+        if (crowded.length > 0) continue;
         labelT = t;
         labelOff = off;
         placedLabels.push(rect);
