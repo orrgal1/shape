@@ -228,6 +228,14 @@ export function sampleGraph(): GraphDoc {
         modelRole: "small",
         codeRefs: ["packages/identity"],
       },
+      {
+        id: "field-api",
+        parentId: null,
+        label: "Field API",
+        summary: "Serves observations over HTTP so partner portals can query them.",
+        phase: "idea",
+        kind: "api",
+      },
     ],
     edges: [
       { id: "capture--notebook", source: "capture", target: "notebook", kind: "dataflow", label: "observations" },
@@ -250,6 +258,8 @@ export function sampleGraph(): GraphDoc {
       // third relation into export-kit, so the sample exercises the vendored
       // port spread: three anchors fanned along one side instead of one point
       { id: "taxonomy--export-kit", source: "taxonomy", target: "export-kit", kind: "dataflow", label: "tag sheets" },
+      { id: "notebook--field-api", source: "notebook", target: "field-api", kind: "dataflow", label: "published notes" },
+      { id: "field-api--identity", source: "field-api", target: "identity", kind: "depends", label: "access tokens" },
     ],
     reality: {
       nodes: [
