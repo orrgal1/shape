@@ -219,14 +219,18 @@ try {
 
   // --- onboarding validation mode -------------------------------------------
   const surveyResult = await waitFor("survey canvas result", () =>
-    ompFrames(ompLog).find((f) => f.type === "host_tool_result" && f.result.content[0].text.includes("op[1] rejected")),
+    ompFrames(ompLog).find((f) => f.type === "host_tool_result" && f.result.content[0].text.includes("onboarding/unknown-coderef")),
   );
   const resultText = surveyResult.result.content[0].text;
   check("valid enrich applied, unpointable node rejected", resultText.startsWith("applied 1 op(s);"), JSON.stringify(resultText));
+  const surveyReceipts = JSON.parse(resultText.slice(resultText.indexOf("\n") + 1)).rejections;
+  const ghost = surveyReceipts.find((r) => r.code === "onboarding/unknown-coderef");
   check(
-    "rejection names the missing path and why",
-    resultText.includes('op[1] rejected: onboarding survey: node "ghost" codeRefs path "packages/nope" does not exist under the target project'),
-    resultText.split("\n")[1],
+    "survey veto receipt names the node, the missing path, and a fix",
+    ghost?.index === 1 && ghost.subject.id === "ghost" && ghost.subject.path === "/ops/1/node/codeRefs/0" &&
+      ghost.evidence.ref === "packages/nope" && ghost.supportedFixes.length >= 1 &&
+      ghost.message.includes('codeRefs path "packages/nope" does not exist'),
+    JSON.stringify(ghost),
   );
 
   const enriched = await waitFor("enriched graph", () =>
@@ -295,6 +299,45 @@ try {
 
   await waitFor("activity cleared", () => frames.find((f) => f.type === "activity" && f.nodeIds.length === 0));
   check("activity cleared on turn_end", true);
+
+  // --- structured repair receipts: malformed batch against the live bridge --
+  await waitFor("agent:idle before the bad-op probe", () =>
+    frames.filter((f) => f.type === "agent" && f.state === "idle").length >= 2 ? true : null,
+  );
+  socket.send(JSON.stringify({ type: "utterance", referent: null, text: "bad-op probe" }));
+  const badResult = await waitFor("bad-op canvas result", () =>
+    ompFrames(ompLog).find((f) => f.type === "host_tool_result" && f.result.content[0].text.includes("op/unknown-parent")),
+  );
+  const badText = badResult.result.content[0].text;
+  check("receipts keep the one-line human summary first", badText.startsWith("applied 0 op(s);"), badText.split("\n")[0]);
+  check("all-rejected batch is an error result", badResult.isError === true);
+  const badReceipts = JSON.parse(badText.slice(badText.indexOf("\n") + 1)).rejections;
+  const orphan = badReceipts.find((r) => r.code === "op/unknown-parent");
+  check(
+    "unknown-parent receipt: annotated subject + evidence + fixes",
+    orphan?.index === 0 && orphan.subject.path === "/ops/0/node/parentId" && orphan.subject.id === "orphan" &&
+      orphan.evidence.parentId === "no-such-parent" && Array.isArray(orphan.evidence.knownNodeIds) &&
+      orphan.supportedFixes.length >= 1 && orphan.severity === "error",
+    JSON.stringify(orphan),
+  );
+  const badPhase = badReceipts.find((r) => r.code === "op/bad-phase");
+  check(
+    "bad-phase receipt: subject annotated from the live node, allowed values in evidence",
+    badPhase?.index === 1 && badPhase.subject.id === "auth-service" && badPhase.subject.label === "Auth Service" &&
+      badPhase.evidence.allowed.includes("building"),
+    JSON.stringify(badPhase),
+  );
+  const unknownOp = badReceipts.find((r) => r.code === "op/unknown-op");
+  check(
+    "unknown-op receipt lists the supported ops as a fix",
+    unknownOp?.index === 2 && unknownOp.supportedFixes.some((f) => f.includes("upsert_node")),
+    JSON.stringify(unknownOp),
+  );
+  const revBefore = graph.graph.rev;
+  check("all-rejected batch did not bump rev", !frames.some((f) => f.type === "graph" && f.graph.rev > revBefore));
+  await waitFor("agent:idle after the bad-op turn", () =>
+    frames.filter((f) => f.type === "agent" && f.state === "idle").length >= 3 ? true : null,
+  );
 
   // --- turn 2: utterance WITH referent --------------------------------------
   socket.send(

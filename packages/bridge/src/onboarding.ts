@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { CanvasOp, GraphDoc, RealityLayer } from "../../shared/src/index.ts";
+import type { GateVeto, OpGate } from "./store.ts";
 
 /** Verbatim from understand.md — the bar a bubble must clear to exist. */
 const BOUNDARY_TEST =
@@ -149,18 +150,43 @@ export async function synthesizeSkeleton(cwd: string, reality: RealityLayer): Pr
  * Onboarding validation mode: for the duration of the survey turn, structure the
  * agent cannot point at is rejected.
  */
-export function onboardingOpGate(cwd: string): (op: CanvasOp) => string | null {
-  return (op) => {
+export function onboardingOpGate(cwd: string): OpGate {
+  return (op): GateVeto | null => {
     if (op?.op !== "upsert_node") return null;
     const node = op.node;
     if (node === null || typeof node !== "object") return null;
     const refs = Array.isArray(node.codeRefs) ? node.codeRefs.filter((r) => typeof r === "string" && r.trim().length > 0) : [];
+    const subject = {
+      path: "/node/codeRefs",
+      ...(typeof node.id === "string" ? { id: node.id } : {}),
+      ...(typeof node.label === "string" ? { label: node.label } : {}),
+    };
     if (refs.length === 0) {
-      return `onboarding survey: node "${String(node.id)}" needs codeRefs naming the code it covers — during a survey you may not declare structure you cannot point at`;
+      return {
+        code: "onboarding/no-coderefs",
+        severity: "error",
+        message: `onboarding survey: node "${String(node.id)}" needs codeRefs naming the code it covers — during a survey you may not declare structure you cannot point at`,
+        subject,
+        evidence: {},
+        supportedFixes: [
+          "add codeRefs listing the workspace-relative paths this bubble covers",
+          "drop the node if you cannot point at its code",
+        ],
+      };
     }
-    for (const ref of refs) {
+    for (const [i, ref] of refs.entries()) {
       if (!existsSync(resolve(cwd, ref))) {
-        return `onboarding survey: node "${String(node.id)}" codeRefs path "${ref}" does not exist under the target project`;
+        return {
+          code: "onboarding/unknown-coderef",
+          severity: "error",
+          message: `onboarding survey: node "${String(node.id)}" codeRefs path "${ref}" does not exist under the target project`,
+          subject: { ...subject, path: `/node/codeRefs/${i}` },
+          evidence: { ref },
+          supportedFixes: [
+            "use a path that exists under the target project (workspace-relative)",
+            "drop the node if its code does not exist",
+          ],
+        };
       }
     }
     return null;

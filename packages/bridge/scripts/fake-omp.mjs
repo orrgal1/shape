@@ -86,6 +86,22 @@ const CANVAS_OPS = [
   },
 ];
 
+/** deliberately malformed batch: unknown parent, bad phase on a live node, unknown op */
+const BAD_OPS = [
+  {
+    op: "upsert_node",
+    node: {
+      id: "orphan",
+      parentId: "no-such-parent",
+      label: "Orphan",
+      summary: "A bubble whose parent does not exist.",
+      phase: "idea",
+    },
+  },
+  { op: "set_phase", id: "auth-service", phase: "bogus" },
+  { op: "explode" },
+];
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** ms to hold a turn open before turn_end — lets a test steer mid-stream */
 const TURN_HOLD_MS = Number(process.env.FAKE_OMP_TURN_HOLD_MS ?? 0);
@@ -140,6 +156,24 @@ async function runSurveyTurn() {
   });
   out({ type: "message_end", message: { role: "assistant", content: [] } });
   await callCanvas({ ops: SURVEY_OPS, note: "survey pass" });
+  out({ type: "turn_end" });
+  state.isStreaming = false;
+  out({ type: "agent_end", messages: [], isTerminal: true });
+}
+
+/** issues one all-rejected canvas batch — exercises structured repair receipts */
+async function runBadOpTurn() {
+  state.isStreaming = true;
+  out({ type: "agent_start" });
+  out({ type: "turn_start" });
+  out({ type: "message_start", message: { role: "assistant", content: [] } });
+  out({
+    type: "message_update",
+    assistantMessageEvent: { type: "text_delta", delta: "probing receipts." },
+    message: { role: "assistant", content: [] },
+  });
+  out({ type: "message_end", message: { role: "assistant", content: [] } });
+  await callCanvas({ ops: BAD_OPS, note: "malformed batch" });
   out({ type: "turn_end" });
   state.isStreaming = false;
   out({ type: "agent_end", messages: [], isTerminal: true });
@@ -205,6 +239,7 @@ async function handle(cmd) {
         await sleep(5);
         const message = String(cmd.message ?? "");
         if (/survey/i.test(message)) await runSurveyTurn();
+        else if (/bad-op/i.test(message)) await runBadOpTurn();
         else await runTurn(message);
       });
       return;

@@ -16,8 +16,12 @@ import type {
   RealityLayer,
 } from "../../shared/src/index.ts";
 
+/** receipt a gate supplies for a vetoed op; subject.path is op-relative
+ *  (e.g. "/node/codeRefs/0") — the store absolutizes it to /ops/<i>/... */
+export type GateVeto = Omit<OpRejection, "index">;
+
 /** extra per-op veto layered on top of shared validation; null = accept */
-export type OpGate = (op: CanvasOp) => string | null;
+export type OpGate = (op: CanvasOp) => GateVeto | null;
 
 export interface CanvasToolOutcome {
   /** text content for host_tool_result */
@@ -133,8 +137,17 @@ export class GraphStore {
   applyCanvasCall(rawArgs: unknown, gate: OpGate | null = null): CanvasToolOutcome {
     const parsed = parseCanvasArgs(rawArgs);
     if (typeof parsed === "string") {
+      const receipt: OpRejection = {
+        index: -1,
+        code: "canvas/bad-args",
+        severity: "error",
+        message: parsed,
+        subject: { path: "/ops" },
+        evidence: {},
+        supportedFixes: ["send { ops: CanvasOp[], note?: string } with at least one op"],
+      };
       return {
-        text: `applied 0 op(s); rev=${this.doc.rev}\n${parsed}`,
+        text: `applied 0 op(s); rev=${this.doc.rev}\n${JSON.stringify({ rejections: [receipt] }, null, 2)}`,
         isError: true,
         changed: false,
         transcript: `canvas: rejected (${parsed})`,
@@ -147,7 +160,7 @@ export class GraphStore {
     parsed.ops.forEach((op, index) => {
       const veto = gate === null ? null : gate(op);
       if (veto !== null) {
-        rejections.push({ index, reason: veto });
+        rejections.push({ ...veto, index, subject: { ...veto.subject, path: `/ops/${index}${veto.subject.path}` } });
         return;
       }
       admitted.push(op);
@@ -157,12 +170,14 @@ export class GraphStore {
     const before = this.doc.rev;
     const result = applyOps(this.doc, admitted);
     for (const r of result.rejections) {
-      rejections.push({ index: originalIndex[r.index] ?? r.index, reason: r.reason });
+      const index = originalIndex[r.index] ?? r.index;
+      rejections.push({ ...r, index, subject: { ...r.subject, path: r.subject.path.replace(`/ops/${r.index}`, `/ops/${index}`) } });
     }
     rejections.sort((a, b) => a.index - b.index);
 
+    // one-line human summary first, then the machine-readable repair receipts
     const lines = [`applied ${result.applied} op(s); rev=${this.doc.rev}`];
-    for (const r of rejections) lines.push(`op[${r.index}] rejected: ${r.reason}`);
+    if (rejections.length > 0) lines.push(JSON.stringify({ rejections }, null, 2));
 
     const summary = parsed.note ?? parsed.ops.map((op) => describeOp(op)).join(", ");
     return {
