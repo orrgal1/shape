@@ -1,6 +1,7 @@
 import { Handle, Position, useStore, type NodeProps } from "@xyflow/react";
 import { useApp } from "../store.ts";
 import { useVoiceHold } from "../wispr.ts";
+import { KindSigil, resolveKind } from "./kind.tsx";
 import type { BubbleNodeType } from "./types.ts";
 
 /** semantic-zoom tiers: what a bubble is worth saying at this scale */
@@ -25,6 +26,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
   const detail = tier === "full";
   const codeRef = node.codeRefs?.[0];
   const role = node.modelRole;
+  const kind = resolveKind(node);
 
   // what the bubble says about "now": its own status, or the status of whatever
   // hidden descendant the agent is actually inside
@@ -45,6 +47,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
       // the promise is always reachable, even where the card has no room for it
       title={tier === "min" ? node.summary : undefined}
       data-phase={node.phase}
+      data-kind={kind ?? undefined}
       data-selected={isSelected}
       data-active={active || liveInside}
       data-active-inside={liveInside && !active}
@@ -59,6 +62,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
 
       <div className="bubble-head">
         <span className="phase-dot" />
+        {kind !== null ? <KindSigil kind={kind} /> : null}
         <span className="bubble-label">{node.label}</span>
         {detail && (hasDrift || driftInside > 0) ? (
           <button

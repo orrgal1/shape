@@ -131,6 +131,7 @@ export function sampleGraph(): GraphDoc {
         phase: "building",
         status: "Wiring the transcriber hand-off; mic path is done.",
         modelRole: "build",
+        kind: "service",
         codeRefs: ["packages/capture"],
       },
       {
@@ -139,6 +140,7 @@ export function sampleGraph(): GraphDoc {
         label: "Mic stream",
         summary: "Delivers 16 kHz mono frames with backpressure to the transcriber.",
         phase: "built",
+        kind: "queue",
         codeRefs: ["packages/capture/mic"],
       },
       {
@@ -172,6 +174,7 @@ export function sampleGraph(): GraphDoc {
         label: "Notebook",
         summary: "Holds every observation and keeps devices in agreement about it.",
         phase: "concept",
+        kind: "store",
       },
       {
         id: "entry-store",
@@ -179,6 +182,7 @@ export function sampleGraph(): GraphDoc {
         label: "Entry store",
         summary: "Append-only local log of observations, addressable by note id.",
         phase: "component",
+        kind: "store",
         codeRefs: ["packages/store"],
       },
       {
@@ -204,6 +208,7 @@ export function sampleGraph(): GraphDoc {
         label: "Field map",
         summary: "Places each observation on the walked route for later review.",
         phase: "idea",
+        kind: "ui",
       },
       {
         id: "export-kit",
@@ -211,6 +216,7 @@ export function sampleGraph(): GraphDoc {
         label: "Export kit",
         summary: "Emits Darwin Core archives a herbarium will actually accept.",
         phase: "idea",
+        kind: "external",
       },
       {
         id: "identity",
@@ -218,6 +224,7 @@ export function sampleGraph(): GraphDoc {
         label: "Identity",
         summary: "Issues device keys so a phone can sync without an account.",
         phase: "component",
+        kind: "security",
         modelRole: "small",
         codeRefs: ["packages/identity"],
       },

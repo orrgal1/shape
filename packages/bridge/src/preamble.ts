@@ -41,6 +41,11 @@ Phases move as you progress: \`idea\` → \`concept\` → \`component\` → \`bu
 prefixes a bubble owns as soon as you start writing files there — the canvas uses them to show
 the user which bubble you are working inside right now.
 
+Set \`kind\` to say what sort of part a bubble is — \`ui\` (something the user sees), \`service\`
+(logic that runs), \`api\` (a surface others call), \`store\` (keeps data), \`queue\` (passes
+messages along), \`external\` (someone else's system), \`security\` (guards access). The canvas
+draws a matching symbol on the bubble; leave \`kind\` off when none of them fits.
+
 \`summary\` vs \`status\`: the summary is the bubble's STABLE promise — what it guarantees to the
 rest of the system — and it changes only when the design changes. \`status\` is the optional
 one-line CURRENT state (≤ 140 chars): what is happening in that bubble right now, in the same
