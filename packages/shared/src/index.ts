@@ -13,6 +13,7 @@
 export type Phase = "idea" | "concept" | "component" | "building" | "built" | "failed";
 export type EdgeKind = "depends" | "dataflow" | "relates";
 export type ModelRole = "explore" | "build" | "small";
+export type NodeKind = "ui" | "service" | "api" | "store" | "queue" | "external" | "security";
 
 export interface IntentNode {
   /** slug: ^[a-z0-9][a-z0-9-]*$ */
@@ -27,6 +28,8 @@ export interface IntentNode {
   /** one-line CURRENT state ("what's happening here now"), <= 140 chars; agent-refreshed while building */
   status?: string;
   modelRole?: ModelRole;
+  /** component type shown as a symbol on the bubble; unknown values fall back to the plain bubble */
+  kind?: NodeKind;
   /** workspace-relative path prefixes once code exists, e.g. ["packages/bridge"] */
   codeRefs?: string[];
 }
@@ -105,6 +108,7 @@ export interface CanvasArgs {
 export const PHASES: readonly Phase[] = ["idea", "concept", "component", "building", "built", "failed"];
 export const EDGE_KINDS: readonly EdgeKind[] = ["depends", "dataflow", "relates"];
 export const MODEL_ROLES: readonly ModelRole[] = ["explore", "build", "small"];
+export const NODE_KINDS: readonly NodeKind[] = ["ui", "service", "api", "store", "queue", "external", "security"];
 
 const NODE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 
@@ -132,6 +136,7 @@ export const CANVAS_TOOL_SCHEMA = {
               phase: { type: "string", enum: [...PHASES] },
               status: { type: "string" },
               modelRole: { type: "string", enum: [...MODEL_ROLES] },
+              kind: { type: "string", enum: [...NODE_KINDS] },
               codeRefs: { type: "array", items: { type: "string" } },
             },
             required: ["id", "parentId", "label", "summary", "phase"],
@@ -304,6 +309,7 @@ export function applyOps(doc: GraphDoc, ops: CanvasOp[]): ApplyResult {
           phase: n.phase,
           ...(typeof n.status === "string" && n.status.trim().length > 0 ? { status: n.status } : {}),
           ...(n.modelRole !== undefined && MODEL_ROLES.includes(n.modelRole) ? { modelRole: n.modelRole } : {}),
+          ...(n.kind !== undefined && NODE_KINDS.includes(n.kind) ? { kind: n.kind } : {}),
           ...(Array.isArray(n.codeRefs) ? { codeRefs: n.codeRefs.filter((r) => typeof r === "string") } : {}),
         };
         const existing = nodeById.get(n.id);
