@@ -1,0 +1,9 @@
+{
+  "name": "@visual-harness/shared",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "smoke": "node scripts/smoke.mjs"
+  }
+}

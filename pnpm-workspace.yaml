@@ -1,5 +1,6 @@
 packages:
   - packages/bridge
   - packages/web
+  - packages/shared
 allowBuilds:
   esbuild: true

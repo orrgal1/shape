@@ -7,6 +7,7 @@
   "description": "Voice-driven, canvas-first frontend for the omp harness",
   "scripts": {
     "bridge": "pnpm --filter @visual-harness/bridge start",
-    "web": "pnpm --filter @visual-harness/web dev"
+    "web": "pnpm --filter @visual-harness/web dev",
+    "smoke:shared": "pnpm --filter @visual-harness/shared smoke"
   }
 }
