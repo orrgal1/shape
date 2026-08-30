@@ -1,4 +1,5 @@
 import type { RealityLayer, Referent } from "../../../shared/src/index.ts";
+import type { DeltaMarks, DeltaStatus } from "../deltaView.ts";
 import type { Layer, LayerNode } from "../layer.ts";
 import { STRIP_ID, type Box, type BoxMap } from "../layout.ts";
 import { computeEdgeGeometry } from "./geometry.ts";
@@ -19,6 +20,29 @@ export interface BuildInput {
   entering: ReadonlySet<string>;
   /** bubbles that left the layer, kept mounted only while they fade out */
   leaving: readonly LayerNode[];
+  /**
+   * Comparison verdicts, or null on the live canvas. When set, every bubble and
+   * line carries one — anything the delta does not mention is backdrop.
+   */
+  marks: DeltaMarks | null;
+}
+
+/** stable empty tooltip source: a fresh array per node would churn React Flow's data */
+const NO_NOTES: readonly string[] = [];
+
+/**
+ * The verdict for a drawn line. A line usually stands for one relation, but a
+ * bundle stands for several: when those disagree, the line as a whole is best
+ * described as changed — something inside it is not what it was.
+ */
+function lineStatus(marks: DeltaMarks, edgeIds: string[]): DeltaStatus {
+  let agreed: DeltaStatus | null = null;
+  for (const id of edgeIds) {
+    const status = marks.edges[id] ?? "same";
+    if (agreed === null) agreed = status;
+    else if (agreed !== status) return "changed";
+  }
+  return agreed ?? "same";
 }
 
 /**
@@ -34,6 +58,7 @@ export function buildCanvas({
   showReality,
   entering,
   leaving,
+  marks,
 }: BuildInput): CanvasModel {
   const selectedNodeId = selection?.kind === "node" ? selection.id : null;
   const selectedEdgeId = selection?.kind === "edge" ? selection.id : null;
@@ -69,6 +94,8 @@ export function buildCanvas({
         childCount: entry.childCount,
         descendantCount: entry.descendantCount,
         motion,
+        deltaStatus: marks === null ? null : (marks.nodes[entry.node.id] ?? "same"),
+        deltaNotes: marks === null ? NO_NOTES : (marks.nodeNotes[entry.node.id] ?? NO_NOTES),
       },
     });
   };
@@ -94,6 +121,10 @@ export function buildCanvas({
     if (isSelected) classes.push("rel-selected");
     // dashed whenever the line is an approximation of where the relation lives
     if (edge.lifted) classes.push("rel-lifted");
+    // In a comparison what moved must read before what kind of relation it is,
+    // so the verdict is its own class and outranks the kind's stroke colour.
+    const deltaStatus = marks === null ? null : lineStatus(marks, edge.edgeIds);
+    if (deltaStatus !== null) classes.push(`rel-delta-${deltaStatus}`);
     edges.push({
       id: edge.id,
       type: "rel",
@@ -113,6 +144,8 @@ export function buildCanvas({
         lifted: edge.lifted,
         // only a bundle has no referent; clicking it drills toward the real ones
         drillId: edge.edgeId === null ? edge.source : null,
+        deltaStatus,
+        deltaNotes: marks === null || edge.edgeId === null ? NO_NOTES : (marks.edgeNotes[edge.edgeId] ?? NO_NOTES),
       },
     });
   }
@@ -190,6 +223,9 @@ export function buildCanvas({
         lifted: false,
         parts: [],
         drillId: null,
+        // the reality column never appears in a comparison
+        deltaStatus: null,
+        deltaNotes: NO_NOTES,
       },
     });
   }

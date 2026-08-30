@@ -10,6 +10,8 @@ import {
   type AgentState,
   type DriftMap,
   type EdgeKind,
+  type EntityDelta,
+  type GraphDelta,
   type GraphDoc,
   type GraphEdge,
   type IntentNode,
@@ -18,6 +20,7 @@ import {
   type RealityEdge,
   type RealityLayer,
   type RealityNode,
+  type RevisionInfo,
   type ServerMsg,
   type SessionInfo,
   type WorktreeInfo,
@@ -184,6 +187,38 @@ function asGraphDoc(value: unknown): GraphDoc | null {
   return { rev: value.rev, nodes, edges, reality, drift };
 }
 
+function asRevisionInfo(value: unknown): RevisionInfo | null {
+  if (!isRecord(value)) return null;
+  const at = asStr(value.at);
+  if (typeof value.rev !== "number" || at === null) return null;
+  return { rev: value.rev, at };
+}
+
+/** the three buckets for one entity kind, each element parsed by its own guard */
+function asEntityDelta<T>(value: unknown, one: (item: unknown) => T | null): EntityDelta<T> | null {
+  if (!isRecord(value)) return null;
+  const added = mapAll(value.added, one);
+  const removed = mapAll(value.removed, one);
+  const changed = mapAll(value.changed, (item) => {
+    if (!isRecord(item)) return null;
+    const before = one(item.before);
+    const after = one(item.after);
+    if (before === null || after === null) return null;
+    return { before, after };
+  });
+  if (added === null || removed === null || changed === null) return null;
+  return { added, removed, changed };
+}
+
+function asGraphDelta(value: unknown): GraphDelta | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.revA !== "number" || typeof value.revB !== "number") return null;
+  const nodes = asEntityDelta(value.nodes, asIntentNode);
+  const edges = asEntityDelta(value.edges, asGraphEdge);
+  if (nodes === null || edges === null) return null;
+  return { revA: value.revA, revB: value.revB, nodes, edges };
+}
+
 function asWorktree(value: unknown): WorktreeInfo | null {
   if (!isRecord(value)) return null;
   const path = asStr(value.path);
@@ -219,8 +254,11 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
       const session = asSessionInfo(raw.session);
       const agent = asAgentState(raw.agent);
       const recentProjects = asStrArray(raw.recentProjects);
-      if (graph === null || session === null || agent === null || recentProjects === null) return null;
-      return { type: "hello", graph, session, agent, recentProjects };
+      const revisions = mapAll(raw.revisions, asRevisionInfo);
+      if (graph === null || session === null || agent === null || recentProjects === null || revisions === null) {
+        return null;
+      }
+      return { type: "hello", graph, session, agent, recentProjects, revisions };
     }
     case "graph": {
       const graph = asGraphDoc(raw.graph);
@@ -243,6 +281,14 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
     case "error": {
       const message = asStr(raw.message);
       return message === null ? null : { type: "error", message };
+    }
+    case "revisions": {
+      const revisions = mapAll(raw.revisions, asRevisionInfo);
+      return revisions === null ? null : { type: "revisions", revisions };
+    }
+    case "delta": {
+      const delta = asGraphDelta(raw.delta);
+      return delta === null ? null : { type: "delta", delta };
     }
     default:
       return null;

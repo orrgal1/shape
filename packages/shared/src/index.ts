@@ -86,6 +86,40 @@ export function emptyGraph(): GraphDoc {
 }
 
 // ---------------------------------------------------------------------------
+// Revision snapshots + delta
+// ---------------------------------------------------------------------------
+
+/** one persisted snapshot, identified by the `rev` it captured */
+export interface RevisionInfo {
+  rev: number;
+  /** ISO timestamp of the snapshot */
+  at: string;
+}
+
+/** the intent layer as it stood at `rev` — canonical (sorted, undefined optionals omitted) */
+export interface GraphSnapshot {
+  rev: number;
+  at: string;
+  nodes: IntentNode[];
+  edges: GraphEdge[];
+}
+
+/** added/removed/changed buckets for one entity kind; all arrays sorted by id */
+export interface EntityDelta<T> {
+  added: T[];
+  removed: T[];
+  changed: Array<{ before: T; after: T }>;
+}
+
+/** what changed between two revisions; `revA` is the before side, `revB` the after */
+export interface GraphDelta {
+  revA: number;
+  revB: number;
+  nodes: EntityDelta<IntentNode>;
+  edges: EntityDelta<GraphEdge>;
+}
+
+// ---------------------------------------------------------------------------
 // canvas tool: mutation ops
 // ---------------------------------------------------------------------------
 
@@ -339,15 +373,29 @@ export interface Referent {
 }
 
 export type ServerMsg =
-  | { type: "hello"; graph: GraphDoc; session: SessionInfo; agent: AgentState; recentProjects: string[] }
+  | {
+      type: "hello";
+      graph: GraphDoc;
+      session: SessionInfo;
+      agent: AgentState;
+      recentProjects: string[];
+      /** available snapshots, ascending by rev */
+      revisions: RevisionInfo[];
+    }
   | { type: "graph"; graph: GraphDoc }
   | { type: "agent"; state: AgentState }
   | { type: "activity"; nodeIds: string[] }
   | { type: "transcript"; role: "assistant" | "user" | "tool"; text: string }
+  /** broadcast whenever a new snapshot is written; ascending by rev */
+  | { type: "revisions"; revisions: RevisionInfo[] }
+  /** broadcast reply to a `diff` request */
+  | { type: "delta"; delta: GraphDelta }
   | { type: "error"; message: string };
 
 export type ClientMsg =
   | { type: "utterance"; referent: Referent | null; text: string }
   | { type: "onboard"; focus?: string }
   | { type: "switch_project"; path: string }
+  /** compare two snapshots; `revA` = before, `revB` = after. Unknown rev → `error` frame */
+  | { type: "diff"; revA: number; revB: number }
   | { type: "abort" };

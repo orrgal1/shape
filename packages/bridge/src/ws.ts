@@ -29,6 +29,11 @@ export function parseClientMsg(raw: string): ClientMsg | null {
     if (!("path" in parsed) || typeof parsed.path !== "string" || parsed.path.trim().length === 0) return null;
     return { type: "switch_project", path: parsed.path.trim() };
   }
+  if (parsed.type === "diff") {
+    if (!("revA" in parsed) || typeof parsed.revA !== "number" || !Number.isInteger(parsed.revA)) return null;
+    if (!("revB" in parsed) || typeof parsed.revB !== "number" || !Number.isInteger(parsed.revB)) return null;
+    return { type: "diff", revA: parsed.revA, revB: parsed.revB };
+  }
   if (parsed.type !== "utterance") return null;
   if (!("text" in parsed) || typeof parsed.text !== "string") return null;
 

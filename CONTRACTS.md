@@ -163,3 +163,21 @@ any dictation tool (incl. Wispr) types into it; Enter commits → `utterance`.
 Tier 2 opportunistic: press-and-hold ≥ 350 ms on a node attempts
 `wispr-flow://start-hands-free` via hidden iframe navigation, release fires
 `stop-hands-free`; harmless no-op when Wispr absent. No mic/WebSpeech in v1.
+
+## Revision snapshots + delta
+
+Every accepted change bumps `rev`; the bridge then persists a canonical snapshot of the
+intent layer at `<target>/.visual-harness/revisions/<rev>.json` (`SnapshotStore` in
+packages/bridge/src/snapshots.ts). One file per rev, never rewritten; retention keeps the
+newest 50 and prunes the rest. Snapshots hold nodes + edges only — reality and drift are
+re-derivable, so they stay out.
+
+`packages/shared/src/delta.ts` is the whole comparison: `snapshotGraph` writes the canonical
+form (nodes/edges sorted by id, stable key order, undefined optionals omitted, `codeRefs`
+sorted), `canonicalJson` gives it a byte-stable string, and `diffSnapshots(a, b)` is a pure
+`GraphDelta` — `a` is before, `b` is after, keyed by id, `changed` = same id whose canonical
+form differs. No I/O, so the client can diff too.
+
+Wire: `hello` carries `revisions: RevisionInfo[]` (ascending), and a `revisions` frame is
+broadcast whenever a new snapshot lands. The client asks with `diff` `{ revA, revB }` and the
+bridge broadcasts `delta` `{ delta }`; an unknown rev answers with the usual `error` frame.

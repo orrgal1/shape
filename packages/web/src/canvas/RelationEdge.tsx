@@ -9,6 +9,14 @@ const MARKER_BY_KIND: Record<string, string | undefined> = {
   dataflow: "url(#arrow-dataflow)",
 };
 
+/** what a marked line says about itself in a comparison */
+const DELTA_LINE: Record<string, string> = {
+  added: "new relation",
+  changed: "this relation changed",
+  removed: "relation gone",
+  same: "unchanged in this comparison",
+};
+
 /**
  * The stroke is a quadratic between anchors chosen by canvas/geometry.ts, bowed
  * by the `bend` that pass verified clears every bubble it merely passes. React
@@ -40,6 +48,20 @@ export function RelationEdge({ id, data }: EdgeProps<RelEdge>) {
   const lifted = data?.lifted === true;
   const count = data?.count ?? 0;
   const drillId = data?.drillId ?? null;
+  const deltaStatus = data?.deltaStatus ?? null;
+
+  // A line in a comparison is not a steering target and cannot be drilled, so it
+  // spends its tooltip saying what happened to it instead of how to act on it.
+  let tip: string;
+  if (deltaStatus !== null) {
+    tip = [DELTA_LINE[deltaStatus] ?? "", ...(data?.deltaNotes ?? [])].join("\n");
+  } else if (bundle) {
+    tip = `${count} relations below this level — click to drill in:\n${(data?.parts ?? []).join("\n")}`;
+  } else if (lifted) {
+    tip = `drawn one level up — click to steer the real relation:\n${(data?.parts ?? []).join("\n")}`;
+  } else {
+    tip = `${kind} relation — click to steer it`;
+  }
 
   return (
     <>
@@ -68,12 +90,14 @@ export function RelationEdge({ id, data }: EdgeProps<RelEdge>) {
             className="rel-label nodrag nopan"
             data-selected={data?.isSelected === true}
             data-bundle={bundle}
+            data-delta={deltaStatus ?? undefined}
             style={{
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
               pointerEvents: "all",
             }}
             onClick={(event) => {
               event.stopPropagation();
+              if (deltaStatus !== null) return;
               // A bundle is not one relation, so it cannot be a referent. Drill
               // into its source instead — that is where the real edges live.
               if (edgeId !== null) {
@@ -82,13 +106,7 @@ export function RelationEdge({ id, data }: EdgeProps<RelEdge>) {
               }
               if (drillId !== null) setFocus(drillId);
             }}
-            title={
-              bundle
-                ? `${count} relations below this level — click to drill in:\n${(data?.parts ?? []).join("\n")}`
-                : lifted
-                  ? `drawn one level up — click to steer the real relation:\n${(data?.parts ?? []).join("\n")}`
-                  : `${kind} relation — click to steer it`
-            }
+            title={tip}
           >
             <span className="rel-kind" aria-hidden="true" />
             {bundle ? (

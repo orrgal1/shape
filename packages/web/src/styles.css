@@ -1086,6 +1086,362 @@ button {
 }
 
 /* ==========================================================================
+   comparison view — two saved versions, drawn on the one canvas
+   The mark outranks the phase palette here: in a comparison the eye has to find
+   what moved before it reads what stage anything is in, so the delta status
+   drives --accent and everything untouched is pushed back. Green is new, amber
+   is changed, and gone borrows the reality layer's ghost language — dashed and
+   quiet, present only so its absence can be seen.
+   ========================================================================== */
+
+.bubble[data-delta="added"] {
+  --accent: var(--phase-built);
+  border-color: color-mix(in oklab, var(--phase-built) 60%, var(--line-strong));
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--phase-built) 45%, transparent),
+    var(--shadow-2);
+}
+
+.bubble[data-delta="changed"] {
+  --accent: var(--phase-building);
+  border-color: color-mix(in oklab, var(--phase-building) 58%, var(--line-strong));
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--phase-building) 38%, transparent),
+    var(--shadow-1);
+}
+
+.bubble[data-delta="removed"] {
+  --accent: var(--line-strong);
+  border-style: dashed;
+  border-color: var(--line-strong);
+  box-shadow: none;
+  opacity: 0.62;
+}
+
+.bubble[data-delta="removed"] .bubble-label {
+  color: var(--text-dim);
+  text-decoration: line-through;
+  text-decoration-color: var(--line-strong);
+}
+
+/* backdrop: enough shape to place the changes in, never enough to read first */
+.bubble[data-delta="same"] {
+  --accent: var(--line-strong);
+  border-color: var(--line);
+  box-shadow: none;
+  opacity: 0.4;
+}
+
+/* neither one is claiming a lifecycle stage, so neither gets the phase wash */
+.bubble[data-delta="removed"]::before,
+.bubble[data-delta="same"]::before {
+  display: none;
+}
+
+/* nothing here is clickable, so nothing here answers a pointer like it is */
+.bubble[data-delta] {
+  cursor: default;
+}
+
+.bubble[data-delta]:hover {
+  background: var(--surface);
+}
+
+.bubble[data-delta="removed"]:hover,
+.bubble[data-delta="same"]:hover {
+  border-color: var(--line-strong);
+}
+
+.badge-delta {
+  border-color: color-mix(in oklab, var(--accent) 55%, var(--line-strong));
+  background: color-mix(in oklab, var(--accent) 16%, var(--surface-3));
+  color: color-mix(in oklab, var(--accent) 45%, var(--text));
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.bubble[data-delta="removed"] .badge-delta {
+  color: var(--text-faint);
+}
+
+/* the volatile line, spent on what moved rather than on what is happening now */
+.bubble-change {
+  color: color-mix(in oklab, var(--accent) 32%, var(--text));
+}
+
+/* --- lines: same three treatments, kind keeps its dash signature --- */
+.react-flow__edge.rel-delta-added .rel-path {
+  stroke: var(--phase-built);
+  stroke-width: 2.5;
+  opacity: 1;
+}
+
+.react-flow__edge.rel-delta-changed .rel-path {
+  stroke: var(--phase-building);
+  stroke-width: 2.5;
+  opacity: 1;
+}
+
+.react-flow__edge.rel-delta-removed .rel-path {
+  stroke: var(--line-strong);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 5;
+  animation: none;
+  opacity: 0.5;
+}
+
+.react-flow__edge.rel-delta-same .rel-path {
+  stroke: var(--line);
+  stroke-width: 1.25;
+  animation: none;
+  opacity: 0.42;
+}
+
+.rel-label[data-delta] {
+  cursor: default;
+}
+
+.rel-label[data-delta="added"],
+.rel-label[data-delta="added"]:hover {
+  border-color: color-mix(in oklab, var(--phase-built) 55%, var(--line-strong));
+  background: color-mix(in oklab, var(--phase-built) 14%, var(--surface-2));
+  color: color-mix(in oklab, var(--phase-built) 55%, var(--text));
+}
+
+.rel-label[data-delta="changed"],
+.rel-label[data-delta="changed"]:hover {
+  border-color: color-mix(in oklab, var(--phase-building) 55%, var(--line-strong));
+  background: color-mix(in oklab, var(--phase-building) 14%, var(--surface-2));
+  color: color-mix(in oklab, var(--phase-building) 55%, var(--text));
+}
+
+.rel-label[data-delta="removed"],
+.rel-label[data-delta="removed"]:hover {
+  border-style: dashed;
+  border-color: var(--line-strong);
+  background: var(--surface);
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+
+.rel-label[data-delta="same"],
+.rel-label[data-delta="same"]:hover {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--text-faint);
+  opacity: 0.5;
+}
+
+.mm-delta-added {
+  fill: var(--phase-built);
+}
+.mm-delta-changed {
+  fill: var(--phase-building);
+}
+.mm-delta-removed {
+  fill: var(--line-strong);
+}
+.mm-delta-same {
+  fill: var(--line);
+}
+
+/* --- picker: same pop-up family as the project menu, anchored to the right --- */
+.cmp {
+  position: relative;
+}
+
+.cmp-menu {
+  left: auto;
+  right: 0;
+  width: 320px;
+}
+
+.cmp-open[aria-expanded="true"] {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+}
+
+.cmp-grid {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  max-height: 232px;
+  overflow-y: auto;
+}
+
+.cmp-head {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  justify-self: center;
+}
+
+.cmp-head-when {
+  justify-self: start;
+}
+
+.cmp-radio {
+  appearance: none;
+  justify-self: center;
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.cmp-radio:hover {
+  border-color: var(--text-faint);
+}
+
+.cmp-radio:checked {
+  border-color: var(--focus);
+  box-shadow: inset 0 0 0 3px var(--focus);
+}
+
+.cmp-when {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  min-width: 0;
+  font-size: var(--t-md);
+  color: var(--text-dim);
+}
+
+.cmp-rev {
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+}
+
+.cmp-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin-top: var(--s4);
+}
+
+.cmp-hint {
+  font-size: var(--t-sm);
+  color: var(--text-faint);
+}
+
+/* --- summary: what the comparison found, and the way back out --- */
+.cmp-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--s2);
+  max-width: 330px;
+  padding: 10px var(--s3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-2);
+  animation: rise var(--dur) var(--ease);
+}
+
+.cmp-bar-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.cmp-kicker {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.cmp-pair {
+  font-size: var(--t-md);
+  color: var(--text);
+}
+
+.cmp-arrow {
+  padding: 0 2px;
+  color: var(--text-faint);
+}
+
+.cmp-exit {
+  height: 26px;
+  padding: 0 10px;
+}
+
+.cmp-counts {
+  display: flex;
+  gap: var(--s3);
+}
+
+.cmp-count {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+}
+
+.cmp-count[data-delta="added"] {
+  color: var(--phase-built);
+}
+
+.cmp-count[data-delta="changed"] {
+  color: var(--phase-building);
+}
+
+.cmp-count[data-delta="removed"] {
+  color: var(--text-dim);
+}
+
+.cmp-count[data-zero="true"] {
+  color: var(--text-faint);
+}
+
+.cmp-note {
+  margin: 0;
+  max-width: 300px;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  text-align: right;
+  color: var(--text-faint);
+}
+
+.cmp-legend {
+  max-width: 300px;
+}
+
+.cmp-legend-added i {
+  color: var(--phase-built);
+}
+.cmp-legend-changed i {
+  color: var(--phase-building);
+}
+.cmp-legend-removed i {
+  color: var(--line-strong);
+}
+.cmp-legend-same i {
+  color: var(--line);
+}
+
+/* steering addresses the project as it is now, so the bar stays visible but
+   inert while a comparison is open — the way back is in the summary above */
+.steer[data-suspended="true"] {
+  opacity: 0.5;
+}
+
+.steer[data-suspended="true"] .steer-input {
+  cursor: default;
+}
+
+/* ==========================================================================
    canvas controls (top right of stage)
    ========================================================================== */
 

@@ -7,7 +7,7 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -355,6 +355,114 @@ try {
     persisted.rev >= 1 && persisted.nodes.length === 4 && persisted.edges.length === 2,
     `rev=${persisted.rev} nodes=${persisted.nodes.length} edges=${persisted.edges.length}`,
   );
+
+  // --- revision snapshots + diff --------------------------------------------
+  const revDir = join(target, ".visual-harness", "revisions");
+  const revsOnDisk = () => {
+    if (!existsSync(revDir)) return [];
+    return readdirSync(revDir)
+      .filter((name) => /^\d+\.json$/.test(name))
+      .map((name) => Number(name.slice(0, -".json".length)))
+      .sort((a, b) => a - b);
+  };
+  const snapshotAt = (rev) => JSON.parse(readFileSync(join(revDir, `${rev}.json`), "utf8"));
+
+  const revs = await waitFor("revision snapshots on disk", () => {
+    const found = revsOnDisk();
+    return found.length >= 2 ? found : null;
+  });
+  check(
+    "one snapshot file per revision under .visual-harness/revisions",
+    revs.length >= 2 && revs[revs.length - 1] === persisted.rev,
+    `revs=${revs.join(",")} docRev=${persisted.rev}`,
+  );
+  const first = revs[0];
+  const last = revs[revs.length - 1];
+  const opening = snapshotAt(first);
+  check(
+    "the opening revision was snapshotted as an empty canvas",
+    first === 0 && opening.nodes.length === 0 && opening.edges.length === 0 && typeof opening.at === "string",
+    `rev=${first} nodes=${opening.nodes.length} at=${opening.at}`,
+  );
+  check(
+    "hello carries the revision list",
+    Array.isArray(hello.revisions) &&
+      hello.revisions.every((r) => typeof r.rev === "number" && typeof r.at === "string"),
+    JSON.stringify(hello.revisions),
+  );
+  const revList = await waitFor("revisions broadcast after a snapshot", () =>
+    frames.find((f) => f.type === "revisions" && f.revisions.length >= 2),
+  );
+  check(
+    "a new snapshot broadcasts an ascending revision list",
+    revList.revisions.every((r, i, all) => i === 0 || all[i - 1].rev < r.rev),
+    JSON.stringify(revList.revisions.map((r) => r.rev)),
+  );
+
+  const finalNodeIds = persisted.nodes.map((n) => n.id).sort().join(",");
+  const finalEdgeIds = persisted.edges.map((e) => e.id).sort().join(",");
+  socket.send(JSON.stringify({ type: "diff", revA: first, revB: last }));
+  const delta = await waitFor("delta frame", () =>
+    frames.find((f) => f.type === "delta" && f.delta.revA === first && f.delta.revB === last),
+  );
+  check(
+    "diff over the whole history reports every node and edge as added",
+    delta.delta.nodes.added.map((n) => n.id).join(",") === finalNodeIds &&
+      delta.delta.edges.added.map((e) => e.id).join(",") === finalEdgeIds &&
+      delta.delta.nodes.removed.length === 0 &&
+      delta.delta.nodes.changed.length === 0 &&
+      delta.delta.edges.removed.length === 0 &&
+      delta.delta.edges.changed.length === 0,
+    JSON.stringify({
+      added: delta.delta.nodes.added.map((n) => n.id),
+      edges: delta.delta.edges.added.map((e) => e.id),
+      changed: delta.delta.nodes.changed.length,
+      removed: delta.delta.nodes.removed.length,
+    }),
+  );
+
+  // the survey turn only rewrote t-auth's promise: that pair of revisions must
+  // read as one changed node, nothing added, nothing removed
+  const surveyRev = revs.find((rev) =>
+    (snapshotAt(rev).nodes.find((n) => n.id === "t-auth")?.summary ?? "").startsWith("Validates credentials"),
+  );
+  const skeletonRev = revs[revs.indexOf(surveyRev) - 1];
+  socket.send(JSON.stringify({ type: "diff", revA: skeletonRev, revB: surveyRev }));
+  const enrichment = await waitFor("delta for the survey enrichment", () =>
+    frames.find((f) => f.type === "delta" && f.delta.revA === skeletonRev && f.delta.revB === surveyRev),
+  );
+  const promiseChange = enrichment.delta.nodes.changed;
+  check(
+    "consecutive-revision diff marks only the enriched node as changed",
+    promiseChange.length === 1 &&
+      promiseChange[0].before.id === "t-auth" &&
+      promiseChange[0].before.summary.startsWith("Workspace package at") &&
+      promiseChange[0].after.summary.startsWith("Validates credentials") &&
+      enrichment.delta.nodes.added.length === 0 &&
+      enrichment.delta.nodes.removed.length === 0 &&
+      enrichment.delta.edges.added.length === 0 &&
+      enrichment.delta.edges.changed.length === 0,
+    JSON.stringify({ pair: [skeletonRev, surveyRev], changed: promiseChange.map((c) => c.after.id) }),
+  );
+
+  socket.send(JSON.stringify({ type: "diff", revA: last, revB: first }));
+  const reversed = await waitFor("delta for the reversed pair", () =>
+    frames.find((f) => f.type === "delta" && f.delta.revA === last && f.delta.revB === first),
+  );
+  check(
+    "reversing the pair reports the same nodes and edges as removed",
+    reversed.delta.nodes.removed.map((n) => n.id).join(",") === finalNodeIds &&
+      reversed.delta.edges.removed.map((e) => e.id).join(",") === finalEdgeIds &&
+      reversed.delta.nodes.added.length === 0 &&
+      reversed.delta.edges.added.length === 0,
+    JSON.stringify(reversed.delta.nodes.removed.map((n) => n.id)),
+  );
+
+  socket.send(JSON.stringify({ type: "diff", revA: first, revB: 9999 }));
+  const badDiff = await waitFor("bogus diff refused", () =>
+    frames.find((f) => f.type === "error" && f.message.startsWith("unknown revision")),
+  );
+  check("diff against a nonexistent revision is refused", badDiff.message === "unknown revision 9999", badDiff.message);
 
   // --- abort ----------------------------------------------------------------
   socket.send(JSON.stringify({ type: "abort" }));

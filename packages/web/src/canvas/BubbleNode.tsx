@@ -1,6 +1,6 @@
 import { Handle, Position, useStore, type NodeProps } from "@xyflow/react";
 import { useApp } from "../store.ts";
-import { useVoiceHold } from "../wispr.ts";
+import { useVoiceHold, type HoldHandlers } from "../wispr.ts";
 import type { BubbleNodeType } from "./types.ts";
 
 /** semantic-zoom tiers: what a bubble is worth saying at this scale */
@@ -8,6 +8,12 @@ type Tier = "min" | "compact" | "full";
 
 const TIER_COMPACT_BELOW = 0.45;
 const TIER_MIN_BELOW = 0.38;
+
+/** comparison marks, in the same words the comparison legend uses */
+const DELTA_WORD: Record<string, string> = { added: "new", changed: "changed", removed: "gone" };
+
+/** press-and-hold dictation is meaningless on a past version, so it is unwired there */
+const NO_HOLD: Partial<HoldHandlers> = {};
 
 export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
   const tier = useStore((state): Tier => {
@@ -19,7 +25,19 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
   const setFocus = useApp((state) => state.setFocus);
   const { holding, handlers } = useVoiceHold();
 
-  const { node, active, activeInside, drift, driftInside, failedInside, isSelected, childCount, motion } = data;
+  const {
+    node,
+    active,
+    activeInside,
+    drift,
+    driftInside,
+    failedInside,
+    isSelected,
+    childCount,
+    motion,
+    deltaStatus,
+    deltaNotes,
+  } = data;
   const liveInside = activeInside.length > 0;
   const hasDrift = drift.length > 0;
   const detail = tier === "full";
@@ -36,14 +54,28 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
         ? `${inside.label}${inside.status === null ? "" : ` — ${inside.status}`}`
         : null;
 
+  const comparing = deltaStatus !== null;
+  const deltaWord = deltaStatus === null ? undefined : DELTA_WORD[deltaStatus];
+  /** the loudest thing about a changed bubble is what changed, not its promise */
+  const changeNote = deltaNotes[0];
+  const tip = comparing
+    ? [node.summary, ...deltaNotes].join("\n")
+    : tier === "min"
+      ? node.summary
+      : undefined;
+  /** in a comparison the mark is the first thing said out loud, phase second */
+  const spoken = comparing
+    ? `${deltaWord ?? "unchanged"}: ${node.label}, ${node.phase} — ${node.summary}`
+    : `${node.phase} ${node.label}: ${node.summary}`;
+
   return (
     <div
       className="bubble"
-      role="button"
+      role={comparing ? "group" : "button"}
       tabIndex={-1}
-      aria-label={`${node.phase} ${node.label}: ${node.summary}`}
+      aria-label={spoken}
       // the promise is always reachable, even where the card has no room for it
-      title={tier === "min" ? node.summary : undefined}
+      title={tip}
       data-phase={node.phase}
       data-selected={isSelected}
       data-active={active || liveInside}
@@ -52,14 +84,16 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
       data-drift-inside={!hasDrift && driftInside > 0}
       data-holding={holding}
       data-tier={tier}
+      data-delta={deltaStatus ?? undefined}
       data-motion={motion}
-      {...handlers}
+      {...(comparing ? NO_HOLD : handlers)}
     >
       {active || liveInside ? <span className="activity-ring" /> : null}
 
       <div className="bubble-head">
         <span className="phase-dot" />
         <span className="bubble-label">{node.label}</span>
+        {deltaWord === undefined ? null : <span className="badge badge-delta">{deltaWord}</span>}
         {detail && (hasDrift || driftInside > 0) ? (
           <button
             type="button"
@@ -87,7 +121,11 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
         ) : null}
       </div>
 
-      {tier === "min" ? null : nowLine !== null ? (
+      {/* one volatile line, spent on whichever of the two matters here: what the
+          agent is doing now on the live canvas, what moved in a comparison */}
+      {tier === "min" ? null : comparing && changeNote !== undefined ? (
+        <p className="bubble-summary bubble-change">{changeNote}</p>
+      ) : nowLine !== null ? (
         <p className="bubble-summary bubble-status" data-inside={!active}>
           {nowLine}
         </p>
