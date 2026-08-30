@@ -89,6 +89,78 @@ const frames = [];
 let bridge = null;
 let socket = null;
 
+// --- store.applyCanvasCall: gate vetoes interleaved with shared rejections ---
+// In-process (node strips types, same as the bridge child): the index
+// interleaving lives entirely in GraphStore, no wire round-trip needed.
+{
+  const { GraphStore } = await import(new URL("../src/store.ts", import.meta.url));
+  const store = new GraphStore(join(tmpdir(), `vh-smoke-store-${process.pid}`));
+  const mkNode = (id, parentId = null) => ({
+    op: "upsert_node",
+    node: { id, parentId, label: id, summary: `promise of ${id}`, phase: "idea" },
+  });
+  // ops 0 and 4 are gate-vetoed, op 2 is shared-rejected (unknown parent);
+  // ops 1 and 3 are accepted — so shared applyOps sees the rejected op at
+  // admitted index 1 and the store must map it back to original index 2.
+  const gate = (op) =>
+    op.op === "upsert_node" && op.node?.id?.startsWith("vetoed-")
+      ? {
+          code: "onboarding/unknown-coderef",
+          severity: "error",
+          message: `codeRefs path "packages/nope" does not exist`,
+          subject: { path: "/node/codeRefs/0", id: op.node.id, label: op.node.label },
+          evidence: { ref: "packages/nope" },
+          supportedFixes: ["point codeRefs at an existing workspace path"],
+        }
+      : null;
+  const revBefore = store.doc.rev;
+  const outcome = store.applyCanvasCall(
+    { ops: [mkNode("vetoed-a"), mkNode("sm-root"), mkNode("sm-orphan", "no-such-parent"), mkNode("sm-child", "sm-root"), mkNode("vetoed-b")] },
+    gate,
+  );
+  check(
+    "mixed call: accepted ops applied and bumped rev",
+    outcome.changed === true && store.doc.rev === revBefore + 1 &&
+      outcome.text.startsWith(`applied 2 op(s); rev=${store.doc.rev}`) &&
+      store.node("sm-root") !== undefined && store.node("sm-child")?.parentId === "sm-root",
+    outcome.text.split("\n")[0],
+  );
+  check(
+    "mixed call with survivors is not an error result",
+    outcome.isError === false && !store.doc.nodes.some((n) => n.id === "sm-orphan" || n.id.startsWith("vetoed-")),
+  );
+  const mixed = JSON.parse(outcome.text.slice(outcome.text.indexOf("\n") + 1)).rejections;
+  check(
+    "receipts sorted by original op index, both kinds present",
+    mixed.map((r) => r.index).join(",") === "0,2,4" &&
+      mixed.map((r) => r.code).join(",") === "onboarding/unknown-coderef,op/unknown-parent,onboarding/unknown-coderef",
+    JSON.stringify(mixed.map((r) => `${r.index}:${r.code}`)),
+  );
+  const [vetoA, sharedRej, vetoB] = mixed;
+  check(
+    "gate veto receipts absolutized to their op index",
+    vetoA.subject.path === "/ops/0/node/codeRefs/0" && vetoA.subject.id === "vetoed-a" &&
+      vetoB.subject.path === "/ops/4/node/codeRefs/0" && vetoB.subject.id === "vetoed-b",
+    JSON.stringify([vetoA.subject, vetoB.subject]),
+  );
+  check(
+    "shared rejection re-indexed from admitted position (1) to original (2)",
+    sharedRej.index === 2 && sharedRej.subject.path === "/ops/2/node/parentId" &&
+      sharedRej.subject.id === "sm-orphan" && sharedRej.evidence.parentId === "no-such-parent",
+    JSON.stringify({ index: sharedRej.index, path: sharedRej.subject.path }),
+  );
+  check(
+    "every receipt carries the full structured shape",
+    mixed.every(
+      (r) =>
+        typeof r.code === "string" && (r.severity === "error" || r.severity === "warning") &&
+        typeof r.message === "string" && typeof r.subject?.path === "string" &&
+        r.evidence !== null && typeof r.evidence === "object" &&
+        Array.isArray(r.supportedFixes) && r.supportedFixes.length >= 1,
+    ),
+  );
+}
+
 try {
   bridge = spawn(
     process.execPath,
