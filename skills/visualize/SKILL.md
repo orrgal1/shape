@@ -1,5 +1,5 @@
 ---
-name: visual-harness
+name: visualize
 description: Onboard any existing repo onto the visual-harness canvas — bridge + web started (or reused), bridge targeted at the repo, canvas open, onboarding survey triggered. Use when the user says "onboard this repo to visual harness", "open the canvas for this project", "map this project visually", or otherwise wants this project shown on the visual-harness bubble canvas.
 ---
 
@@ -10,7 +10,7 @@ dev server are running, point the bridge at this repo, trigger the onboarding
 survey, and hand the user the canvas URL.
 
 ```bash
-# This skill ships inside the harness repo (at skills/visual-harness/), so the
+# This skill ships inside the harness repo (at skills/visualize/), so the
 # checkout is this skill directory's own repo root. Works through the installed
 # symlink too — chdir resolves it to the real directory:
 HARNESS=$(git -C "$(dirname "<absolute path of this SKILL.md>")" rev-parse --show-toplevel)
@@ -21,7 +21,7 @@ HARNESS=$(git -C "$(dirname "<absolute path of this SKILL.md>")" rev-parse --sho
 From the harness checkout:
 
 ```bash
-ln -s "$PWD/skills/visual-harness" ~/.claude/skills/
+ln -s "$PWD/skills/visualize" ~/.claude/skills/
 ```
 
 ## Steps
