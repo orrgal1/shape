@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { diffSnapshots } from "../../shared/src/delta.ts";
 import { BRIDGE_PORT, BRIDGE_WS_PATH, CANVAS_TOOL_SCHEMA } from "../../shared/src/index.ts";
 import type {
   AgentState,
@@ -32,6 +33,7 @@ import { PREAMBLE } from "./preamble.ts";
 import { RpcClient } from "./rpc.ts";
 import type { RpcFrame } from "./rpc.ts";
 import { pushRecent } from "./recents.ts";
+import { SnapshotStore } from "./snapshots.ts";
 import { composeUtterance } from "./steering.ts";
 import { GraphStore } from "./store.ts";
 import { WsHub } from "./ws.ts";
@@ -150,6 +152,7 @@ class Bridge {
   /** current target project; changed by switch_project */
   #cwd: string;
   #store: GraphStore;
+  #snapshots: SnapshotStore;
   #hub: WsHub | null = null;
   #rpc: RpcClient | null = null;
   #agent: AgentState = "idle";
@@ -171,6 +174,7 @@ class Bridge {
     this.#cli = cli;
     this.#cwd = cli.cwd;
     this.#store = new GraphStore(cli.cwd);
+    this.#snapshots = new SnapshotStore(cli.cwd);
     this.#session = {
       sessionId: null,
       sessionName: null,
@@ -206,13 +210,17 @@ class Bridge {
       session: this.#session,
       agent: this.#agent,
       recentProjects: this.#recents,
+      revisions: await this.#snapshots.list(),
     };
   }
 
   /** Load (or start) the graph for `#cwd`, extract reality, answer targetHasCode. */
   async #openProject(): Promise<void> {
     this.#store = new GraphStore(this.#cwd);
+    this.#snapshots = new SnapshotStore(this.#cwd);
     await this.#store.load();
+    // the rev we opened at must be diffable, not just the ones we go on to make
+    await this.#snapshots.save(this.#store.doc);
     const hasPackages = await this.#startupReality();
     this.#targetHasCode = hasPackages || (await hasSourceCode(this.#cwd));
     this.#session = {
@@ -306,6 +314,11 @@ class Bridge {
       this.#delivering = this.#delivering.then(() => this.#switchProject(msg.path));
       return;
     }
+    if (msg.type === "diff") {
+      // read-only: must not queue behind an in-flight delivery
+      void this.#diff(msg.revA, msg.revB);
+      return;
+    }
     if (msg.type === "onboard") {
       this.#delivering = this.#delivering.then(() => this.#onboard(msg.focus));
       return;
@@ -318,6 +331,17 @@ class Bridge {
     if (rpc === null) return;
     this.#broadcast({ type: "transcript", role: "user", text });
     await this.#send(rpc, composeUtterance(this.#store, text, referent));
+  }
+
+  /** Compare two stored revisions; an unknown rev is the client's mistake. */
+  async #diff(revA: number, revB: number): Promise<void> {
+    const snapshots = this.#snapshots;
+    const [a, b] = await Promise.all([snapshots.load(revA), snapshots.load(revB)]);
+    if (a === null || b === null) {
+      this.#error(`unknown revision ${a === null ? revA : revB}`);
+      return;
+    }
+    this.#broadcast({ type: "delta", delta: diffSnapshots(a, b) });
   }
 
   /**
@@ -390,7 +414,7 @@ class Bridge {
       });
       this.#broadcast({ type: "transcript", role: "tool", text: outcome.transcript });
       if (outcome.changed) {
-        void this.#store.persist();
+        void this.#graphChanged();
         this.#broadcast({ type: "graph", graph: this.#store.doc });
       }
       if (outcome.isError) this.#error(`skeleton synthesis rejected: ${outcome.text}`);
@@ -563,7 +587,7 @@ class Bridge {
     });
     this.#broadcast({ type: "transcript", role: "tool", text: outcome.transcript });
     if (outcome.changed) {
-      void this.#store.persist();
+      void this.#graphChanged();
       this.#broadcast({ type: "graph", graph: this.#store.doc });
     }
   }
@@ -622,7 +646,7 @@ class Bridge {
       const unchanged = JSON.stringify(this.#store.doc.reality) === JSON.stringify(reality);
       if (!unchanged) {
         this.#store.setReality(reality, mod.computeDrift(this.#store.doc, reality));
-        await this.#store.persist();
+        await this.#graphChanged();
       }
       console.error(`[bridge] reality at startup: ${reality.nodes.length} package(s)`);
       return reality.nodes.length > 0;
@@ -644,7 +668,7 @@ class Bridge {
       const drift = mod.computeDrift(this.#store.doc, reality);
       this.#store.setReality(reality, drift);
       this.#realityHead = head;
-      await this.#store.persist();
+      await this.#graphChanged();
       this.#broadcast({ type: "graph", graph: this.#store.doc });
       console.error(`[bridge] reality refreshed at ${head.slice(0, 8)} (${reality.nodes.length} packages)`);
     } catch (err) {
@@ -667,6 +691,22 @@ class Bridge {
     if (next.size === this.#activity.size && [...next].every((id) => this.#activity.has(id))) return;
     this.#activity = next;
     this.#broadcast({ type: "activity", nodeIds: [...next] });
+  }
+
+  /**
+   * The graph's rev advanced: flush it and file a revision snapshot. A snapshot
+   * that actually landed grows the set of revisions clients can diff over, so
+   * they get the fresh list. The store is captured because a project switch may
+   * retarget `#snapshots` before the write settles.
+   */
+  #graphChanged(): Promise<void> {
+    const persisted = this.#store.persist();
+    const snapshots = this.#snapshots;
+    void snapshots.save(this.#store.doc).then(async (info) => {
+      if (info === null) return;
+      this.#broadcast({ type: "revisions", revisions: await snapshots.list() });
+    });
+    return persisted;
   }
 
   #broadcast(msg: ServerMsg): void {

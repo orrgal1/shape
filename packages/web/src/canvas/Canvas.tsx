@@ -11,6 +11,7 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import { useEffect, useMemo } from "react";
+import { buildDeltaView } from "../deltaView.ts";
 import { selectLayer } from "../layer.ts";
 import { useApp } from "../store.ts";
 import { BubbleNode } from "./BubbleNode.tsx";
@@ -34,20 +35,53 @@ const MINIMAP_LIFT = 92;
 const MINIMAP_W = 176;
 const MINIMAP_H = 116;
 
-/** the minimap receives generic nodes, so read the mirrored phase by narrowing */
+/**
+ * The minimap receives generic nodes, so the mirrored fields are read by
+ * narrowing. A comparison mark wins over the phase: the small map has to agree
+ * with the big one about which shapes are the interesting ones.
+ */
 function minimapClass(node: Node): string {
+  const delta = node.data.deltaStatus;
+  if (typeof delta === "string") return `mm-delta-${delta}`;
   const phase = node.data.phase;
   return typeof phase === "string" ? `mm-${phase}` : "mm-reality";
 }
 
+/** stable empty snapshot: a fresh Set per render would re-run layout forever */
+const NO_ACTIVITY: ReadonlySet<string> = new Set<string>();
+
 export function Canvas() {
-  const doc = useApp((state) => state.doc);
+  const liveDoc = useApp((state) => state.doc);
+  const liveActivity = useApp((state) => state.activity);
+  const liveShowReality = useApp((state) => state.showReality);
+  const liveFocus = useApp((state) => state.focus);
+  const delta = useApp((state) => state.delta);
+  const deltaContext = useApp((state) => state.deltaContext);
   const selection = useApp((state) => state.selection);
-  const activity = useApp((state) => state.activity);
-  const showReality = useApp((state) => state.showReality);
-  const focus = useApp((state) => state.focus);
   const select = useApp((state) => state.select);
   const setFocus = useApp((state) => state.setFocus);
+
+  /**
+   * A comparison runs through this very pipeline: one flat synthetic document
+   * instead of the live one, so layer selection, layout, framing, motion and
+   * edge routing are shared rather than reimplemented.
+   *
+   * Three things are switched off on purpose while it is open. Drill-down: the
+   * projection is parentless, so a focus would address nothing and nesting
+   * would hide the very change being examined. The reality column: extracted
+   * code describes now, not a version that already happened. Activity pulses:
+   * nothing is being worked on inside a past version.
+   *
+   * Live `graph` frames keep updating the store while this is open; they cannot
+   * disturb the view, because everything below reads the projection instead.
+   */
+  const view = useMemo(() => (delta === null ? null : buildDeltaView(delta, deltaContext)), [delta, deltaContext]);
+  const comparing = view !== null;
+  const doc = view === null ? liveDoc : view.doc;
+  const focus = view === null ? liveFocus : null;
+  const activity = view === null ? liveActivity : NO_ACTIVITY;
+  const showReality = view === null ? liveShowReality : false;
+  const marks = view === null ? null : view.marks;
 
   // one layer, chosen before layout runs: elk only ever sees the siblings on
   // screen, which is why the layouts stay small and legible however deep the
@@ -85,8 +119,8 @@ export function Canvas() {
   });
 
   const { nodes, edges } = useMemo(
-    () => buildCanvas({ layer, reality: doc.reality, boxes, selection, showReality, entering, leaving }),
-    [layer, doc.reality, boxes, selection, showReality, entering, leaving],
+    () => buildCanvas({ layer, reality: doc.reality, boxes, selection, showReality, entering, leaving, marks }),
+    [layer, doc.reality, boxes, selection, showReality, entering, leaving, marks],
   );
 
   // the dissolve is applied to the pane, never to node positions: React Flow
@@ -112,11 +146,12 @@ export function Canvas() {
       maxZoom={2.4}
       proOptions={{ hideAttribution: true }}
       onNodeClick={(_event, node) => {
-        if (node.type !== "bubble") return;
+        // a bubble in a past version is not a steering target
+        if (comparing || node.type !== "bubble") return;
         select({ kind: "node", id: node.id });
       }}
       onNodeDoubleClick={(_event, node) => {
-        if (node.type !== "bubble") return;
+        if (comparing || node.type !== "bubble") return;
         const children = node.data.childCount;
         if (typeof children !== "number" || children === 0) return;
         setFocus(node.id);
@@ -125,6 +160,7 @@ export function Canvas() {
         // Only a rendered edge that stands for exactly one document relation is
         // a referent. Reality edges and lifted bundles carry a null edgeId, and
         // the bundle's own label button handles drilling instead.
+        if (comparing) return;
         const edgeId = edge.data?.edgeId;
         if (typeof edgeId !== "string") return;
         select({ kind: "edge", id: edgeId });

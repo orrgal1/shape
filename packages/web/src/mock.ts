@@ -10,7 +10,11 @@
 import {
   emptyGraph,
   type ClientMsg,
+  type EntityDelta,
   type GraphDoc,
+  type GraphEdge,
+  type IntentNode,
+  type RevisionInfo,
   type SessionInfo,
   type WorktreeInfo,
 } from "../../shared/src/index.ts";
@@ -118,6 +122,23 @@ const MOCK_RECENTS: readonly string[] = [
   "/Users/you/code/pomo",
   "/Users/you/work/atlas-api",
 ];
+
+const MINUTE_MS = 60_000;
+
+/**
+ * Three saved versions of the fixture canvas, timed relative to page load so the
+ * picker reads the way it would against a real bridge. The newest one is the
+ * graph on screen, which is what lets a comparison against it show the
+ * unchanged remainder as backdrop.
+ */
+function mockRevisions(rev: number): RevisionInfo[] {
+  const now = Date.now();
+  return [
+    { rev: rev - 4, at: new Date(now - 190 * MINUTE_MS).toISOString() },
+    { rev: rev - 2, at: new Date(now - 41 * MINUTE_MS).toISOString() },
+    { rev, at: new Date(now - 4 * MINUTE_MS).toISOString() },
+  ];
+}
 
 export function sampleGraph(): GraphDoc {
   return {
@@ -305,6 +326,7 @@ export function startMock(): () => void {
       session: mockSession(true),
       agent: "idle",
       recentProjects: [...MOCK_RECENTS],
+      revisions: [],
     });
     // after `hello`, which would otherwise report a live bridge
     store.setConn("mock");
@@ -318,6 +340,7 @@ export function startMock(): () => void {
       session: mockSession(true),
       agent: "idle",
       recentProjects: [...MOCK_RECENTS],
+      revisions: mockRevisions(7),
     });
     store.setConn("mock");
     store.ingest({ type: "activity", nodeIds: ["web-canvas"] });
@@ -330,6 +353,7 @@ export function startMock(): () => void {
     session: mockSession(false),
     agent: "streaming",
     recentProjects: [...MOCK_RECENTS],
+    revisions: mockRevisions(41),
   });
   store.setConn("mock");
   store.ingest({
@@ -395,6 +419,47 @@ export function mockSend(msg: ClientMsg): void {
     // a real bridge answers with a fresh hello; the mock has one project, so it
     // reports what it would have done instead of faking a second graph
     store.pushError(`switch_project "${msg.path}" needs the bridge — mock mode has one fixture project`);
+    return;
+  }
+  if (msg.type === "diff") {
+    // There is no snapshot store here, so the mock fabricates a plausible answer
+    // about the graph on screen: its first bubble was reworded and re-phased, its
+    // second bubble is new, its first relation is new, and one bubble plus one
+    // relation that no longer exist were dropped. Enough to exercise all three
+    // treatments, honest about being fiction like the rest of this file.
+    const doc = store.doc;
+    const first = doc.nodes[0];
+    const second = doc.nodes[1];
+    const firstEdge = doc.edges[0];
+    const nodes: EntityDelta<IntentNode> = { added: [], removed: [], changed: [] };
+    const edges: EntityDelta<GraphEdge> = { added: [], removed: [], changed: [] };
+
+    if (second !== undefined) nodes.added.push(second);
+    if (first !== undefined) {
+      nodes.changed.push({
+        before: { ...first, phase: "idea", summary: "An earlier, vaguer version of the same promise." },
+        after: first,
+      });
+    }
+    nodes.removed.push({
+      id: "paper-backup",
+      parentId: null,
+      label: "Paper backup",
+      summary: "Kept a printable copy of every note for the field.",
+      phase: "concept",
+    });
+    if (firstEdge !== undefined) edges.added.push(firstEdge);
+    if (first !== undefined) {
+      edges.removed.push({
+        id: "paper-backup--first",
+        source: "paper-backup",
+        target: first.id,
+        kind: "relates",
+        label: "printed from",
+      });
+    }
+
+    store.ingest({ type: "delta", delta: { revA: msg.revA, revB: msg.revB, nodes, edges } });
     return;
   }
   const where = msg.referent === null ? "whole project" : `${msg.referent.kind} ${msg.referent.id}`;

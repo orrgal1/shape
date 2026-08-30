@@ -54,6 +54,13 @@ export interface LayerEdge {
    * exists and offering one would be a lie.
    */
   edgeId: string | null;
+  /**
+   * Every document relation this line stands for — one id normally, several for
+   * a bundle. `parts` is the prose version for a tooltip; this is the machine
+   * one, so a renderer can look each relation up (the comparison view marks a
+   * line by what happened to the relations inside it).
+   */
+  edgeIds: string[];
   /** true when the line is drawn between bubbles that are not its real endpoints */
   lifted: boolean;
   /** document relations collapsed into this line; 1 unless it is a bundle */
@@ -212,6 +219,7 @@ export function selectLayer({ doc, focus, activity }: LayerInput): Layer {
         kind: only.kind,
         label: only.label ?? null,
         edgeId: only.id,
+        edgeIds: [only.id],
         lifted: only.source !== group.source || only.target !== group.target,
         count: 1,
         parts,
@@ -226,6 +234,7 @@ export function selectLayer({ doc, focus, activity }: LayerInput): Layer {
       kind: kindOf(group.edges),
       label: null,
       edgeId: null,
+      edgeIds: group.edges.map((edge) => edge.id),
       // a bundle is only an approximation of WHERE if something it collapses
       // actually lives further down; two relations between this very pair are
       // drawn exactly where they belong, so they get a solid stroke

@@ -1,9 +1,11 @@
 import { ReactFlowProvider } from "@xyflow/react";
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { WorktreeInfo } from "../../shared/src/index.ts";
+import { Compare } from "./Compare.tsx";
 import { SidePanel } from "./SidePanel.tsx";
 import { SteeringBar } from "./SteeringBar.tsx";
 import { Canvas } from "./canvas/Canvas.tsx";
+import { useDismissable } from "./dismiss.ts";
 import { selectLayer } from "./layer.ts";
 import { isMockMode, startMock } from "./mock.ts";
 import { useApp, type ConnStatus } from "./store.ts";
@@ -57,33 +59,6 @@ function basename(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
   const cut = trimmed.lastIndexOf("/");
   return cut === -1 ? trimmed : trimmed.slice(cut + 1);
-}
-
-/**
- * Dismiss an open pop-up on outside pointerdown or Escape. The trigger button
- * lives inside the returned ref's subtree, so its own click never counts as
- * "outside" — no close-then-reopen double-toggle on the same click.
- */
-function useDismissable(open: boolean, setOpen: (open: boolean) => void): RefObject<HTMLDivElement | null> {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: PointerEvent): void => {
-      const root = ref.current;
-      if (root !== null && event.target instanceof Node && root.contains(event.target)) return;
-      setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open, setOpen]);
-  return ref;
 }
 
 /**
@@ -269,9 +244,11 @@ function Breadcrumb() {
   const focus = useApp((state) => state.focus);
   const activity = useApp((state) => state.activity);
   const setFocus = useApp((state) => state.setFocus);
+  // a comparison is flat and has no focus, so a trail would address nothing
+  const comparing = useApp((state) => state.delta !== null);
 
   const trail = useMemo(() => selectLayer({ doc, focus, activity }).trail, [doc, focus, activity]);
-  if (trail.length === 0) return null;
+  if (comparing || trail.length === 0) return null;
 
   return (
     <nav className="crumbs" aria-label="breadcrumb">
@@ -299,6 +276,9 @@ function Header() {
   const conn = useApp((state) => state.conn);
   const session = useApp((state) => state.session);
   const doc = useApp((state) => state.doc);
+  // this line always describes the project as it stands, which needs saying out
+  // loud once the canvas is showing something other than that
+  const comparing = useApp((state) => state.delta !== null);
 
   const model = session?.model;
   return (
@@ -327,7 +307,7 @@ function Header() {
         </span>
       )}
       <span className="brand-meta">
-        rev {doc.rev} · {doc.nodes.length} bubbles
+        {comparing ? "now · " : null}rev {doc.rev} · {doc.nodes.length} bubbles
       </span>
       <Breadcrumb />
     </header>
@@ -341,11 +321,14 @@ function StageTools() {
   const hasNodes = useApp((state) => state.doc.nodes.length > 0);
   const errors = useApp((state) => state.errors);
   const dismissError = useApp((state) => state.dismissError);
+  const comparing = useApp((state) => state.delta !== null);
 
   return (
     <div className="stage-tools">
-      {/* both of these explain a graph; before one exists they are just clutter */}
-      {hasNodes ? (
+      <Compare />
+      {/* the phase colours and the code layer both describe the project as it is
+          now; inside a comparison they would be answering a question nobody asked */}
+      {hasNodes && !comparing ? (
         <>
           <button
             type="button"
@@ -460,10 +443,12 @@ function FocusCard() {
   const activity = useApp((state) => state.activity);
   const select = useApp((state) => state.select);
   const setFocus = useApp((state) => state.setFocus);
+  // the canvas flattens a comparison, so there is no bubble to sit above it
+  const comparing = useApp((state) => state.delta !== null);
 
   const layer = useMemo(() => selectLayer({ doc, focus, activity }), [doc, focus, activity]);
   const node = layer.focus;
-  if (node === null) return null;
+  if (comparing || node === null) return null;
 
   const parent = node.parentId;
   return (
@@ -499,6 +484,7 @@ function FocusCard() {
 
 export function App() {
   const hasNodes = useApp((state) => state.doc.nodes.length > 0);
+  const comparing = useApp((state) => state.delta !== null);
 
   useEffect(() => {
     if (isMockMode()) return startMock();
@@ -515,8 +501,9 @@ export function App() {
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
         if (target.value.length > 0) return;
       }
-      const { focus, doc, setFocus } = useApp.getState();
-      if (focus === null) return;
+      const { focus, doc, delta, setFocus } = useApp.getState();
+      // Backspace is drill-up: a comparison is flat and has nothing to drill into
+      if (focus === null || delta !== null) return;
       event.preventDefault();
       const current = doc.nodes.find((node) => node.id === focus);
       setFocus(current?.parentId ?? null);
@@ -539,7 +526,7 @@ export function App() {
             <Canvas />
           </ReactFlowProvider>
         </div>
-        {hasNodes ? null : <EmptyState />}
+        {hasNodes || comparing ? null : <EmptyState />}
         <SteeringBar />
       </div>
       <SidePanel />

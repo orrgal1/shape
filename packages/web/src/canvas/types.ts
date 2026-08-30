@@ -1,5 +1,6 @@
 import type { Edge, Node } from "@xyflow/react";
 import type { EdgeKind, IntentNode, Phase } from "../../../shared/src/index.ts";
+import type { DeltaStatus } from "../deltaView.ts";
 import type { InsideRef } from "../layer.ts";
 import type { EdgeGeom } from "./geometry.ts";
 
@@ -21,6 +22,14 @@ export interface BubbleData extends Record<string, unknown> {
   descendantCount: number;
   /** entry and exit animation state, driven by the motion choreography */
   motion: "enter" | "leave" | "none";
+  /**
+   * Comparison view only: which side of the comparison this bubble is on, or
+   * null when the canvas is live. It overrides the phase hue while set — in a
+   * comparison, what moved has to read before what lifecycle stage it is in.
+   */
+  deltaStatus: DeltaStatus | null;
+  /** plain-English lines about a changed bubble, for its tooltip */
+  deltaNotes: readonly string[];
 }
 
 export type BubbleNodeType = Node<BubbleData, "bubble">;
@@ -66,6 +75,10 @@ export interface RelData extends Record<string, unknown> {
   parts: string[];
   /** drill target when a bundle is clicked: the source side of the bundle */
   drillId: string | null;
+  /** comparison view only: which side of the comparison this line is on */
+  deltaStatus: DeltaStatus | null;
+  /** plain-English lines about a changed relation, for its tooltip */
+  deltaNotes: readonly string[];
 }
 
 export type RelEdge = Edge<RelData, "rel">;

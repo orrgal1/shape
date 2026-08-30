@@ -44,6 +44,9 @@ export function SteeringBar() {
   const selection = useApp((state) => state.selection);
   const doc = useApp((state) => state.doc);
   const agent = useApp((state) => state.agent);
+  // A past version cannot be steered: the agent works on the project as it is,
+  // and nothing on a comparison canvas is a legitimate referent.
+  const comparing = useApp((state) => state.delta !== null);
   const select = useApp((state) => state.select);
   const [text, setText] = useState("");
   const input = useRef<HTMLInputElement>(null);
@@ -75,7 +78,7 @@ export function SteeringBar() {
   };
 
   return (
-    <div className="steer" data-armed={selection !== null}>
+    <div className="steer" data-armed={selection !== null && !comparing} data-suspended={comparing}>
       <span className="referent" data-kind={selection?.kind ?? "none"} data-phase={chip.phase ?? ""} title={chip.hint}>
         {chip.kind === null ? null : <span className="referent-kind">{chip.kind}</span>}
         <span className="referent-id mono">{chip.id}</span>
@@ -92,10 +95,13 @@ export function SteeringBar() {
         value={text}
         autoFocus
         spellCheck={false}
+        disabled={comparing}
         placeholder={
-          selection === null
-            ? "Say what to build, or click a bubble to address one…"
-            : `Steer ${chip.id} — say what should change…`
+          comparing
+            ? "Looking at an older version — go back to now to steer."
+            : selection === null
+              ? "Say what to build, or click a bubble to address one…"
+              : `Steer ${chip.id} — say what should change…`
         }
         aria-label="steering utterance"
         onChange={(event) => setText(event.target.value)}
@@ -112,7 +118,9 @@ export function SteeringBar() {
         }}
       />
 
-      <span className="steer-hint">{ready ? "enter to send" : "hold a bubble to dictate"}</span>
+      <span className="steer-hint">
+        {comparing ? "comparing versions" : ready ? "enter to send" : "hold a bubble to dictate"}
+      </span>
 
       {busy ? (
         <button type="button" className="btn btn-abort" onClick={() => send({ type: "abort" })}>
@@ -120,7 +128,7 @@ export function SteeringBar() {
         </button>
       ) : null}
 
-      <button type="button" className="btn btn-send" onClick={commit} disabled={!ready}>
+      <button type="button" className="btn btn-send" onClick={commit} disabled={!ready || comparing}>
         Send
       </button>
     </div>

@@ -2,8 +2,10 @@ import { create } from "zustand";
 import {
   emptyGraph,
   type AgentState,
+  type GraphDelta,
   type GraphDoc,
   type Referent,
+  type RevisionInfo,
   type ServerMsg,
   type SessionInfo,
 } from "../../shared/src/index.ts";
@@ -45,6 +47,19 @@ export interface AppState {
   focus: string | null;
   /** project paths offered by the bridge in `hello`, most recent first */
   recentProjects: string[];
+  /** saved versions of this project's canvas the bridge can compare, oldest first */
+  revisions: RevisionInfo[];
+  /** the pair a comparison was asked about; set the moment the request goes out */
+  compare: { revA: number; revB: number } | null;
+  /** the answer on screen; null means the canvas is showing the project as it is now */
+  delta: GraphDelta | null;
+  /**
+   * The live graph as it stood when the answer landed, kept only when it IS the
+   * after side of the comparison. Frozen on purpose: a `graph` frame arriving
+   * later must not quietly rewrite what a comparison claims, and a graph that
+   * has moved past `revB` is no longer evidence about `revB`.
+   */
+  deltaContext: GraphDoc | null;
 
   /** single funnel for everything arriving from the bridge */
   ingest: (msg: ServerMsg) => void;
@@ -52,6 +67,8 @@ export interface AppState {
   select: (referent: Referent | null) => void;
   toggleReality: () => void;
   setFocus: (nodeId: string | null) => void;
+  beginCompare: (revA: number, revB: number) => void;
+  exitCompare: () => void;
   appendTranscript: (role: TranscriptRole, text: string) => void;
   pushError: (message: string) => void;
   dismissError: (seq: number) => void;
@@ -79,6 +96,10 @@ export const useApp = create<AppState>((set, get) => ({
   showReality: true,
   focus: null,
   recentProjects: [],
+  revisions: [],
+  compare: null,
+  delta: null,
+  deltaContext: null,
 
   ingest: (msg) => {
     switch (msg.type) {
@@ -91,12 +112,16 @@ export const useApp = create<AppState>((set, get) => ({
           doc: msg.graph,
           session: msg.session,
           recentProjects: msg.recentProjects,
+          revisions: msg.revisions,
           agent: msg.agent,
           conn: "live",
           selection: null,
           focus: null,
           transcript: [],
           activity: new Set<string>(),
+          compare: null,
+          delta: null,
+          deltaContext: null,
         });
         return;
       case "graph":
@@ -116,7 +141,27 @@ export const useApp = create<AppState>((set, get) => ({
       case "transcript":
         get().appendTranscript(msg.role, msg.text);
         return;
+      case "revisions":
+        set({ revisions: msg.revisions });
+        return;
+      case "delta": {
+        // The answer is broadcast to every attached browser, so a client that
+        // asked nothing is not yanked into someone else's comparison.
+        const asked = get().compare;
+        if (asked === null || asked.revA !== msg.delta.revA || asked.revB !== msg.delta.revB) return;
+        const live = get().doc;
+        set({
+          delta: msg.delta,
+          deltaContext: live.rev === msg.delta.revB ? live : null,
+          // nothing on a past version is a legitimate steering target
+          selection: null,
+        });
+        return;
+      }
       case "error":
+        // an unknown revision is answered with an error frame, so a request
+        // still waiting for its answer is what just failed
+        if (get().delta === null) set({ compare: null });
         get().pushError(msg.message);
         return;
     }
@@ -129,6 +174,10 @@ export const useApp = create<AppState>((set, get) => ({
   toggleReality: () => set((s) => ({ showReality: !s.showReality })),
 
   setFocus: (focus) => set({ focus }),
+
+  beginCompare: (revA, revB) => set({ compare: { revA, revB }, delta: null, deltaContext: null }),
+
+  exitCompare: () => set({ compare: null, delta: null, deltaContext: null, selection: null }),
 
   appendTranscript: (role, text) =>
     set((s) => {
