@@ -106,5 +106,18 @@ user-global `~/.shape/` with `SHAPE_HOME` override).
 Shape is standalone: no coupling to any dictation vendor (the vendor-specific press-and-hold
 URI-scheme path is deleted) or workspace manager (herdr). Voice input is just any dictation
 tool typing into the focused steering input. Future integrations arrive only as optional,
-configurable adapters — never as dependencies. `omp` remains the harness backend behind the
-bridge, unchanged.
+configurable adapters — never as dependencies.
+
+**Backend neutrality (user, same day).** Shape is not coupled to any model backend either —
+not omp, not any CLI agent, not any gateway. The bridge is to talk to a `Backend` interface
+and the concrete backend is chosen by configuration. Two adapter families: CLI agents (omp,
+opencode, Claude Code, Cursor CLI, Codex CLI, ...) and direct model access through gateway
+keys (OpenRouter, Vercel AI Gateway, OpenCode Go/Zen, ...) where Shape runs the agent loop
+itself. Today the bridge still hard-wires `omp --mode rpc` (packages/bridge/src/rpc.ts +
+the frame switch in index.ts); that is the first adapter to extract, not the architecture.
+
+Same day: published public at github.com/orrgal1/shape; mock target project
+github.com/orrgal1/shape-playground ("Ledgerly", pnpm/TS monorepo, 9 packages, branches
+`feature/reminders` (worktree), `experiment/sqlite-store`, `spike/graphql`). First real
+onboarding of it surfaced and fixed: pnpm 11 forwarding `--` into the bridge argv, and the
+side rail growing the shell grid row (canvas dragged offscreen by a long transcript).

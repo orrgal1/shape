@@ -162,8 +162,11 @@ layer appears at first commit and drift renders. One ecosystem (TS monorepo), on
   shape of the product, and Shape is that view. It is standalone: no coupling to any dictation
   vendor (the ladder above is history) or workspace manager (herdr). Voice input is any dictation
   tool typing into the focused steering input; integrations may return later only as optional,
-  configurable adapters, never as dependencies. `omp` remains the harness backend behind the
-  bridge.
+  configurable adapters, never as dependencies. The same holds for the model backend: Shape
+  is not coupled to omp or any other agent CLI or gateway — the bridge talks to a `Backend`
+  interface and configuration picks the adapter (CLI agents such as omp, opencode, Claude
+  Code, Cursor CLI, Codex CLI; or gateway keys such as OpenRouter, Vercel AI Gateway,
+  OpenCode Go/Zen).
 
 ## Client decision (2026-08-28): browser first, TUI later at most
 
