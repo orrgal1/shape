@@ -63,6 +63,7 @@ function parseArgv(argv: string[]): Cli {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const next = argv[i + 1];
+    if (arg === "--") continue; // pnpm 11 forwards the separator verbatim
     if (arg === "--cwd" && next !== undefined) {
       cwd = resolve(next);
       i++;

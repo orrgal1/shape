@@ -1789,6 +1789,8 @@ kbd {
   position: relative;
   display: flex;
   flex-direction: column;
+  /* grid item: without this, a long transcript grows the shell row and drags the canvas offscreen */
+  min-height: 0;
   width: 344px;
   border-left: 1px solid var(--line);
   background: var(--surface);
