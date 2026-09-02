@@ -9,7 +9,7 @@
  *  - liveness bubbling: activity, drift and failure on hidden descendants mark
  *    the visible ancestor that contains them.
  */
-import type { EdgeKind, GraphDoc, GraphEdge, IntentNode, Phase } from "../../shared/src/index.ts";
+import type { EdgeKind, GraphDoc, GraphEdge, IntentNode, Phase, RealityLayer } from "../../shared/src/index.ts";
 
 /** guards against a malformed parent chain looping forever */
 const MAX_NESTING = 32;
@@ -245,4 +245,42 @@ export function selectLayer({ doc, focus, activity }: LayerInput): Layer {
   }
 
   return { focus: focusNode, trail, nodes, edges, liftOf, total: doc.nodes.length, offLayer };
+}
+
+/**
+ * The reality ghosts still worth drawing.
+ *
+ * A ghost's whole job is to say "this exists in the code and nothing on the
+ * canvas admits it". Once a bubble names the package in its `codeRefs` the
+ * ghost has nothing left to say: the bubble is already on screen, and whatever
+ * disagrees between the two is the drift glow's story, not a second card's.
+ * Ghosting claimed packages anyway is what made the band eat half the width of
+ * a nine-package project and squeeze the bubbles it was meant to annotate.
+ *
+ * The claim test is the same prefix rule the bridge attributes activity with
+ * (bridge/src/index.ts), so a package claimed for the purpose of the pulse is
+ * claimed here too. Depth is deliberately ignored: a hidden child's `codeRefs`
+ * claim just as well, because its drift bubbles up to the bubble on screen.
+ */
+export function selectReality(doc: GraphDoc): RealityLayer {
+  const prefixes: string[] = [];
+  for (const node of doc.nodes) {
+    for (const ref of node.codeRefs ?? []) {
+      const prefix = ref.replace(/^\.\//, "").replace(/\/+$/, "");
+      if (prefix.length > 0) prefixes.push(prefix);
+    }
+  }
+
+  const unclaimed = doc.reality.nodes.filter(
+    (node) => !prefixes.some((prefix) => node.dir === prefix || node.dir.startsWith(`${prefix}/`)),
+  );
+  // identity is preserved when nothing is claimed: layout is memoised on it
+  if (unclaimed.length === doc.reality.nodes.length) return doc.reality;
+
+  const kept = new Set(unclaimed.map((node) => node.id));
+  return {
+    ...doc.reality,
+    nodes: unclaimed,
+    edges: doc.reality.edges.filter((edge) => kept.has(edge.source) && kept.has(edge.target)),
+  };
 }

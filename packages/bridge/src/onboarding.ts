@@ -5,8 +5,9 @@
 
 import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import type { CanvasOp, GraphDoc, RealityLayer } from "../../shared/src/index.ts";
+import { gitFileIndexSync, gitIndexHas, type GitFileIndex } from "./reality.ts";
 import type { GateVeto, OpGate } from "./store.ts";
 
 /** Verbatim from understand.md — the bar a bubble must clear to exist. */
@@ -148,9 +149,21 @@ export async function synthesizeSkeleton(cwd: string, reality: RealityLayer): Pr
 
 /**
  * Onboarding validation mode: for the duration of the survey turn, structure the
- * agent cannot point at is rejected.
+ * agent cannot point at is rejected — and "pointing at it" means git tracks it.
+ * A gitignored leftover directory (a `packages/x/` holding only `node_modules`
+ * after a branch switch) exists on disk but is not part of the project, so it
+ * cannot back a bubble. Outside a git repo, existence on disk is all we have.
+ *
+ * The index is read at most once per gate (i.e. once per survey turn).
  */
 export function onboardingOpGate(cwd: string): OpGate {
+  let index: GitFileIndex | null | undefined;
+  const resolvesInProject = (ref: string): boolean => {
+    if (index === undefined) index = gitFileIndexSync(cwd);
+    if (index === null) return existsSync(resolve(cwd, ref));
+    return gitIndexHas(index, relative(cwd, resolve(cwd, ref)));
+  };
+
   return (op): GateVeto | null => {
     if (op?.op !== "upsert_node") return null;
     const node = op.node;
@@ -175,15 +188,15 @@ export function onboardingOpGate(cwd: string): OpGate {
       };
     }
     for (const [i, ref] of refs.entries()) {
-      if (!existsSync(resolve(cwd, ref))) {
+      if (!resolvesInProject(ref)) {
         return {
           code: "onboarding/unknown-coderef",
           severity: "error",
-          message: `onboarding survey: node "${String(node.id)}" codeRefs path "${ref}" does not exist under the target project`,
+          message: `onboarding survey: node "${String(node.id)}" codeRefs path "${ref}" does not exist in this project — git tracks no file there (a leftover ignored directory does not count)`,
           subject: { ...subject, path: `/node/codeRefs/${i}` },
           evidence: { ref },
           supportedFixes: [
-            "use a path that exists under the target project (workspace-relative)",
+            "use a path git tracks under the target project (workspace-relative)",
             "drop the node if its code does not exist",
           ],
         };
@@ -232,6 +245,9 @@ export function composeSurveyPrompt(doc: GraphDoc, focus: string | undefined): s
     "   with plain-language labels; never add an edge to mean \"contains\".",
     "7. Validation is armed for this turn: every upsert_node MUST carry codeRefs that resolve to",
     "   paths that exist in this project. Ops without them are rejected with a reason.",
+    "8. Only what git tracks counts as real: a directory git ignores — typically a leftover folder",
+    "   holding nothing but installed dependencies after a branch switch — is not part of this",
+    "   project, so never survey it and never point codeRefs at it.",
     "",
     skeleton.length > 0 ? `Mechanical skeleton (${doc.nodes.length} bubble(s)) — package names and placeholder summaries below are machine-generated and deliberately technical; replace every one of them with a plain-English promise:` : "No workspace packages were detected — build the skeleton yourself from what you read, under the same codeRefs and plain-English rules.",
     ...skeleton,

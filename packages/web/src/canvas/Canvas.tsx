@@ -12,7 +12,8 @@ import {
 } from "@xyflow/react";
 import { useEffect, useMemo } from "react";
 import { buildDeltaView } from "../deltaView.ts";
-import { selectLayer } from "../layer.ts";
+import { selectLayer, selectReality } from "../layer.ts";
+import { STRIP_ID } from "../layout.ts";
 import { useApp } from "../store.ts";
 import { BubbleNode } from "./BubbleNode.tsx";
 import { GhostNode, StripNode } from "./GhostNode.tsx";
@@ -87,21 +88,26 @@ export function Canvas() {
   // screen, which is why the layouts stay small and legible however deep the
   // decomposition goes
   const layer = useMemo(() => selectLayer({ doc, focus, activity }), [doc, focus, activity]);
+  // a package a bubble already claims is not news; ghosting it anyway is what
+  // filled half the canvas on a nine-package project
+  const reality = useMemo(() => selectReality(doc), [doc]);
   // quantised so a few pixels of resize never re-run layout, while a genuinely
   // different window shape does: spread arrangements follow the aspect so a tall
   // window gets a tall triangle and a wide one a wide triangle
   const paneWidth = useStore((state) => state.width);
   const paneHeight = useStore((state) => state.height);
   const aspect = paneHeight > 0 ? Math.round((paneWidth / paneHeight) * 10) / 10 : 1.4;
-  const input = useMemo(() => ({ layer, reality: doc.reality, aspect }), [layer, doc.reality, aspect]);
+  const input = useMemo(() => ({ layer, reality, aspect }), [layer, reality, aspect]);
 
-  // with the reality column hidden the authored bubbles are the whole picture;
-  // with it shown, framing everything costs almost no zoom because the
-  // composition is height-constrained
-  const scope = useMemo(
-    () => (showReality ? undefined : layer.nodes.map((entry) => entry.node.id)),
-    [showReality, layer.nodes],
-  );
+  // Framing covers exactly what is drawn. With the reality column hidden — or
+  // fully claimed, so there is nothing left to draw — the authored bubbles are
+  // the whole picture, and boxes laid out for cards nobody renders must not pull
+  // the viewport towards empty space.
+  const scope = useMemo(() => {
+    const ids = layer.nodes.map((entry) => entry.node.id);
+    if (!showReality || reality.nodes.length === 0) return ids;
+    return [...ids, STRIP_ID, ...reality.nodes.map((node) => node.id)];
+  }, [showReality, layer.nodes, reality.nodes]);
 
   /**
    * Everything on screen is always framed. The viewport is not a separate
@@ -119,8 +125,8 @@ export function Canvas() {
   });
 
   const { nodes, edges } = useMemo(
-    () => buildCanvas({ layer, reality: doc.reality, boxes, selection, showReality, entering, leaving, marks }),
-    [layer, doc.reality, boxes, selection, showReality, entering, leaving, marks],
+    () => buildCanvas({ layer, reality, boxes, selection, showReality, entering, leaving, marks }),
+    [layer, reality, boxes, selection, showReality, entering, leaving, marks],
   );
 
   // the dissolve is applied to the pane, never to node positions: React Flow

@@ -1,0 +1,551 @@
+{
+  "rev": 11,
+  "nodes": [
+    {
+      "id": "ledgerly-api",
+      "parentId": null,
+      "label": "the service",
+      "summary": "The way apps get things done: create groups, log what someone paid, ask who owes whom — open to anyone who can reach it, with no sign-in at all.",
+      "phase": "built",
+      "codeRefs": [
+        "apps/api"
+      ],
+      "kind": "api"
+    },
+    {
+      "id": "ledgerly-cli",
+      "parentId": null,
+      "label": "operator tool",
+      "summary": "Lets an operator type commands to create sample data, load a batch of expenses from a spreadsheet file, and print who owes whom.",
+      "phase": "built",
+      "codeRefs": [
+        "apps/cli"
+      ],
+      "kind": "service"
+    },
+    {
+      "id": "ledgerly-web",
+      "parentId": null,
+      "label": "web page",
+      "summary": "Shows people their groups, every expense, each person's balance and the suggested payments — but only lets them look, plus one button to send the settle-up summary.",
+      "phase": "built",
+      "codeRefs": [
+        "apps/web"
+      ],
+      "kind": "ui"
+    },
+    {
+      "id": "ledgerly-worker",
+      "parentId": null,
+      "label": "background helper",
+      "summary": "Runs unattended on a repeating timer, nudging only people who genuinely still owe money and mailing out group balance summaries.",
+      "phase": "built",
+      "codeRefs": [
+        "apps/worker"
+      ],
+      "kind": "service"
+    },
+    {
+      "id": "ledgerly-config",
+      "parentId": null,
+      "label": "settings",
+      "summary": "Gives every part of the system a working set of choices out of the box, and refuses to start on a setting it knows is nonsense.",
+      "phase": "built",
+      "codeRefs": [
+        "packages/config"
+      ],
+      "kind": "service"
+    },
+    {
+      "id": "ledgerly-domain",
+      "parentId": null,
+      "label": "fairness rules",
+      "summary": "The single authority on shared money: it decides what each person owes, who is behind, and the shortest list of payments that squares everyone up.",
+      "phase": "built",
+      "codeRefs": [
+        "packages/domain"
+      ],
+      "kind": "service"
+    },
+    {
+      "id": "ledgerly-notify",
+      "parentId": null,
+      "label": "messages out",
+      "summary": "Turns balances and settle-up plans into plain readable notices and delivers them to the screen or a log file, standing in for real email.",
+      "phase": "built",
+      "codeRefs": [
+        "packages/notify"
+      ],
+      "kind": "service"
+    },
+    {
+      "id": "ledgerly-queue",
+      "parentId": null,
+      "label": "waiting work",
+      "summary": "Holds work that should happen soon, retrying a few times with growing pauses when it fails, but forgets everything if the program stops.",
+      "phase": "built",
+      "codeRefs": [
+        "packages/queue"
+      ],
+      "kind": "queue"
+    },
+    {
+      "id": "ledgerly-store",
+      "parentId": null,
+      "label": "saved records",
+      "summary": "Keeps every group and expense safely on disk, and promises a reader never sees a half-written file even if the machine dies mid-save.",
+      "phase": "built",
+      "codeRefs": [
+        "packages/store"
+      ],
+      "kind": "store"
+    },
+    {
+      "id": "store-safe-write",
+      "parentId": "ledgerly-store",
+      "label": "crash-proof saving",
+      "summary": "Writes changes to a side copy first and only then swaps it in, so an interrupted save can never corrupt the records.",
+      "phase": "built",
+      "kind": "store",
+      "codeRefs": [
+        "packages/store/src/atomic.ts",
+        "packages/store/src/json-file-store.ts"
+      ]
+    },
+    {
+      "id": "store-scratch",
+      "parentId": "ledgerly-store",
+      "label": "throwaway copy",
+      "summary": "Offers an identical set of records that lives only in memory and vanishes on exit, so tests and trial runs never touch real data.",
+      "phase": "built",
+      "kind": "store",
+      "codeRefs": [
+        "packages/store/src/memory-store.ts"
+      ]
+    },
+    {
+      "id": "domain-splits",
+      "parentId": "ledgerly-domain",
+      "label": "dividing a bill",
+      "summary": "Divides any bill evenly, by exact amounts, or by percentage shares, and guarantees the parts always add back up to the original with no stray penny lost or invented.",
+      "phase": "built",
+      "kind": "service",
+      "codeRefs": [
+        "packages/domain/src/split",
+        "packages/domain/src/money.ts"
+      ]
+    },
+    {
+      "id": "domain-settlement",
+      "parentId": "ledgerly-domain",
+      "label": "who pays whom",
+      "summary": "Turns a tangle of debts into the fewest possible payments, and can prove afterwards that following them leaves everybody square.",
+      "phase": "built",
+      "kind": "service",
+      "codeRefs": [
+        "packages/domain/src/settlement.ts",
+        "packages/domain/src/balances.ts"
+      ]
+    },
+    {
+      "id": "api-no-auth",
+      "parentId": "ledgerly-api",
+      "label": "no door lock",
+      "summary": "There is no sign-in and no permission check anywhere: every request is trusted and any caller can read or delete any group's money records.",
+      "phase": "built",
+      "kind": "security",
+      "codeRefs": [
+        "apps/api/src/server.ts",
+        "apps/api/src/router.ts",
+        "apps/api/src/context.ts"
+      ]
+    },
+    {
+      "id": "web-read-only",
+      "parentId": "ledgerly-web",
+      "label": "look, don't touch",
+      "summary": "The screens have no way to add a group, log an expense, or change members, so all real data entry has to happen through the command-line tool.",
+      "phase": "built",
+      "kind": "ui",
+      "codeRefs": [
+        "apps/web/src/components/ExpenseList.tsx",
+        "apps/web/src/components/BalanceTable.tsx",
+        "apps/web/src/pages/GroupsPage.tsx"
+      ]
+    },
+    {
+      "id": "worker-recheck",
+      "parentId": "ledgerly-worker",
+      "label": "checks before nagging",
+      "summary": "Recalculates a person's balance at the moment of sending and stays silent if they have already settled up, so nobody is chased for a debt they paid.",
+      "phase": "built",
+      "kind": "service",
+      "codeRefs": [
+        "apps/worker/src/jobs/reminder.ts"
+      ]
+    },
+    {
+      "id": "worker-snapshot-gap",
+      "parentId": "ledgerly-worker",
+      "label": "summaries aren't nightly",
+      "summary": "Group summaries are sent once when the helper starts up rather than every night, because nothing in the system tracks a calendar or time of day.",
+      "phase": "built",
+      "kind": "service",
+      "codeRefs": [
+        "apps/worker/src/jobs/snapshot.ts",
+        "apps/worker/src/main.ts"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "ledgerly-api--ledgerly-config",
+      "source": "ledgerly-api",
+      "target": "ledgerly-config",
+      "kind": "depends",
+      "label": "reads where to listen"
+    },
+    {
+      "id": "ledgerly-api--ledgerly-domain",
+      "source": "ledgerly-api",
+      "target": "ledgerly-domain",
+      "kind": "depends",
+      "label": "defers every money decision to the rules"
+    },
+    {
+      "id": "ledgerly-api--ledgerly-notify",
+      "source": "ledgerly-api",
+      "target": "ledgerly-notify",
+      "kind": "depends",
+      "label": "prepares a way to send notices"
+    },
+    {
+      "id": "ledgerly-api--ledgerly-queue",
+      "source": "ledgerly-api",
+      "target": "ledgerly-queue",
+      "kind": "dataflow",
+      "label": "adds nudges and summary requests to the pile"
+    },
+    {
+      "id": "ledgerly-cli--ledgerly-config",
+      "source": "ledgerly-cli",
+      "target": "ledgerly-config",
+      "kind": "depends",
+      "label": "reads where the records live"
+    },
+    {
+      "id": "ledgerly-cli--ledgerly-domain",
+      "source": "ledgerly-cli",
+      "target": "ledgerly-domain",
+      "kind": "depends",
+      "label": "uses the same rules to print balances"
+    },
+    {
+      "id": "ledgerly-notify--ledgerly-domain",
+      "source": "ledgerly-notify",
+      "target": "ledgerly-domain",
+      "kind": "depends",
+      "label": "turns balances into readable sentences"
+    },
+    {
+      "id": "ledgerly-store--ledgerly-domain",
+      "source": "ledgerly-store",
+      "target": "ledgerly-domain",
+      "kind": "depends",
+      "label": "stores exactly the shapes the rules define"
+    },
+    {
+      "id": "ledgerly-web--ledgerly-domain",
+      "source": "ledgerly-web",
+      "target": "ledgerly-domain",
+      "kind": "relates",
+      "label": "borrows the shared vocabulary only, never the rules"
+    },
+    {
+      "id": "ledgerly-worker--ledgerly-api",
+      "source": "ledgerly-worker",
+      "target": "ledgerly-api",
+      "kind": "depends",
+      "label": "shares the service's list of background chores"
+    },
+    {
+      "id": "ledgerly-worker--ledgerly-config",
+      "source": "ledgerly-worker",
+      "target": "ledgerly-config",
+      "kind": "depends",
+      "label": "reads how often to check"
+    },
+    {
+      "id": "ledgerly-worker--ledgerly-domain",
+      "source": "ledgerly-worker",
+      "target": "ledgerly-domain",
+      "kind": "depends",
+      "label": "asks who still owes money"
+    },
+    {
+      "id": "ledgerly-worker--ledgerly-notify",
+      "source": "ledgerly-worker",
+      "target": "ledgerly-notify",
+      "kind": "dataflow",
+      "label": "hands over the notices to send"
+    },
+    {
+      "id": "ledgerly-worker--ledgerly-queue",
+      "source": "ledgerly-worker",
+      "target": "ledgerly-queue",
+      "kind": "dataflow",
+      "label": "takes work off the waiting pile"
+    },
+    {
+      "id": "ledgerly-worker--ledgerly-store",
+      "source": "ledgerly-worker",
+      "target": "ledgerly-store",
+      "kind": "dataflow",
+      "label": "re-reads the records before acting"
+    },
+    {
+      "id": "web-uses-api",
+      "source": "ledgerly-web",
+      "target": "ledgerly-api",
+      "kind": "dataflow",
+      "label": "asks the service for everything it shows"
+    },
+    {
+      "id": "cli-writes-store",
+      "source": "ledgerly-cli",
+      "target": "ledgerly-store",
+      "kind": "dataflow",
+      "label": "writes straight to the records, bypassing the service"
+    },
+    {
+      "id": "api-writes-store",
+      "source": "ledgerly-api",
+      "target": "ledgerly-store",
+      "kind": "dataflow",
+      "label": "reads and writes the same records"
+    }
+  ],
+  "reality": {
+    "nodes": [
+      {
+        "id": "r:@ledgerly/api",
+        "label": "@ledgerly/api",
+        "dir": "apps/api"
+      },
+      {
+        "id": "r:@ledgerly/cli",
+        "label": "@ledgerly/cli",
+        "dir": "apps/cli"
+      },
+      {
+        "id": "r:@ledgerly/web",
+        "label": "@ledgerly/web",
+        "dir": "apps/web"
+      },
+      {
+        "id": "r:@ledgerly/worker",
+        "label": "@ledgerly/worker",
+        "dir": "apps/worker"
+      },
+      {
+        "id": "r:@ledgerly/config",
+        "label": "@ledgerly/config",
+        "dir": "packages/config"
+      },
+      {
+        "id": "r:@ledgerly/domain",
+        "label": "@ledgerly/domain",
+        "dir": "packages/domain"
+      },
+      {
+        "id": "r:@ledgerly/notify",
+        "label": "@ledgerly/notify",
+        "dir": "packages/notify"
+      },
+      {
+        "id": "r:@ledgerly/queue",
+        "label": "@ledgerly/queue",
+        "dir": "packages/queue"
+      },
+      {
+        "id": "r:@ledgerly/store",
+        "label": "@ledgerly/store",
+        "dir": "packages/store"
+      }
+    ],
+    "edges": [
+      {
+        "id": "r:@ledgerly/api--r:@ledgerly/config",
+        "source": "r:@ledgerly/api",
+        "target": "r:@ledgerly/config"
+      },
+      {
+        "id": "r:@ledgerly/api--r:@ledgerly/domain",
+        "source": "r:@ledgerly/api",
+        "target": "r:@ledgerly/domain"
+      },
+      {
+        "id": "r:@ledgerly/api--r:@ledgerly/notify",
+        "source": "r:@ledgerly/api",
+        "target": "r:@ledgerly/notify"
+      },
+      {
+        "id": "r:@ledgerly/api--r:@ledgerly/queue",
+        "source": "r:@ledgerly/api",
+        "target": "r:@ledgerly/queue"
+      },
+      {
+        "id": "r:@ledgerly/api--r:@ledgerly/store",
+        "source": "r:@ledgerly/api",
+        "target": "r:@ledgerly/store"
+      },
+      {
+        "id": "r:@ledgerly/cli--r:@ledgerly/config",
+        "source": "r:@ledgerly/cli",
+        "target": "r:@ledgerly/config"
+      },
+      {
+        "id": "r:@ledgerly/cli--r:@ledgerly/domain",
+        "source": "r:@ledgerly/cli",
+        "target": "r:@ledgerly/domain"
+      },
+      {
+        "id": "r:@ledgerly/cli--r:@ledgerly/store",
+        "source": "r:@ledgerly/cli",
+        "target": "r:@ledgerly/store"
+      },
+      {
+        "id": "r:@ledgerly/notify--r:@ledgerly/domain",
+        "source": "r:@ledgerly/notify",
+        "target": "r:@ledgerly/domain"
+      },
+      {
+        "id": "r:@ledgerly/store--r:@ledgerly/domain",
+        "source": "r:@ledgerly/store",
+        "target": "r:@ledgerly/domain"
+      },
+      {
+        "id": "r:@ledgerly/web--r:@ledgerly/domain",
+        "source": "r:@ledgerly/web",
+        "target": "r:@ledgerly/domain"
+      },
+      {
+        "id": "r:@ledgerly/worker--r:@ledgerly/api",
+        "source": "r:@ledgerly/worker",
+        "target": "r:@ledgerly/api"
+      },
+      {
+        "id": "r:@ledgerly/worker--r:@ledgerly/config",
+        "source": "r:@ledgerly/worker",
+        "target": "r:@ledgerly/config"
+      },
+      {
+        "id": "r:@ledgerly/worker--r:@ledgerly/domain",
+        "source": "r:@ledgerly/worker",
+        "target": "r:@ledgerly/domain"
+      },
+      {
+        "id": "r:@ledgerly/worker--r:@ledgerly/notify",
+        "source": "r:@ledgerly/worker",
+        "target": "r:@ledgerly/notify"
+      },
+      {
+        "id": "r:@ledgerly/worker--r:@ledgerly/queue",
+        "source": "r:@ledgerly/worker",
+        "target": "r:@ledgerly/queue"
+      },
+      {
+        "id": "r:@ledgerly/worker--r:@ledgerly/store",
+        "source": "r:@ledgerly/worker",
+        "target": "r:@ledgerly/store"
+      }
+    ],
+    "extractedAt": "2026-09-02T13:17:54.621Z",
+    "head": "6e47abbe7e9a0ec0ce3a6e205b033f746d4bdcff"
+  },
+  "drift": {
+    "api-no-auth": [
+      "code imports @ledgerly/config (node \"settings\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"fairness rules\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared",
+      "code imports @ledgerly/notify (node \"messages out\") but no edge is declared",
+      "code imports @ledgerly/queue (node \"waiting work\") but no edge is declared",
+      "code imports @ledgerly/store (node \"saved records\") but no edge is declared",
+      "code imports @ledgerly/store (node \"crash-proof saving\") but no edge is declared",
+      "code imports @ledgerly/store (node \"throwaway copy\") but no edge is declared"
+    ],
+    "ledgerly-api": [
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared",
+      "code imports @ledgerly/store (node \"crash-proof saving\") but no edge is declared",
+      "code imports @ledgerly/store (node \"throwaway copy\") but no edge is declared"
+    ],
+    "ledgerly-cli": [
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared",
+      "code imports @ledgerly/store (node \"crash-proof saving\") but no edge is declared",
+      "code imports @ledgerly/store (node \"throwaway copy\") but no edge is declared"
+    ],
+    "ledgerly-notify": [
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared"
+    ],
+    "ledgerly-store": [
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared"
+    ],
+    "store-safe-write": [
+      "code imports @ledgerly/domain (node \"fairness rules\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared"
+    ],
+    "store-scratch": [
+      "code imports @ledgerly/domain (node \"fairness rules\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared"
+    ],
+    "ledgerly-web": [
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared"
+    ],
+    "web-read-only": [
+      "code imports @ledgerly/domain (node \"fairness rules\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared"
+    ],
+    "ledgerly-worker": [
+      "code imports @ledgerly/api (node \"no door lock\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared",
+      "code imports @ledgerly/store (node \"crash-proof saving\") but no edge is declared",
+      "code imports @ledgerly/store (node \"throwaway copy\") but no edge is declared"
+    ],
+    "worker-recheck": [
+      "code imports @ledgerly/api (node \"the service\") but no edge is declared",
+      "code imports @ledgerly/api (node \"no door lock\") but no edge is declared",
+      "code imports @ledgerly/config (node \"settings\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"fairness rules\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared",
+      "code imports @ledgerly/notify (node \"messages out\") but no edge is declared",
+      "code imports @ledgerly/queue (node \"waiting work\") but no edge is declared",
+      "code imports @ledgerly/store (node \"saved records\") but no edge is declared",
+      "code imports @ledgerly/store (node \"crash-proof saving\") but no edge is declared",
+      "code imports @ledgerly/store (node \"throwaway copy\") but no edge is declared"
+    ],
+    "worker-snapshot-gap": [
+      "code imports @ledgerly/api (node \"the service\") but no edge is declared",
+      "code imports @ledgerly/api (node \"no door lock\") but no edge is declared",
+      "code imports @ledgerly/config (node \"settings\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"fairness rules\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared",
+      "code imports @ledgerly/notify (node \"messages out\") but no edge is declared",
+      "code imports @ledgerly/queue (node \"waiting work\") but no edge is declared",
+      "code imports @ledgerly/store (node \"saved records\") but no edge is declared",
+      "code imports @ledgerly/store (node \"crash-proof saving\") but no edge is declared",
+      "code imports @ledgerly/store (node \"throwaway copy\") but no edge is declared"
+    ]
+  }
+}

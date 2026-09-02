@@ -161,6 +161,88 @@ let socket = null;
   );
 }
 
+// --- backend seam: config precedence + unknown-id startup error ------------
+// Two extra bridge processes: one whose harness command comes only from
+// ~/.shape/config.json (no --omp flag), one whose project config names a
+// backend that does not exist.
+{
+  const cfgTarget = await mkdtemp(join(tmpdir(), "vh-smoke-cfg-"));
+  const cfgHome = await mkdtemp(join(tmpdir(), "vh-smoke-cfghome-"));
+  const fakeOmp = join(process.cwd(), "scripts", "fake-omp.mjs");
+  await mkdir(join(cfgHome, ".shape"), { recursive: true });
+  await writeFile(
+    join(cfgHome, ".shape", "config.json"),
+    JSON.stringify({ backend: "omp", backends: { omp: { command: [process.execPath, fakeOmp] } } }),
+  );
+
+  const cfgPort = PORT + 1;
+  const viaConfig = spawn(
+    process.execPath,
+    ["src/index.ts", "--cwd", cfgTarget, "--port", String(cfgPort)],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, SHAPE_HOME: cfgHome, HOME: cfgHome },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let cfgErr = "";
+  viaConfig.stderr.setEncoding("utf8");
+  viaConfig.stderr.on("data", (d) => {
+    cfgErr += d;
+  });
+  try {
+    await waitFor("bridge listening with a config-supplied command", () => cfgErr.includes("canvas at ws://"));
+    const started = ompFrames(ompLogIn(cfgTarget)).find((f) => f.type === "__start");
+    check(
+      "SHAPE_HOME config's command array is the harness that gets spawned",
+      started !== undefined && started.cwd === realpathSync(cfgTarget) && cfgErr.includes("registered host tool: canvas"),
+      JSON.stringify(started ?? null),
+    );
+  } catch (err) {
+    check("bridge starts from a SHAPE_HOME config alone", false, String(err));
+  } finally {
+    viaConfig.kill("SIGKILL");
+    await sleep(100);
+  }
+
+  // project config wins over the user's and over the built-in default
+  const projectConfig = join(cfgTarget, ".shape", "config.json");
+  await mkdir(join(cfgTarget, ".shape"), { recursive: true });
+  await writeFile(projectConfig, JSON.stringify({ backend: "nope" }));
+  const bad = spawn(
+    process.execPath,
+    ["src/index.ts", "--cwd", cfgTarget, "--port", String(PORT + 2), "--omp", `${process.execPath} ${fakeOmp}`],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, SHAPE_HOME: cfgHome, HOME: cfgHome },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let badErr = "";
+  bad.stderr.setEncoding("utf8");
+  bad.stderr.on("data", (d) => {
+    badErr += d;
+  });
+  const badExit = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve("timeout"), 8000);
+    bad.once("exit", (code) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
+  });
+  check(
+    "a project config naming an unknown backend fails startup and lists the known ids",
+    badExit !== 0 && badExit !== "timeout" && /unknown backend "nope"/.test(badErr) && /known ids: omp/.test(badErr),
+    `exit=${badExit} stderr=${badErr.trim().split("\n").pop() ?? ""}`,
+  );
+  bad.kill("SIGKILL");
+
+  await rm(projectConfig, { force: true });
+  check("the offending project config is gone again", !existsSync(projectConfig));
+  await rm(cfgTarget, { recursive: true, force: true });
+  await rm(cfgHome, { recursive: true, force: true });
+}
+
 try {
   bridge = spawn(
     process.execPath,
@@ -199,6 +281,22 @@ try {
     `session=${JSON.stringify(hello.session)}`,
   );
   check("hello reports an empty intent layer", hello.graph.nodes.length === 0 && hello.graph.edges.length === 0);
+  const backend = hello.session.backend;
+  check(
+    "hello names the backend it is driving",
+    backend?.id === "omp" && backend.label === "omp",
+    JSON.stringify(backend ?? null),
+  );
+  check(
+    "hello carries the backend's capability object",
+    backend?.capabilities !== undefined &&
+      backend.capabilities.steerMidTurn === true &&
+      backend.capabilities.hostTool === true &&
+      backend.capabilities.events === "native" &&
+      backend.capabilities.resume === true &&
+      backend.capabilities.terminal === "shell",
+    JSON.stringify(backend?.capabilities ?? null),
+  );
 
   // --- startup reality extraction -------------------------------------------
   if (existsSync("src/reality.ts")) {
@@ -593,6 +691,11 @@ try {
     frames.find((f) => f.type === "hello" && f.session.cwd === targetB),
   );
   check("switch_project re-hellos with the new target", helloB.session.cwd === targetB);
+  check(
+    "the re-created backend is reported for the new target",
+    helloB.session.backend?.id === "omp" && helloB.session.backend.capabilities.events === "native",
+    JSON.stringify(helloB.session.backend ?? null),
+  );
   check("new target starts from its own (empty) graph", helloB.graph.nodes.length === 0 && helloB.graph.rev !== persisted.rev, `rev=${helloB.graph.rev} nodes=${helloB.graph.nodes.length}`);
   check(
     "new target's reality layer was extracted before the hello",

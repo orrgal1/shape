@@ -28,6 +28,52 @@ omp --mode rpc   (spawned child, cwd = target project)
 - RPC client: minimal hand-rolled JSONL client per omp rpc.md, protocol v1 only (no v2
   negotiation, no rpc_chunk handling — our frames are small). Do NOT depend on
   @oh-my-pi packages.
+- The omp leg is ONE adapter behind the backend seam (§Backends): the bridge itself does
+  not know omp's frames.
+
+## Backends (seam, 2026-09-02)
+
+Shape drives a coding-agent CLI by configuration; `omp` is the first adapter, not the
+assumption. `packages/bridge/src/backend/types.ts` is the whole surface:
+
+```ts
+interface Backend {
+  readonly id: string; readonly label: string; readonly capabilities: BackendCapabilities;
+  start(opts: { cwd, events: BackendEvents, canvasTool: { description, schema } }): Promise<void>;
+  state(): Promise<BackendState>;                  // { streaming, sessionId, sessionName, model }
+  send(message: string, mode: "prompt" | "steer"): Promise<void>;
+  abort(): Promise<void>;
+  dispose(): Promise<void>;
+}
+```
+
+The adapter owns everything harness-shaped: process spawn, frame decoding, coalescing text
+deltas into whole assistant messages, projecting tool arguments into `{ name, paths, summary }`,
+and the host-tool round trip. The bridge owns everything canvas-shaped: the graph store, the
+preamble, `codeRefs` → activity mapping, the onboarding gate, and the steer-vs-prompt
+decision. `BackendEvents.onCanvasCall(args)` is the one inbound call: the bridge applies the
+ops and returns `{ text, isError }` for the adapter to hand back to the agent.
+
+`BackendCapabilities` (shared/) is what the bridge and client branch on instead of sniffing
+ids: `{ steerMidTurn, hostTool, events: "native" | "hooks" | "transcript" | "none", resume,
+terminal: "tui" | "shell" | "none" }`. Delivery rule: `steer` when `steerMidTurn` AND
+`state().streaming`, else `prompt` — and when a backend cannot be interrupted mid-turn, the
+prompt still goes out and the transcript says it is queued for the next turn.
+
+Config, lowest precedence first: built-in default (`omp`), `~/.shape/config.json`
+(`SHAPE_HOME` overrides the home dir), `<target>/.shape/config.json`, then CLI `--backend <id>`.
+`--omp "<cmd ...>"` still replaces the omp adapter's command (smoke uses it). Shape:
+
+```json
+{ "backend": "omp", "backends": { "omp": { "command": ["omp"] } } }
+```
+
+Missing files are fine; a malformed one is a startup error naming the file, and an unknown
+backend id is a startup error listing the known ids. Config is re-read per project, so
+`switch_project` disposes the backend and creates the one the new target asks for.
+omp adapter: `omp --mode rpc` (`--mode rpc` appended when the configured command omits it),
+`set_host_tools` for `canvas`, capabilities `{ steerMidTurn: true, hostTool: true,
+events: "native", resume: true, terminal: "shell" }`.
 
 ## Graph document
 
@@ -82,21 +128,33 @@ Server → client (`ServerMsg`):
 - `transcript` — `{ role, text }` appended lines for the side panel (assistant text deltas
   coalesced per message_end; tool lines summarized)
 - `error` — `{ message }`
+- `pty_data` / `pty_exit` / `pty_state` — terminal output and lifecycle (see below)
 
 Client → server (`ClientMsg`):
 - `utterance` — `{ referent: { kind: "node" | "edge", id: string } | null, text: string }`
 - `onboard` — `{ focus?: string }` map an existing project (see onboarding.md); valid only
   while the intent layer is empty
 - `switch_project` — `{ path: string }` retarget the bridge: abort any running turn, dispose
-  the omp child, re-point at `path` (per-project graph persists at
-  `<path>/.shape/graph.json`), re-extract reality, spawn a fresh omp, broadcast
+  the backend, re-point at `path` (per-project graph persists at
+  `<path>/.shape/graph.json`), re-extract reality, re-read config, start a fresh backend
+  and retarget the terminal, broadcast
   `hello`. `~` expands; non-directory paths → `error` frame, current project untouched.
   Recents persist in `~/.shape/recents.json` (most-recent first, deduped, cap 10).
 - `abort`
+- `pty_open` / `pty_input` / `pty_resize` / `pty_close` — terminal input and geometry
+
+Terminal frames live in `packages/shared/src/pty.ts` (`PtyClientMsg` / `PtyServerMsg`) and
+are merged into `ClientMsg` / `ServerMsg`; the bridge answers them from `PtyManager`
+(`packages/bridge/src/pty.ts`) BEFORE any agent routing, so typing in the terminal never
+queues behind a turn. One shared shell per bridge, retargeted on `switch_project`, so
+`pty_data` is broadcast to every attached client. `BackendCapabilities.terminal` says
+whether a pane is worth showing at all.
 
 `SessionInfo` includes `targetHasCode: boolean` (bridge runs `extractReality` once at startup;
 non-TS repos fall back to a cheap source-file scan). Client shows the "Map this project" CTA
-when `targetHasCode` and `nodes.length === 0`.
+when `targetHasCode` and `nodes.length === 0`. It also carries
+`backend: { id, label, capabilities }` (§Backends) — the harness this session runs on,
+re-derived on every `switch_project`.
 
 ## Worktrees (user decision 2026-08-28: toggle first, compare later)
 

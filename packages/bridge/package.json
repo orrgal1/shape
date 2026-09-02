@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@lydell/node-pty": "1.2.0-beta.15",
     "ws": "^8.18.0"
   },
   "devDependencies": {

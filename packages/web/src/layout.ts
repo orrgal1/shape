@@ -1,6 +1,7 @@
 import ELK, { type ElkNode, type LayoutOptions } from "elkjs/lib/elk.bundled.js";
 import type { RealityLayer } from "../../shared/src/index.ts";
 import type { Layer } from "./layer.ts";
+import { routingCost } from "./canvas/geometry.ts";
 
 export interface Box {
   x: number;
@@ -69,7 +70,7 @@ export interface LayoutInput {
 /** air left between bubbles in the arrangements this module places by hand */
 const SPREAD_GAP = 96;
 
-export type Arrangement = "layered" | "spread" | "grid";
+export type Arrangement = "flow" | "layered" | "spread" | "grid";
 
 /**
  * Longest directed path, in nodes, over the relations that imply a direction.
@@ -102,20 +103,33 @@ function longestChain(layer: Layer): number {
   return longest;
 }
 
+/** a layer this big with at least one relation per bubble is a graph, not a set */
+const FLOW_MIN_NODES = 6;
+const FLOW_MIN_DENSITY = 1;
+
 /**
  * The single-layer view produces small sibling sets, so the algorithm is chosen
- * per layer rather than fixed.
+ * per layer rather than fixed — and by the shape of the relations, not just by
+ * how many bubbles there are.
  *
  * Three or fewer bubbles are always spread: elk layered renders a three-node
  * chain as a strict vertical column, which wastes the width, stacks the two
  * relations on top of each other and routes one of them straight through the
- * middle bubble. A triangle has none of those problems. Above that, a layer
- * whose relations really do form a chain keeps the directional reading; anything
- * else is spread on an ellipse, or gridded once a ring would be too crowded.
+ * middle bubble. A triangle has none of those problems.
+ *
+ * A big, densely related layer is the opposite case: the nine packages of a
+ * real monorepo with eighteen relations between them. Placed on a grid, which
+ * is what a count-only rule chose, the strokes have to find their own way
+ * through the rows and the longest ran 3173px to cross a 1100px composition.
+ * Handing that layer to elk layered costs the ring's symmetry and buys short
+ * strokes, which is the better trade once there are more relations than
+ * bubbles. Below that density the relations are sparse enough that a chain, an
+ * ellipse or a grid still reads.
  */
 export function chooseArrangement(layer: Layer, chain = longestChain(layer)): Arrangement {
   const n = layer.nodes.length;
   if (n <= 3) return "spread";
+  if (n >= FLOW_MIN_NODES && layer.edges.length >= n * FLOW_MIN_DENSITY) return "flow";
   if (chain >= Math.max(3, Math.ceil(n * 0.5))) return "layered";
   return n <= 6 ? "spread" : "grid";
 }
@@ -209,42 +223,175 @@ function gridLayout(layer: Layer, aspect: number): BoxMap {
   return boxes;
 }
 
+function boxesOf(laid: ElkNode): BoxMap {
+  const boxes: BoxMap = {};
+  for (const node of laid.children ?? []) {
+    boxes[node.id] = {
+      x: node.x ?? 0,
+      y: node.y ?? 0,
+      w: node.width ?? NODE_W,
+      h: node.height ?? NODE_H,
+    };
+  }
+  return boxes;
+}
+
+async function layeredLayout(layer: Layer): Promise<BoxMap> {
+  // `relates` is an association, not a flow. Letting it assign layers
+  // nearly doubles the height of the fixture (1174px -> 2020px, fit zoom
+  // 0.54 -> 0.31, which drops every bubble to the label-only tier), so it
+  // is routed after the fact instead.
+  const graph: ElkNode = {
+    id: "root",
+    layoutOptions: ROOT_OPTIONS,
+    children: layer.nodes.map((entry) => ({ id: entry.node.id, width: NODE_W, height: NODE_H })),
+    // no labels are declared: strokes and labels are placed together from
+    // the final boxes in canvas/geometry.ts, so that elk cannot put a label
+    // somewhere the curve it belongs to never goes
+    edges: layer.edges
+      .filter((edge) => edge.kind !== "relates")
+      .map((edge) => ({ id: edge.id, sources: [edge.source], targets: [edge.target] })),
+  };
+  return boxesOf(await elk.layout(graph));
+}
+
+/**
+ * elk is asked for one arrangement per candidate; these are the knobs that
+ * change the answer materially on a dense layer.
+ *
+ * `direction` decides which axis the layers stack on. Bubbles are two and a
+ * half times wider than they are tall, so which axis yields the wide
+ * composition a wide window wants is not obvious from the node count — it
+ * depends on how many layers there are and how full the widest one is.
+ *
+ * `alignment` decides where a layer's nodes sit within it, and `layering` how
+ * many layers there are at all: `NETWORK_SIMPLEX` minimises total edge span,
+ * `LONGEST_PATH` pushes every node as late as it can, which packs the sinks
+ * together and is sometimes the shorter-stroked of the two. Neither wins in
+ * general, which is why they are measured rather than chosen.
+ */
+interface FlowCandidate {
+  direction: "DOWN" | "RIGHT";
+  alignment: "BALANCED" | "RIGHTDOWN";
+  layering: "NETWORK_SIMPLEX" | "LONGEST_PATH";
+}
+
+const FLOW_CANDIDATES: readonly FlowCandidate[] = [
+  { direction: "DOWN", alignment: "BALANCED", layering: "NETWORK_SIMPLEX" },
+  { direction: "DOWN", alignment: "RIGHTDOWN", layering: "LONGEST_PATH" },
+  { direction: "RIGHT", alignment: "BALANCED", layering: "NETWORK_SIMPLEX" },
+  { direction: "RIGHT", alignment: "RIGHTDOWN", layering: "LONGEST_PATH" },
+];
+
+/**
+ * The gap between layers doubles as the minimum length of every stroke that
+ * crosses it, so it is the number that decides how long the edges are. The edge
+ * spacings are the opposite: elk reserves a lane per stroke in every gap it
+ * crosses, which on a dense layer inflates the composition by hundreds of
+ * pixels for routes nothing here uses — `canvas/geometry.ts` routes the strokes
+ * itself, and it needs the bubbles close, not the lanes reserved.
+ */
+const FLOW_BETWEEN_LAYERS = 72;
+const FLOW_GAP = 104;
+const FLOW_EDGE_SPACING = 4;
+
+function flowOptions({ direction, alignment, layering }: FlowCandidate): LayoutOptions {
+  return {
+    "elk.algorithm": "layered",
+    "elk.direction": direction,
+    "elk.layered.layering.strategy": layering,
+    // straightens long edges, so the corridor elk keeps free for a stroke that
+    // spans several layers stays close to that stroke's own chord
+    "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
+    "elk.layered.nodePlacement.bk.fixedAlignment": alignment,
+    // a crossing costs pixels here, because the crossed stroke has to bow
+    // around whatever it crossed; one layer is small enough to pay for passes
+    "elk.layered.thoroughness": "24",
+    "elk.layered.spacing.nodeNodeBetweenLayers": String(FLOW_BETWEEN_LAYERS),
+    "elk.spacing.nodeNode": String(FLOW_GAP),
+    "elk.spacing.edgeNode": String(FLOW_EDGE_SPACING),
+    "elk.spacing.edgeEdge": String(FLOW_EDGE_SPACING),
+    "elk.layered.spacing.edgeNodeBetweenLayers": String(FLOW_EDGE_SPACING),
+    "elk.layered.spacing.edgeEdgeBetweenLayers": String(FLOW_EDGE_SPACING),
+  };
+}
+
+/**
+ * elk layered for a layer whose relations carry the meaning.
+ *
+ * A dense layer has no single right layering, and the wrong one is what the
+ * grid was: strokes 3000px long across a 1200px composition. So the candidates
+ * are laid out and then *measured* on the thing that went wrong — the strokes
+ * `canvas/geometry.ts` will actually draw through the boxes elk chose. Nine
+ * nodes and eighteen relations cost elk a couple of milliseconds per candidate
+ * and the routing pass about the same, and this runs once per layer change, not
+ * per frame.
+ *
+ * The verdict is the length of the longest stroke *as the reader will see it*:
+ * canvas pixels scaled by the zoom the framing pass will settle on for that
+ * candidate's bounding box. That single number is what makes the choice of axis
+ * follow the window's shape — a composition shaped like the pane is zoomed in
+ * further, so its strokes read shorter — without trading away a layering whose
+ * strokes are genuinely tighter. An arrangement whose strokes cannot clear the
+ * bubbles they pass loses to any that can, whatever its lengths.
+ */
+async function flowLayout(layer: Layer, aspect: number): Promise<BoxMap> {
+  // Every stroke on screen is handed to elk here, `relates` included: a layer
+  // this dense has no slack for a relation the layering never heard about, and
+  // an unplanned stroke is precisely the one that ends up looping around the
+  // whole composition to find a way through.
+  const edges = layer.edges.map((edge) => ({ id: edge.id, sources: [edge.source], targets: [edge.target] }));
+  const runs = await Promise.all(
+    FLOW_CANDIDATES.map((candidate) =>
+      elk.layout({
+        id: `root-${candidate.direction}-${candidate.layering}`,
+        layoutOptions: flowOptions(candidate),
+        children: layer.nodes.map((entry) => ({ id: entry.node.id, width: NODE_W, height: NODE_H })),
+        edges: edges.map((edge) => ({ ...edge })),
+      }),
+    ),
+  );
+
+  // pane in arbitrary units: only the ratio between candidates matters
+  const paneW = Math.max(0.3, Math.min(3, aspect));
+  let best: BoxMap = {};
+  let bestCost = Number.POSITIVE_INFINITY;
+  let bestStrikes = Number.POSITIVE_INFINITY;
+  for (const laid of runs) {
+    const boxes = boxesOf(laid);
+    let width = 0;
+    let height = 0;
+    for (const box of Object.values(boxes)) {
+      width = Math.max(width, box.x + box.w);
+      height = Math.max(height, box.y + box.h);
+    }
+    if (width === 0 || height === 0) continue;
+
+    const obstacles = layer.nodes
+      .map((entry) => ({ id: entry.node.id, box: boxes[entry.node.id] }))
+      .filter((entry): entry is { id: string; box: Box } => entry.box !== undefined);
+    const cost = routingCost({ edges: layer.edges, boxes, obstacles });
+    const zoom = Math.min(paneW / width, 1 / height);
+    const seen = cost.longest * zoom;
+
+    if (cost.strikes > bestStrikes) continue;
+    if (cost.strikes === bestStrikes && seen >= bestCost) continue;
+    bestStrikes = cost.strikes;
+    bestCost = seen;
+    best = boxes;
+  }
+  return best;
+}
+
 export async function computeLayout({ layer, reality, aspect }: LayoutInput): Promise<BoxMap> {
   let boxes: BoxMap = {};
 
   if (layer.nodes.length > 0) {
     const arrangement = chooseArrangement(layer);
-    if (arrangement === "spread") {
-      boxes = spreadLayout(layer, aspect);
-    } else if (arrangement === "grid") {
-      boxes = gridLayout(layer, aspect);
-    } else {
-      // `relates` is an association, not a flow. Letting it assign layers
-      // nearly doubles the height of the fixture (1174px -> 2020px, fit zoom
-      // 0.54 -> 0.31, which drops every bubble to the label-only tier), so it
-      // is routed after the fact instead.
-      const graph: ElkNode = {
-        id: "root",
-        layoutOptions: ROOT_OPTIONS,
-        children: layer.nodes.map((entry) => ({ id: entry.node.id, width: NODE_W, height: NODE_H })),
-        // no labels are declared: strokes and labels are placed together from
-        // the final boxes in canvas/geometry.ts, so that elk cannot put a label
-        // somewhere the curve it belongs to never goes
-        edges: layer.edges
-          .filter((edge) => edge.kind !== "relates")
-          .map((edge) => ({ id: edge.id, sources: [edge.source], targets: [edge.target] })),
-      };
-
-      const laid = await elk.layout(graph);
-      for (const node of laid.children ?? []) {
-        boxes[node.id] = {
-          x: node.x ?? 0,
-          y: node.y ?? 0,
-          w: node.width ?? NODE_W,
-          h: node.height ?? NODE_H,
-        };
-      }
-    }
+    if (arrangement === "spread") boxes = spreadLayout(layer, aspect);
+    else if (arrangement === "grid") boxes = gridLayout(layer, aspect);
+    else if (arrangement === "flow") boxes = await flowLayout(layer, aspect);
+    else boxes = await layeredLayout(layer);
   }
 
   if (reality.nodes.length === 0) return boxes;

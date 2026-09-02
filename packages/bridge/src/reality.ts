@@ -11,7 +11,7 @@
  */
 
 import { readdir, readFile, stat } from "node:fs/promises";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import path from "node:path";
 
 import type {
@@ -34,6 +34,9 @@ const SOURCE_EXTS: Record<string, true> = { ".ts": true, ".tsx": true };
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_FILES = 5000;
 const GIT_TIMEOUT_MS = 5000;
+
+/** `git ls-files` output cap: ~64 MiB of NUL-joined paths, far past any real repo. */
+const MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 /**
  * `from "x"` | `require("x")` | `import("x")` | `import "x"`.
@@ -121,6 +124,107 @@ async function gitHead(cwd: string): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
+// Git truth
+// ---------------------------------------------------------------------------
+
+/**
+ * What git will admit exists under the scanned directory: tracked files plus
+ * untracked-but-not-ignored files. Everything ignored is absent by construction,
+ * so a `node_modules`-only package dir left behind by a branch switch cannot be
+ * mistaken for a part of the project. Each worktree has its own index, so a
+ * worktree path indexes that branch's files with no extra work.
+ *
+ * Paths are posix, relative to the directory that was scanned.
+ */
+export interface GitFileIndex {
+  /** every admitted file, for membership tests */
+  files: ReadonlySet<string>;
+  /** every ancestor directory of those files */
+  dirs: ReadonlySet<string>;
+  /** the same files, sorted — deterministic scan order */
+  sorted: readonly string[];
+}
+
+const LS_FILES_ARGS = ["ls-files", "-z", "--cached", "--others", "--exclude-standard"];
+
+/**
+ * `git ls-files` with no pathspec is already scoped to the directory it runs in
+ * and prints paths relative to it, which is exactly the subtree we want.
+ */
+function buildGitFileIndex(stdout: string): GitFileIndex {
+  const files = new Set<string>();
+  const dirs = new Set<string>();
+  for (const raw of stdout.split("\0")) {
+    if (raw.length === 0) continue;
+    const rel = normalizeRel(raw);
+    if (rel.length === 0 || rel === "." || rel === ".." || rel.startsWith("../")) continue;
+    files.add(rel);
+    for (let slash = rel.lastIndexOf("/"); slash > 0; ) {
+      const dir = rel.slice(0, slash);
+      if (dirs.has(dir)) break;
+      dirs.add(dir);
+      slash = dir.lastIndexOf("/");
+    }
+  }
+  const sorted = [...files].sort();
+  return { files, dirs, sorted };
+}
+
+/** null = not a git repo (or git unavailable) -> callers fall back to the fs walk. */
+export async function gitFileIndex(cwd: string): Promise<GitFileIndex | null> {
+  const { promise, resolve } = Promise.withResolvers<GitFileIndex | null>();
+  const opts = { cwd, timeout: GIT_TIMEOUT_MS, windowsHide: true } as const;
+  execFile("git", ["rev-parse", "--show-toplevel"], opts, (topErr) => {
+    if (topErr) {
+      resolve(null);
+      return;
+    }
+    execFile(
+      "git",
+      LS_FILES_ARGS,
+      { ...opts, maxBuffer: MAX_GIT_OUTPUT_BYTES },
+      (err, stdout) => {
+        resolve(err ? null : buildGitFileIndex(stdout));
+      },
+    );
+  });
+  return promise;
+}
+
+/**
+ * Blocking twin of {@link gitFileIndex}, for the synchronous op gate. Two short
+ * git reads on the survey turn's first op; the gate has no async seam to use.
+ */
+export function gitFileIndexSync(cwd: string): GitFileIndex | null {
+  const opts = {
+    cwd,
+    timeout: GIT_TIMEOUT_MS,
+    windowsHide: true,
+    encoding: "utf8" as const,
+    maxBuffer: MAX_GIT_OUTPUT_BYTES,
+  };
+  const top = spawnSync("git", ["rev-parse", "--show-toplevel"], opts);
+  if (top.error !== undefined || top.status !== 0) return null;
+  const listed = spawnSync("git", LS_FILES_ARGS, opts);
+  if (listed.error !== undefined || listed.status !== 0 || typeof listed.stdout !== "string") {
+    return null;
+  }
+  return buildGitFileIndex(listed.stdout);
+}
+
+/**
+ * Does git admit this path? A directory counts when it contains at least one
+ * admitted file. `rel` is interpreted relative to the indexed directory;
+ * anything escaping that subtree is not part of the project.
+ */
+export function gitIndexHas(index: GitFileIndex, rel: string): boolean {
+  const clean = normalizeRel(rel);
+  if (clean.length === 0 || clean === ".") return index.files.size > 0;
+  if (clean === ".." || clean.startsWith("../") || path.isAbsolute(clean)) return false;
+  return index.files.has(clean) || index.dirs.has(clean);
+}
+
+// ---------------------------------------------------------------------------
 // Workspace discovery
 // ---------------------------------------------------------------------------
 
@@ -196,16 +300,33 @@ async function expandPattern(root: string, pattern: string): Promise<string[]> {
   }
 }
 
-async function packageAt(root: string, dir: string): Promise<WorkspacePkg | null> {
+/**
+ * A directory is a workspace package only if git admits its manifest. That is
+ * the whole trap: a stale `packages/scheduler/` holding nothing but
+ * `node_modules` has no admitted manifest, so it is not a package — and if a
+ * gitignored `package.json` ever appeared there, it still would not be one.
+ */
+async function packageAt(
+  root: string,
+  dir: string,
+  index: GitFileIndex | null,
+): Promise<WorkspacePkg | null> {
+  const relRaw = normalizeRel(path.relative(root, dir));
+  const rel = relRaw.length > 0 ? relRaw : ".";
+  if (index !== null && !index.files.has(rel === "." ? "package.json" : `${rel}/package.json`)) {
+    return null;
+  }
   const manifest = await readJsonFile(path.join(dir, "package.json"));
   if (typeof manifest !== "object" || manifest === null || !("name" in manifest)) return null;
   const name = manifest.name;
   if (typeof name !== "string" || name.length === 0) return null;
-  const rel = normalizeRel(path.relative(root, dir));
-  return { name, dir, rel: rel.length > 0 ? rel : "." };
+  return { name, dir, rel };
 }
 
-async function discoverPackages(root: string): Promise<WorkspacePkg[]> {
+async function discoverPackages(
+  root: string,
+  index: GitFileIndex | null,
+): Promise<WorkspacePkg[]> {
   const patterns = await workspacePatterns(root);
   const candidates: string[] = [];
   for (const pattern of patterns) candidates.push(...(await expandPattern(root, pattern)));
@@ -216,7 +337,7 @@ async function discoverPackages(root: string): Promise<WorkspacePkg[]> {
   for (const dir of candidates) {
     if (seenDirs.has(dir)) continue;
     seenDirs.add(dir);
-    const pkg = await packageAt(root, dir);
+    const pkg = await packageAt(root, dir, index);
     if (pkg === null || seenNames.has(pkg.name)) continue;
     seenNames.add(pkg.name);
     pkgs.push(pkg);
@@ -236,6 +357,7 @@ interface Budget {
 /**
  * Recursively collect .ts/.tsx files under `root`, never descending into a dir
  * owned by a different workspace package (matters for nested / root packages).
+ * Non-git targets only; inside a repo the index decides what exists.
  */
 async function collectSources(
   root: string,
@@ -264,6 +386,32 @@ async function collectSources(
       budget.left -= 1;
       files.push(full);
     }
+  }
+  return files;
+}
+
+/**
+ * The git-truth counterpart of {@link collectSources}: the package's own
+ * admitted sources, skipping files owned by a nested workspace package.
+ */
+function sourcesFromIndex(
+  root: string,
+  index: GitFileIndex,
+  pkg: WorkspacePkg,
+  foreignRels: readonly string[],
+  budget: Budget,
+): string[] {
+  const prefix = pkg.rel === "." ? "" : `${pkg.rel}/`;
+  const files: string[] = [];
+  for (const rel of index.sorted) {
+    if (budget.left <= 0) break;
+    if (!rel.startsWith(prefix)) continue;
+    if (SOURCE_EXTS[path.posix.extname(rel)] !== true) continue;
+    const segments = rel.slice(prefix.length).split("/");
+    if (segments.slice(0, -1).some((seg) => SKIP_DIRS[seg] === true)) continue;
+    if (foreignRels.some((foreign) => rel.startsWith(`${foreign}/`))) continue;
+    budget.left -= 1;
+    files.push(path.resolve(root, rel));
   }
   return files;
 }
@@ -305,22 +453,28 @@ function resolveSpecifier(
 
 export async function extractReality(cwd: string): Promise<RealityLayer> {
   const root = path.resolve(cwd);
-  const pkgs = await discoverPackages(root);
+  const index = await gitFileIndex(root);
+  const pkgs = await discoverPackages(root, index);
 
   const nodes: RealityNode[] = pkgs.map((p) => ({ id: `r:${p.name}`, label: p.name, dir: p.rel }));
 
   const byName = [...pkgs].sort((a, b) => b.name.length - a.name.length);
   const byDir = [...pkgs].sort((a, b) => b.dir.length - a.dir.length);
-  const allDirs = new Set(pkgs.map((p) => p.dir));
 
   const edges: RealityEdge[] = [];
   const seenEdges = new Set<string>();
   const budget: Budget = { left: MAX_FILES };
 
   for (const pkg of pkgs) {
-    const foreignDirs = new Set(allDirs);
-    foreignDirs.delete(pkg.dir);
-    const files = await collectSources(pkg.dir, foreignDirs, budget);
+    const foreignRels = pkgs.filter((p) => p.rel !== pkg.rel).map((p) => p.rel);
+    const files =
+      index === null
+        ? await collectSources(
+            pkg.dir,
+            new Set(foreignRels.map((rel) => path.resolve(root, rel))),
+            budget,
+          )
+        : sourcesFromIndex(root, index, pkg, foreignRels, budget);
     for (const file of files) {
       const text = await readTextFile(file, MAX_FILE_BYTES);
       if (text === null) continue;

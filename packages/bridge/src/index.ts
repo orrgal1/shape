@@ -1,12 +1,12 @@
 /**
- * Shape bridge: spawns `omp --mode rpc` in a target project, exposes the
- * `canvas` host tool to the agent, and serves the browser canvas over WebSocket.
+ * Shape bridge: drives a coding-agent CLI in a target project through the
+ * backend seam (`src/backend/`, omp first), exposes the `canvas` host tool to
+ * the agent, and serves the browser canvas over WebSocket.
  *
- * Run: node src/index.ts [--cwd <dir>] [--port <n>] [--omp "<cmd ...>"]
+ * Run: node src/index.ts [--cwd <dir>] [--port <n>] [--backend <id>] [--omp "<cmd ...>"]
  */
 
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -14,6 +14,7 @@ import { diffSnapshots } from "../../shared/src/delta.ts";
 import { BRIDGE_PORT, BRIDGE_WS_PATH, CANVAS_TOOL_SCHEMA } from "../../shared/src/index.ts";
 import type {
   AgentState,
+  BackendInfo,
   ClientMsg,
   DriftMap,
   GraphDoc,
@@ -23,6 +24,8 @@ import type {
   SessionInfo,
   WorktreeInfo,
 } from "../../shared/src/index.ts";
+import { createBackend, loadShapeConfig } from "./backend/index.ts";
+import type { Backend, BackendEvents } from "./backend/types.ts";
 import {
   composeSurveyPrompt,
   hasSourceCode,
@@ -30,8 +33,7 @@ import {
   synthesizeSkeleton,
 } from "./onboarding.ts";
 import { PREAMBLE } from "./preamble.ts";
-import { RpcClient } from "./rpc.ts";
-import type { RpcFrame } from "./rpc.ts";
+import { PtyManager, isPtyMsg } from "./pty.ts";
 import { pushRecent } from "./recents.ts";
 import { SnapshotStore } from "./snapshots.ts";
 import { composeUtterance } from "./steering.ts";
@@ -52,44 +54,38 @@ Call this as you think and work, in the same turn your understanding changes. Th
 interface Cli {
   cwd: string;
   port: number;
-  command: string[];
+  /** `--backend <id>`: beats both config files */
+  backend?: string;
+  /** `--omp "<cmd ...>"`: replaces the omp adapter's command */
+  ompCommand?: string[];
 }
 
 function parseArgv(argv: string[]): Cli {
-  let cwd = process.cwd();
-  let port = BRIDGE_PORT;
-  let raw: string[] | null = null;
+  const cli: Cli = { cwd: process.cwd(), port: BRIDGE_PORT };
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const next = argv[i + 1];
     if (arg === "--") continue; // pnpm 11 forwards the separator verbatim
     if (arg === "--cwd" && next !== undefined) {
-      cwd = resolve(next);
+      cli.cwd = resolve(next);
       i++;
     } else if (arg === "--port" && next !== undefined) {
       const parsed = Number.parseInt(next, 10);
       if (Number.isNaN(parsed)) throw new Error(`--port expects a number, got ${next}`);
-      port = parsed;
+      cli.port = parsed;
+      i++;
+    } else if (arg === "--backend" && next !== undefined) {
+      cli.backend = next.trim();
       i++;
     } else if (arg === "--omp" && next !== undefined) {
-      raw = next.trim().split(/\s+/).filter((t) => t.length > 0);
+      cli.ompCommand = next.trim().split(/\s+/).filter((token) => token.length > 0);
       i++;
     } else {
       throw new Error(`unknown argument ${arg}`);
     }
   }
-
-  const command = raw ?? ["omp"];
-  // Script arguments are resolved against the bridge's cwd, not the target
-  // project's — the child runs with cwd = target dir.
-  const resolved = command.map((token, idx) => {
-    if (idx === 0 || token.startsWith("-") || isAbsolute(token)) return token;
-    const abs = resolve(process.cwd(), token);
-    return existsSync(abs) ? abs : token;
-  });
-  if (!resolved.includes("--mode")) resolved.push("--mode", "rpc");
-  return { cwd, port, command: resolved };
+  return cli;
 }
 
 interface RealityModule {
@@ -105,47 +101,9 @@ async function isDirectory(path: string): Promise<boolean> {
   }
 }
 
-function sessionFromState(
-  data: unknown,
-  cwd: string,
-  targetHasCode: boolean,
-  worktrees: WorktreeInfo[],
-): SessionInfo {
-  const session: SessionInfo = { sessionId: null, sessionName: null, model: null, cwd, targetHasCode, worktrees };
-  if (data === null || typeof data !== "object") return session;
-  if ("sessionId" in data && typeof data.sessionId === "string") session.sessionId = data.sessionId;
-  if ("sessionName" in data && typeof data.sessionName === "string") session.sessionName = data.sessionName;
-  if ("model" in data && data.model !== null && typeof data.model === "object") {
-    const m = data.model;
-    if ("provider" in m && typeof m.provider === "string" && "id" in m && typeof m.id === "string") {
-      session.model = { provider: m.provider, id: m.id };
-    }
-  }
-  return session;
-}
-
-/** Path-ish tokens out of a tool's (truncated) argument projection. */
-function argPaths(args: unknown): string[] {
-  if (args === null || typeof args !== "object") return [];
-  const tokens: string[] = [];
-  for (const value of Object.values(args)) {
-    if (typeof value !== "string") continue;
-    for (const token of value.split(/[\s'"`,;:()]+/)) {
-      if (token.length > 0) tokens.push(token);
-    }
-  }
-  return tokens;
-}
-
-function primaryArg(args: unknown): string {
-  if (args === null || typeof args !== "object") return "";
-  for (const key of ["path", "file", "command", "pattern", "query", "url"]) {
-    if (key in args) {
-      const value: unknown = Reflect.get(args, key);
-      if (typeof value === "string") return value.length > 120 ? `${value.slice(0, 117)}...` : value;
-    }
-  }
-  return "";
+/** Backend failures arrive as Errors whose message is already user-facing. */
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 class Bridge {
@@ -155,10 +113,15 @@ class Bridge {
   #store: GraphStore;
   #snapshots: SnapshotStore;
   #hub: WsHub | null = null;
-  #rpc: RpcClient | null = null;
+  /** the harness we drive; re-created per target project */
+  #backend: Backend | null = null;
+  /** wire projection of `#backend`; assigned with it in #createBackend */
+  #backendInfo!: BackendInfo;
+  /** shared project shell; retargeted, never re-created, across switches */
+  #pty!: PtyManager;
   #agent: AgentState = "idle";
-  #session: SessionInfo;
-  #assistant = "";
+  /** assigned by #openProject, which always runs before the first hello */
+  #session!: SessionInfo;
   #activity = new Set<string>();
   #promptSent = false;
   #delivering: Promise<void> = Promise.resolve();
@@ -176,19 +139,13 @@ class Bridge {
     this.#cwd = cli.cwd;
     this.#store = new GraphStore(cli.cwd);
     this.#snapshots = new SnapshotStore(cli.cwd);
-    this.#session = {
-      sessionId: null,
-      sessionName: null,
-      model: null,
-      cwd: cli.cwd,
-      targetHasCode: false,
-      worktrees: [],
-    };
   }
 
   async start(): Promise<void> {
+    await this.#createBackend();
     await this.#openProject();
-    await this.#startChild();
+    await this.#startBackend();
+    this.#pty = new PtyManager({ cwd: this.#cwd, broadcast: (msg) => this.#broadcast(msg) });
 
     const hub = new WsHub({
       port: this.#cli.port,
@@ -231,56 +188,98 @@ class Bridge {
       cwd: this.#cwd,
       targetHasCode: this.#targetHasCode,
       worktrees: await listWorktrees(this.#cwd),
+      backend: this.#backendInfo,
     };
     await ensureGitExclude(this.#cwd);
     this.#recents = await pushRecent(this.#cwd);
   }
 
-  /** Spawn omp in `#cwd`, register the canvas tool, prime session state. */
-  async #startChild(): Promise<void> {
-    const rpc = new RpcClient({
-      command: this.#cli.command,
+  /**
+   * Resolve the effective config for `#cwd` (user config, then the project's,
+   * then CLI flags) and instantiate its backend. An unknown id is a startup
+   * error naming the ones we know.
+   */
+  async #createBackend(): Promise<void> {
+    const config = await loadShapeConfig({
       cwd: this.#cwd,
-      onEvent: (frame) => this.#onFrame(frame),
-      onStderr: (text) => process.stderr.write(text),
-      onExit: (code, signal) => {
-        const message = `omp exited (code=${code} signal=${signal})`;
-        console.error(`[bridge] ${message}`);
-        this.#hub?.broadcast({ type: "error", message });
-        setTimeout(() => process.exit(code === 0 ? 1 : (code ?? 1)), 50);
-      },
+      backend: this.#cli.backend,
+      ompCommand: this.#cli.ompCommand,
     });
-    this.#rpc = rpc;
+    const backend = createBackend(config.backend, config);
+    this.#backend = backend;
+    this.#backendInfo = { id: backend.id, label: backend.label, capabilities: backend.capabilities };
+  }
 
-    const ready = await rpc.ready;
-    console.error(`[bridge] omp ready (protocol ${String(ready.protocolVersion ?? "?")})`);
-
-    const tools = await rpc.request({
-      type: "set_host_tools",
-      tools: [
-        {
-          name: "canvas",
-          label: "Canvas",
-          description: CANVAS_TOOL_DESCRIPTION,
-          parameters: CANVAS_TOOL_SCHEMA,
-          loadMode: "essential",
-        },
-      ],
+  /** Start the harness in `#cwd`, register the canvas tool, prime session state. */
+  async #startBackend(): Promise<void> {
+    const backend = this.#backend;
+    if (backend === null) throw new Error("bridge: no backend to start");
+    await backend.start({
+      cwd: this.#cwd,
+      events: this.#backendEvents(),
+      canvasTool: { description: CANVAS_TOOL_DESCRIPTION, schema: CANVAS_TOOL_SCHEMA },
     });
-    if (!tools.success) throw new Error(`set_host_tools failed: ${tools.error ?? "unknown"}`);
-    console.error("[bridge] registered host tool: canvas");
-
-    const state = await rpc.request({ type: "get_state" });
-    if (state.success) {
-      this.#session = sessionFromState(state.data, this.#cwd, this.#targetHasCode, this.#session.worktrees);
-      const data = state.data;
-      if (data !== null && typeof data === "object") {
-        if ("isCompacting" in data && data.isCompacting === true) this.#agent = "compacting";
-        else if ("isStreaming" in data && data.isStreaming === true) this.#agent = "streaming";
-      }
-    } else {
-      console.error(`[bridge] get_state failed: ${state.error ?? "unknown"}`);
+    try {
+      const state = await backend.state();
+      this.#session = {
+        ...this.#session,
+        sessionId: state.sessionId,
+        sessionName: state.sessionName,
+        model: state.model,
+      };
+    } catch (err) {
+      console.error(`[bridge] ${errText(err)}`);
     }
+  }
+
+  /** The bridge half of the seam: canvas, transcript, activity, reality. */
+  #backendEvents(): BackendEvents {
+    return {
+      onAgentState: (state) => {
+        // idle IS the end of a turn: onboarding validation disarms and the
+        // reality layer is worth re-deriving.
+        if (state === "idle") {
+          this.#onboarding = false;
+          void this.#refreshReality();
+        }
+        this.#setAgent(state);
+      },
+      onAssistantText: (text) => this.#broadcast({ type: "transcript", role: "assistant", text }),
+      onToolStart: (call) => {
+        this.#broadcast({
+          type: "transcript",
+          role: "tool",
+          text: call.summary === "" ? call.name : `${call.name} ${call.summary}`,
+        });
+        const hits = this.#nodesForPaths(call.paths);
+        if (hits.length > 0) this.#setActivity([...this.#activity, ...hits]);
+      },
+      onToolEnd: (info) => {
+        if (info.isError) this.#broadcast({ type: "transcript", role: "tool", text: `${info.name} failed` });
+      },
+      onTurnEnd: () => this.#setActivity([]),
+      onCanvasCall: (args) => this.#canvasCall(args),
+      onExit: (reason) => {
+        console.error(`[bridge] ${reason}`);
+        this.#broadcast({ type: "error", message: reason });
+        setTimeout(() => process.exit(1), 50);
+      },
+      onError: (message) => this.#error(message),
+    };
+  }
+
+  /** Apply a canvas call and answer the agent with what landed. */
+  async #canvasCall(args: unknown): Promise<{ text: string; isError: boolean }> {
+    const outcome = this.#store.applyCanvasCall(
+      args,
+      this.#onboarding ? onboardingOpGate(this.#cwd) : null,
+    );
+    this.#broadcast({ type: "transcript", role: "tool", text: outcome.transcript });
+    if (outcome.changed) {
+      void this.#graphChanged();
+      this.#broadcast({ type: "graph", graph: this.#store.doc });
+    }
+    return { text: outcome.text, isError: outcome.isError };
   }
 
   // -------------------------------------------------------------------------
@@ -294,16 +293,16 @@ class Bridge {
    * the queued work runs, not when it is queued.
    */
   #onClientMsg(msg: ClientMsg): void {
+    if (isPtyMsg(msg)) {
+      // the terminal is its own channel: never queued behind agent delivery
+      this.#pty.handle(msg);
+      return;
+    }
     if (msg.type === "abort") {
       // aborts must not queue behind an in-flight delivery
-      const rpc = this.#rpc;
-      if (rpc === null) return;
-      rpc.request({ type: "abort" }).then(
-        (res) => {
-          if (!res.success) this.#error(`abort failed: ${res.error ?? "unknown"}`);
-        },
-        (err: unknown) => this.#error(`abort failed: ${String(err)}`),
-      );
+      const backend = this.#backend;
+      if (backend === null) return;
+      backend.abort().catch((err: unknown) => this.#error(errText(err)));
       return;
     }
     if (msg.type === "switch_project") {
@@ -328,10 +327,10 @@ class Bridge {
   }
 
   async #deliver(text: string, referent: Referent | null): Promise<void> {
-    const rpc = this.#rpc;
-    if (rpc === null) return;
+    const backend = this.#backend;
+    if (backend === null) return;
     this.#broadcast({ type: "transcript", role: "user", text });
-    await this.#send(rpc, composeUtterance(this.#store, text, referent));
+    await this.#send(backend, composeUtterance(this.#store, text, referent));
   }
 
   /** Compare two stored revisions; an unknown rev is the client's mistake. */
@@ -346,8 +345,9 @@ class Bridge {
   }
 
   /**
-   * Retarget the bridge at another project: stop the current turn and child,
-   * flush the graph, re-open the new project, spawn a fresh omp, re-hello.
+   * Retarget the bridge at another project: stop the current turn and harness,
+   * flush the graph, re-open the new project, re-read config, start a fresh
+   * backend, re-hello. The terminal follows the new target.
    */
   async #switchProject(rawPath: string): Promise<void> {
     try {
@@ -364,24 +364,23 @@ class Bridge {
         return;
       }
 
-      const old = this.#rpc;
-      this.#rpc = null;
-      if (old !== null) {
-        old.send({ type: "abort" }); // best effort: stop whatever turn is running
-        await old.dispose();
-      }
+      const old = this.#backend;
+      this.#backend = null;
+      if (old !== null) await old.dispose();
       await this.#store.persist();
 
       this.#cwd = target;
+      this.#pty.retarget(target);
       this.#agent = "idle";
-      this.#assistant = "";
       this.#activity = new Set();
       this.#promptSent = false; // a new session earns the preamble again
       this.#onboarding = false;
       this.#realityHead = null;
 
+      // config is per-project: the new target may name a different backend
+      await this.#createBackend();
       await this.#openProject();
-      await this.#startChild();
+      await this.#startBackend();
       this.#broadcast(await this.#hello());
       console.error(`[bridge] switched target to ${target}`);
     } catch (err) {
@@ -397,8 +396,8 @@ class Bridge {
    * with codeRefs validation armed.
    */
   async #onboard(focus: string | undefined): Promise<void> {
-    const rpc = this.#rpc;
-    if (rpc === null) return;
+    const backend = this.#backend;
+    if (backend === null) return;
     if (this.#store.doc.nodes.length > 0) {
       this.#error("onboard rejected: the canvas already has bubbles — steer them instead of remapping");
       return;
@@ -428,115 +427,38 @@ class Bridge {
     }
 
     this.#onboarding = true;
-    await this.#send(rpc, composeSurveyPrompt(this.#store.doc, focus));
+    await this.#send(backend, composeSurveyPrompt(this.#store.doc, focus));
   }
 
-  /** get_state -> steer while streaming, else prompt; first prompt carries the preamble. */
-  async #send(rpc: RpcClient, composed: string): Promise<void> {
+  /**
+   * Steer into a running turn when the backend can; otherwise the message goes
+   * as a prompt and the harness picks it up when the turn ends. The first
+   * prompt of a session carries the preamble.
+   */
+  async #send(backend: Backend, composed: string): Promise<void> {
     let streaming = false;
     try {
-      const state = await rpc.request({ type: "get_state" });
-      const data = state.data;
-      if (state.success && data !== null && typeof data === "object" && "isStreaming" in data) {
-        streaming = data.isStreaming === true;
-      }
+      streaming = (await backend.state()).streaming;
     } catch (err) {
-      this.#error(`get_state failed: ${String(err)}`);
+      this.#error(errText(err));
     }
 
+    const mode: "prompt" | "steer" = backend.capabilities.steerMidTurn && streaming ? "steer" : "prompt";
     const message = streaming || this.#promptSent ? composed : `${PREAMBLE}${composed}`;
     if (!streaming) this.#promptSent = true;
+    if (mode === "prompt" && streaming) {
+      this.#broadcast({
+        type: "transcript",
+        role: "tool",
+        text: `${backend.label} cannot be interrupted mid-turn — queued for the next turn`,
+      });
+    }
 
     try {
-      const res = await rpc.request(
-        streaming ? { type: "steer", message } : { type: "prompt", message },
-      );
-      if (!res.success) this.#error(`${streaming ? "steer" : "prompt"} failed: ${res.error ?? "unknown"}`);
+      await backend.send(message, mode);
     } catch (err) {
-      this.#error(`delivery failed: ${String(err)}`);
+      this.#error(errText(err));
     }
-  }
-
-  // -------------------------------------------------------------------------
-  // agent -> browser
-  // -------------------------------------------------------------------------
-
-  #onFrame(frame: RpcFrame): void {
-    switch (frame.type) {
-      case "agent_start":
-        this.#setAgent("streaming");
-        return;
-      case "agent_end":
-        if (frame.isTerminal !== false) {
-          // the survey turn is over: structure validation returns to normal
-          this.#onboarding = false;
-          this.#setAgent("idle");
-          void this.#refreshReality();
-        }
-        return;
-      case "auto_compaction_start":
-        this.#setAgent("compacting");
-        return;
-      case "auto_compaction_end":
-        this.#setAgent("streaming");
-        return;
-      case "message_update":
-        this.#onDelta(frame.assistantMessageEvent);
-        return;
-      case "message_end":
-        this.#flushAssistant();
-        return;
-      case "turn_end":
-        this.#flushAssistant();
-        this.#setActivity([]);
-        return;
-      case "tool_execution_start":
-        this.#onToolStart(frame);
-        return;
-      case "tool_execution_end":
-        this.#onToolEnd(frame);
-        return;
-      case "host_tool_call":
-        this.#onHostToolCall(frame);
-        return;
-      case "extension_error":
-        this.#error(`extension error: ${String(frame.error ?? "unknown")}`);
-        return;
-      case "bridge_parse_error":
-        console.error(`[bridge] unparseable omp frame: ${String(frame.line)}`);
-        return;
-      default:
-        return;
-    }
-  }
-
-  #onDelta(event: unknown): void {
-    if (event === null || typeof event !== "object") return;
-    if (!("type" in event) || event.type !== "text_delta") return;
-    if (!("delta" in event) || typeof event.delta !== "string") return;
-    this.#assistant += event.delta;
-  }
-
-  #flushAssistant(): void {
-    const text = this.#assistant.trim();
-    this.#assistant = "";
-    if (text.length > 0) this.#broadcast({ type: "transcript", role: "assistant", text });
-  }
-
-  #onToolStart(frame: RpcFrame): void {
-    const name = typeof frame.toolName === "string" ? frame.toolName : "tool";
-    const args = "args" in frame ? frame.args : frame.input;
-    const arg = primaryArg(args);
-    this.#broadcast({ type: "transcript", role: "tool", text: arg === "" ? name : `${name} ${arg}` });
-
-    const hits = this.#nodesForPaths(argPaths(args));
-    if (hits.length > 0) this.#setActivity([...this.#activity, ...hits]);
-  }
-
-  #onToolEnd(frame: RpcFrame): void {
-    if (frame.isError !== true) return;
-    const name = typeof frame.toolName === "string" ? frame.toolName : "tool";
-    this.#broadcast({ type: "transcript", role: "tool", text: `${name} failed` });
   }
 
   /** intent nodes whose codeRefs prefix any of these paths */
@@ -559,38 +481,6 @@ class Bridge {
       }
     }
     return hits;
-  }
-
-  #onHostToolCall(frame: RpcFrame): void {
-    const rpc = this.#rpc;
-    const id = frame.id;
-    if (rpc === null || typeof id !== "string") return;
-
-    if (frame.toolName !== "canvas") {
-      rpc.send({
-        type: "host_tool_result",
-        id,
-        isError: true,
-        result: { content: [{ type: "text", text: `unknown host tool "${String(frame.toolName)}"` }] },
-      });
-      return;
-    }
-
-    const outcome = this.#store.applyCanvasCall(
-      frame.arguments,
-      this.#onboarding ? onboardingOpGate(this.#cwd) : null,
-    );
-    rpc.send({
-      type: "host_tool_result",
-      id,
-      ...(outcome.isError ? { isError: true } : {}),
-      result: { content: [{ type: "text", text: outcome.text }] },
-    });
-    this.#broadcast({ type: "transcript", role: "tool", text: outcome.transcript });
-    if (outcome.changed) {
-      void this.#graphChanged();
-      this.#broadcast({ type: "graph", graph: this.#store.doc });
-    }
   }
 
   // -------------------------------------------------------------------------
@@ -720,5 +610,12 @@ class Bridge {
   }
 }
 
-const bridge = new Bridge(parseArgv(process.argv.slice(2)));
-await bridge.start();
+// A bad --backend id or a broken config file is a startup error, not a stack
+// trace: the operator needs to read what went wrong.
+try {
+  const bridge = new Bridge(parseArgv(process.argv.slice(2)));
+  await bridge.start();
+} catch (err) {
+  console.error(`[bridge] startup failed: ${errText(err)}`);
+  process.exit(1);
+}

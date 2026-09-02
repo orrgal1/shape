@@ -4,9 +4,10 @@ import type { WorktreeInfo } from "../../shared/src/index.ts";
 import { Compare } from "./Compare.tsx";
 import { SidePanel } from "./SidePanel.tsx";
 import { SteeringBar } from "./SteeringBar.tsx";
+import { TerminalPane } from "./Terminal.tsx";
 import { Canvas } from "./canvas/Canvas.tsx";
 import { useDismissable } from "./dismiss.ts";
-import { selectLayer } from "./layer.ts";
+import { selectLayer, selectReality } from "./layer.ts";
 import { isMockMode, startMock } from "./mock.ts";
 import { useApp, type ConnStatus } from "./store.ts";
 import { connectBridge, send } from "./ws.ts";
@@ -272,6 +273,41 @@ function Breadcrumb() {
   );
 }
 
+/**
+ * Canvas or terminal. Two views of the same project, never side by side: the
+ * canvas wants the whole stage and a half-width terminal is a worse terminal.
+ */
+function ViewToggle() {
+  const terminalOpen = useApp((state) => state.terminalOpen);
+  const toggleTerminal = useApp((state) => state.toggleTerminal);
+
+  return (
+    <div className="view-switch" role="group" aria-label="canvas or terminal">
+      <button
+        type="button"
+        className="view-tab"
+        aria-pressed={!terminalOpen}
+        onClick={() => {
+          if (terminalOpen) toggleTerminal();
+        }}
+      >
+        canvas
+      </button>
+      <button
+        type="button"
+        className="view-tab"
+        aria-pressed={terminalOpen}
+        title="the project's shell — Ctrl+`"
+        onClick={() => {
+          if (!terminalOpen) toggleTerminal();
+        }}
+      >
+        terminal
+      </button>
+    </div>
+  );
+}
+
 function Header() {
   const conn = useApp((state) => state.conn);
   const session = useApp((state) => state.session);
@@ -288,6 +324,7 @@ function Header() {
         <ProjectSelector />
         <VariationSwitcher />
       </div>
+      <ViewToggle />
       {conn === "mock" ? (
         // loud on purpose: the sample graph is fiction and has been mistaken for
         // the real project's architecture
@@ -317,18 +354,22 @@ function Header() {
 function StageTools() {
   const showReality = useApp((state) => state.showReality);
   const toggleReality = useApp((state) => state.toggleReality);
-  const realityCount = useApp((state) => state.doc.reality.nodes.length);
+  // only the packages no bubble claims are ever drawn, so only those count:
+  // a badge promising 9 that renders nothing is worse than no badge
+  const realityCount = useApp((state) => selectReality(state.doc).nodes.length);
   const hasNodes = useApp((state) => state.doc.nodes.length > 0);
   const errors = useApp((state) => state.errors);
   const dismissError = useApp((state) => state.dismissError);
   const comparing = useApp((state) => state.delta !== null);
+  // the canvas legend has nothing to say about a shell
+  const terminalOpen = useApp((state) => state.terminalOpen);
 
   return (
     <div className="stage-tools">
-      <Compare />
+      {terminalOpen ? null : <Compare />}
       {/* the phase colours and the code layer both describe the project as it is
           now; inside a comparison they would be answering a question nobody asked */}
-      {hasNodes && !comparing ? (
+      {hasNodes && !comparing && !terminalOpen ? (
         <>
           <button
             type="button"
@@ -492,10 +533,16 @@ export function App() {
     return undefined;
   }, []);
 
-  // Backspace walks up a level, but never while there is text to delete: the
-  // steering input is auto-focused, so stealing the key would break dictation.
+  // Ctrl+` switches views, and Backspace walks up a level — but never while
+  // there is text to delete: the steering input is auto-focused, so stealing
+  // the key would break dictation.
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "`" && event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        useApp.getState().toggleTerminal();
+        return;
+      }
       if (event.key !== "Backspace" || event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
@@ -526,6 +573,8 @@ export function App() {
             <Canvas />
           </ReactFlowProvider>
         </div>
+        {/* stays mounted once shown: hiding it must not cost the scrollback */}
+        <TerminalPane />
         {hasNodes || comparing ? null : <EmptyState />}
         <SteeringBar />
       </div>

@@ -9,6 +9,30 @@ import {
   type ServerMsg,
   type SessionInfo,
 } from "../../shared/src/index.ts";
+import type { PtyServerMsg } from "../../shared/src/pty.ts";
+
+/**
+ * What the bridge's shell is doing. Terminal *output* is deliberately absent:
+ * a shell printing a thousand lines must not re-render the app, so bytes go
+ * straight to the xterm instance through `setPtySink` instead of state.
+ */
+export interface PtyView {
+  /** the bridge has a live shell right now */
+  open: boolean;
+  shell: string;
+  cwd: string;
+  /** set when the shell exited on its own; cleared when one starts again */
+  exited: { code: number | null } | null;
+}
+
+type PtySink = (data: string) => void;
+
+/** one terminal per page, so one sink; null while nothing is drawing */
+let ptySink: PtySink | null = null;
+
+export function setPtySink(sink: PtySink | null): void {
+  ptySink = sink;
+}
 
 export type ConnStatus = "connecting" | "live" | "lost" | "mock";
 
@@ -61,8 +85,15 @@ export interface AppState {
    */
   deltaContext: GraphDoc | null;
 
+  /** the terminal pane is on screen, covering the canvas */
+  terminalOpen: boolean;
+  pty: PtyView;
+
   /** single funnel for everything arriving from the bridge */
   ingest: (msg: ServerMsg) => void;
+  /** terminal frames have their own wire; they never touch the graph */
+  applyPty: (msg: PtyServerMsg) => void;
+  toggleTerminal: () => void;
   setConn: (conn: ConnStatus) => void;
   select: (referent: Referent | null) => void;
   toggleReality: () => void;
@@ -100,6 +131,8 @@ export const useApp = create<AppState>((set, get) => ({
   compare: null,
   delta: null,
   deltaContext: null,
+  terminalOpen: false,
+  pty: { open: false, shell: "", cwd: "", exited: null },
 
   ingest: (msg) => {
     switch (msg.type) {
@@ -166,6 +199,25 @@ export const useApp = create<AppState>((set, get) => ({
         return;
     }
   },
+
+  applyPty: (msg) => {
+    switch (msg.type) {
+      case "pty_data":
+        // straight to the terminal that is drawing; see PtyView
+        ptySink?.(msg.data);
+        return;
+      case "pty_state":
+        set((s) => ({
+          pty: { open: msg.open, shell: msg.shell, cwd: msg.cwd, exited: msg.open ? null : s.pty.exited },
+        }));
+        return;
+      case "pty_exit":
+        set((s) => ({ pty: { ...s.pty, open: false, exited: { code: msg.code } } }));
+        return;
+    }
+  },
+
+  toggleTerminal: () => set((s) => ({ terminalOpen: !s.terminalOpen })),
 
   setConn: (conn) => set({ conn }),
 

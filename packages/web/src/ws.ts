@@ -1,6 +1,7 @@
 import { BRIDGE_PORT, BRIDGE_WS_PATH, type ClientMsg } from "../../shared/src/index.ts";
+import type { PtyClientMsg, PtyServerMsg } from "../../shared/src/pty.ts";
 import { isMockMode, mockSend } from "./mock.ts";
-import { parseServerMsg } from "./parse.ts";
+import { isRecord, parseServerMsg } from "./parse.ts";
 import { useApp } from "./store.ts";
 
 const BRIDGE_URL = `ws://127.0.0.1:${BRIDGE_PORT}${BRIDGE_WS_PATH}`;
@@ -11,8 +12,28 @@ let socket: WebSocket | null = null;
 let retries = 0;
 let retryTimer: number | null = null;
 
+/**
+ * Terminal frames are their own wire: they carry no graph, arrive in bursts
+ * while a shell prints, and are validated here rather than in `parseServerMsg`
+ * so a terminal byte never walks through the graph parser.
+ */
+function asPtyServerMsg(raw: Record<string, unknown>): PtyServerMsg | null {
+  switch (raw.type) {
+    case "pty_data":
+      return typeof raw.data === "string" ? { type: "pty_data", data: raw.data } : null;
+    case "pty_exit":
+      if (raw.code === null) return { type: "pty_exit", code: null };
+      return typeof raw.code === "number" ? { type: "pty_exit", code: raw.code } : null;
+    case "pty_state":
+      if (typeof raw.open !== "boolean" || typeof raw.shell !== "string" || typeof raw.cwd !== "string") return null;
+      return { type: "pty_state", open: raw.open, shell: raw.shell, cwd: raw.cwd };
+    default:
+      return null;
+  }
+}
+
 function open(): void {
-  const { setConn, ingest, pushError } = useApp.getState();
+  const { setConn, ingest, applyPty, pushError } = useApp.getState();
   // first attempt reads as "connecting"; every later one means we lost it
   setConn(retries === 0 ? "connecting" : "lost");
 
@@ -32,6 +53,13 @@ function open(): void {
     } catch {
       pushError("bridge sent a non-JSON frame");
       return;
+    }
+    if (isRecord(raw)) {
+      const pty = asPtyServerMsg(raw);
+      if (pty !== null) {
+        applyPty(pty);
+        return;
+      }
     }
     const msg = parseServerMsg(raw);
     if (msg === null) {
@@ -76,5 +104,15 @@ export function send(msg: ClientMsg): void {
     useApp.getState().pushError("not connected to the bridge — nothing was sent");
     return;
   }
+  socket.send(JSON.stringify(msg));
+}
+
+/**
+ * Terminal input goes only to a real bridge: there is no shell behind the mock
+ * graph, and a keystroke arriving while the socket is down is not worth a toast
+ * — the pane already says the shell is gone.
+ */
+export function sendPty(msg: PtyClientMsg): void {
+  if (isMockMode() || socket === null || socket.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify(msg));
 }

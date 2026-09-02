@@ -60,7 +60,9 @@ export function RelationEdge({ id, data }: EdgeProps<RelEdge>) {
   } else if (lifted) {
     tip = `drawn one level up — click to steer the real relation:\n${(data?.parts ?? []).join("\n")}`;
   } else {
-    tip = `${kind} relation — click to steer it`;
+    // the pill may have been narrowed to fit, so the words live here too
+    const label = data?.label ?? "";
+    tip = label.length > 0 ? `${label}\n${kind} relation — click to steer it` : `${kind} relation — click to steer it`;
   }
 
   return (
@@ -93,6 +95,7 @@ export function RelationEdge({ id, data }: EdgeProps<RelEdge>) {
             data-delta={deltaStatus ?? undefined}
             style={{
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+              maxWidth: geom.labelMax,
               pointerEvents: "all",
             }}
             onClick={(event) => {

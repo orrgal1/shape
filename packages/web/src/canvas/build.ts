@@ -217,6 +217,8 @@ export function buildCanvas({
           bow: { b1: 0, b2: 0 },
           labelT: 0.5,
           labelOff: 0,
+          // a ghost edge is never labelled
+          labelMax: 0,
         },
         edgeId: null,
         count: 0,

@@ -108,16 +108,49 @@ URI-scheme path is deleted) or workspace manager (herdr). Voice input is just an
 tool typing into the focused steering input. Future integrations arrive only as optional,
 configurable adapters — never as dependencies.
 
-**Backend neutrality (user, same day).** Shape is not coupled to any model backend either —
-not omp, not any CLI agent, not any gateway. The bridge is to talk to a `Backend` interface
-and the concrete backend is chosen by configuration. Two adapter families: CLI agents (omp,
-opencode, Claude Code, Cursor CLI, Codex CLI, ...) and direct model access through gateway
-keys (OpenRouter, Vercel AI Gateway, OpenCode Go/Zen, ...) where Shape runs the agent loop
-itself. Today the bridge still hard-wires `omp --mode rpc` (packages/bridge/src/rpc.ts +
-the frame switch in index.ts); that is the first adapter to extract, not the architecture.
+**Backend neutrality (user, same day, refined).** Shape is not coupled to any model backend
+either — not omp, not any CLI agent. Shape does NOT own an agent loop: it runs on top of
+existing harness CLIs and interacts with their sessions. The bridge talks to a `Backend`
+interface (packages/bridge/src/backend/types.ts); the adapter is chosen by configuration
+(`~/.shape/config.json` → `<target>/.shape/config.json` → `--backend`). Every adapter has
+three channels, each with a universal fallback: canvas tool (host tool, or an MCP server Shape
+ships), steer (native, else typing into the pty), events (native stream, else hooks, else
+transcript tail). Two ways a session reaches the canvas: *spawn* (Shape opens the harness TUI
+in its own pty) and *adopt* (discover sessions already running, resume them under Shape's
+pty). Harness surfaces, source-cited: Claude Code full (per-invocation `--mcp-config`,
+stream-json, hooks, UDS attach), Codex full (app-server, daemon attach), opencode full (HTTP
+server), Cursor partial (no mid-turn steer); reports at agent://ClaudeCodeSurface,
+agent://CodexSurface, agent://OpenCodeSurface, agent://CursorCliSurface.
 
 Same day: published public at github.com/orrgal1/shape; mock target project
 github.com/orrgal1/shape-playground ("Ledgerly", pnpm/TS monorepo, 9 packages, branches
 `feature/reminders` (worktree), `experiment/sqlite-store`, `spike/graphql`). First real
 onboarding of it surfaced and fixed: pnpm 11 forwarding `--` into the bridge argv, and the
 side rail growing the shell grid row (canvas dragged offscreen by a long transcript).
+
+## 2026-09-02: roadmap batch one (Opus builders, integrated + verified live)
+
+- **Backend seam** — `packages/bridge/src/backend/{types,omp,config,index}.ts`; omp is the
+  first adapter (`OmpBackend` wraps rpc.ts); `SessionInfo.backend` carries id/label/
+  capabilities; steer-vs-prompt and the preamble stay in the bridge. Bridge smoke 94 checks.
+- **Terminal pane** — `@lydell/node-pty` (node-pty's prebuilt spawn-helper ships mode 644 and
+  fails on Node 26; lydell's prebuilt has no scripts) in `packages/bridge/src/pty.ts`, xterm in
+  `packages/web/src/Terminal.tsx`, Canvas | Terminal toggle (Ctrl+`). v1 runs the login shell
+  in the target cwd; retargets on switch_project. Wire types in `packages/shared/src/pty.ts`.
+- **Discovery** — `packages/bridge/src/discover.ts` (`node packages/bridge/src/discover-cli.ts`):
+  ps + lsof cwd + per-harness session files; `spawnedByShape` flags our own rpc child; a
+  process-start gate stops mtime misattribution. Not wired into the UI yet (batch two).
+- **Layout at real scale** — `?mock=playground` fixture (the real 17-bubble survey, frozen);
+  reality ghosts only for packages no intent bubble claims (fully mapped project → no ghost
+  band); dense layers (≥6 nodes, edges/nodes ≥1) use elk layered, four candidates scored by
+  the strokes they produce; solveBow re-measures against actual blockers. Live on the
+  playground: 0 ghosts, 0 offscreen, 0 overlaps, longest edge 832 px (was 3173).
+- **Git-truth reality** — extraction and the onboarding codeRefs gate use
+  `git ls-files --cached --others --exclude-standard`; gitignored leftovers cannot become
+  bubbles (main: 9 packages; reminders worktree: 10).
+
+Known, queued for batch two: the drift rule attributes package-level import edges to every
+descendant bubble with codeRefs in that package (12 of 17 playground bubbles glow, 59 notes);
+drift should be satisfied when any node mapped into P relates to any node mapped into Q,
+ancestors included. Batch two also: `canvas` as an MCP server + Claude Code adapter (spawn
+mode), discovery/adopt UI, then Codex/opencode adapters and live attach.

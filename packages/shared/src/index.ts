@@ -6,6 +6,10 @@
  * TypeScript (no enums, no namespaces) and dependency-free.
  */
 
+import type { PtyClientMsg, PtyServerMsg } from "./pty.ts";
+
+export type { PtyClientMsg, PtyServerMsg } from "./pty.ts";
+
 // ---------------------------------------------------------------------------
 // Graph document
 // ---------------------------------------------------------------------------
@@ -521,6 +525,30 @@ export interface WorktreeInfo {
   current: boolean;
 }
 
+/**
+ * What the bridge can do with the backend it is driving. The client renders
+ * from this instead of assuming omp: a backend that cannot steer mid-turn
+ * queues instead, one with `terminal: "none"` hides the terminal pane.
+ */
+export interface BackendCapabilities {
+  /** a message can be injected into a running turn */
+  steerMidTurn: boolean;
+  /** the harness can call a host-provided tool (the canvas) */
+  hostTool: boolean;
+  /** how the bridge learns what the agent is doing */
+  events: "native" | "hooks" | "transcript" | "none";
+  /** a previous session can be resumed */
+  resume: boolean;
+  /** what a terminal pane would attach to */
+  terminal: "tui" | "shell" | "none";
+}
+
+export interface BackendInfo {
+  id: string;
+  label: string;
+  capabilities: BackendCapabilities;
+}
+
 export interface SessionInfo {
   sessionId: string | null;
   sessionName: string | null;
@@ -534,6 +562,8 @@ export interface SessionInfo {
    * `switch_project` to a worktree's path.
    */
   worktrees: WorktreeInfo[];
+  /** the harness this session is running on, and what it can do */
+  backend: BackendInfo;
 }
 
 export type AgentState = "idle" | "streaming" | "compacting";
@@ -561,7 +591,8 @@ export type ServerMsg =
   | { type: "revisions"; revisions: RevisionInfo[] }
   /** broadcast reply to a `diff` request */
   | { type: "delta"; delta: GraphDelta }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | PtyServerMsg;
 
 export type ClientMsg =
   | { type: "utterance"; referent: Referent | null; text: string }
@@ -569,4 +600,5 @@ export type ClientMsg =
   | { type: "switch_project"; path: string }
   /** compare two snapshots; `revA` = before, `revB` = after. Unknown rev → `error` frame */
   | { type: "diff"; revA: number; revB: number }
-  | { type: "abort" };
+  | { type: "abort" }
+  | PtyClientMsg;

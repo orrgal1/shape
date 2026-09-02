@@ -8,6 +8,7 @@ import {
   MODEL_ROLES,
   PHASES,
   type AgentState,
+  type BackendInfo,
   type DriftMap,
   type EdgeKind,
   type EntityDelta,
@@ -229,21 +230,49 @@ function asWorktree(value: unknown): WorktreeInfo | null {
   return { path, branch, head, current: value.current };
 }
 
+const BACKEND_EVENT_KINDS: readonly string[] = ["native", "hooks", "transcript", "none"];
+const BACKEND_TERMINALS: readonly string[] = ["tui", "shell", "none"];
+
+function asBackendInfo(value: unknown): BackendInfo | null {
+  if (!isRecord(value)) return null;
+  const id = asStr(value.id);
+  const label = asStr(value.label);
+  const caps = value.capabilities;
+  if (id === null || label === null || !isRecord(caps)) return null;
+  if (typeof caps.steerMidTurn !== "boolean" || typeof caps.hostTool !== "boolean") return null;
+  if (typeof caps.resume !== "boolean") return null;
+  if (typeof caps.events !== "string" || !BACKEND_EVENT_KINDS.includes(caps.events)) return null;
+  if (typeof caps.terminal !== "string" || !BACKEND_TERMINALS.includes(caps.terminal)) return null;
+  return {
+    id,
+    label,
+    capabilities: {
+      steerMidTurn: caps.steerMidTurn,
+      hostTool: caps.hostTool,
+      // membership checked above; the cast only names the narrowed unions
+      events: caps.events as BackendInfo["capabilities"]["events"],
+      resume: caps.resume,
+      terminal: caps.terminal as BackendInfo["capabilities"]["terminal"],
+    },
+  };
+}
+
 function asSessionInfo(value: unknown): SessionInfo | null {
   if (!isRecord(value)) return null;
   const sessionId = asNullableStr(value.sessionId);
   const sessionName = asNullableStr(value.sessionName);
   const cwd = asStr(value.cwd);
   const worktrees = mapAll(value.worktrees, asWorktree);
+  const backend = asBackendInfo(value.backend);
   if (sessionId === undefined || sessionName === undefined || cwd === null || worktrees === null) return null;
-  if (typeof value.targetHasCode !== "boolean") return null;
+  if (typeof value.targetHasCode !== "boolean" || backend === null) return null;
   let model: SessionInfo["model"] = null;
   if (isRecord(value.model)) {
     const provider = asStr(value.model.provider);
     const id = asStr(value.model.id);
     if (provider !== null && id !== null) model = { provider, id };
   }
-  return { sessionId, sessionName, model, cwd, targetHasCode: value.targetHasCode, worktrees };
+  return { sessionId, sessionName, model, cwd, targetHasCode: value.targetHasCode, worktrees, backend };
 }
 
 export function parseServerMsg(raw: unknown): ServerMsg | null {

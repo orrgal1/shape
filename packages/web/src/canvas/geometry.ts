@@ -48,6 +48,13 @@ export interface EdgeGeom {
   labelT: number;
   /** small perpendicular nudge for the label, kept tiny so it stays anchored */
   labelOff: number;
+  /**
+   * Width the pill is allowed, which is what the placement was solved for. On
+   * a dense layer a full-width pill has nowhere clear to sit at all; a narrower
+   * one does, and the text ellipsises into it with the whole relation still in
+   * the tooltip. Full width whenever full width fits.
+   */
+  labelMax: number;
 }
 
 export type Side = "t" | "r" | "b" | "l";
@@ -71,15 +78,33 @@ const LABEL_MARGIN = 5;
 const BOW_PER_DEVIATION = 1.34;
 /** how much further to reach when the solved curve still grazes something */
 const REACH = [1, 1.45, 2.1, 3] as const;
+/** a bow smaller than this is not worth drawing as a bend at all */
+const MIN_REACH = 40;
+/** re-measurements of what a candidate still runs into before giving up */
+const ROUNDS = 4;
+/** segments the drawn length of a curve is measured over */
+const LENGTH_SAMPLES = 24;
 /** where along the chord the two control points sit */
 const C1_T = 0.28;
 const C2_T = 0.72;
 /** points sampled along a curve when testing it against bubbles */
 const STROKE_SAMPLES = 28;
-/** positions along the curve a label may slide to */
+/**
+ * Positions along the curve a label may slide to, and how far off it — with a
+ * tether drawn for anything but zero, so an offset label still reads as
+ * attached. A dense layer needs the far offsets: on the nine-package fixture
+ * they are the difference between two truncated pills and five, because the
+ * only clear air is a whole row-gap away from the curve.
+ */
 const LABEL_TS: readonly number[] = [0.5, 0.42, 0.58, 0.34, 0.66, 0.27, 0.73];
-/** and how far off it, as a last resort, so it still reads as attached */
-const LABEL_OFFSETS: readonly number[] = [0, -22, 22];
+const LABEL_OFFSETS: readonly number[] = [0, -22, 22, -36, 36, -54, 54];
+/**
+ * Widths a pill will settle for, tried widest first. A dense layer leaves gaps
+ * of a few dozen pixels between rows and a full pill is nearly two hundred
+ * wide: with one width to try, a third of the labels on the nine-package
+ * fixture ended up parked on top of a bubble, which is worse than an ellipsis.
+ */
+const LABEL_WIDTHS: readonly number[] = [LABEL_MAX_W, 132, 92, 58];
 
 export function labelWidth(text: string): number {
   return Math.min(LABEL_MAX_W, text.length * LABEL_CHAR_W + LABEL_CHROME_W);
@@ -194,78 +219,126 @@ function strikes(a: Point, b: Point, bow: Bow, blockers: readonly Obstacle[]): n
   return count;
 }
 
+/** which blockers this curve actually runs into — the ones worth bowing around */
+function hitBy(a: Point, b: Point, bow: Bow, blockers: readonly Obstacle[]): Obstacle[] {
+  const [c1, c2] = cubicControls(a, b, bow);
+  const hit: Obstacle[] = [];
+  for (const entry of blockers) {
+    for (let i = 1; i < STROKE_SAMPLES; i += 1) {
+      if (!inside(cubicPoint(a, c1, c2, b, i / STROKE_SAMPLES), entry.box, STROKE_MARGIN)) continue;
+      hit.push(entry);
+      break;
+    }
+  }
+  return hit;
+}
+
+/** drawn length of the curve; the quantity a long detour shows up in */
+function curveLength(a: Point, b: Point, bow: Bow): number {
+  const [c1, c2] = cubicControls(a, b, bow);
+  let length = 0;
+  let previous = a;
+  for (let i = 1; i <= LENGTH_SAMPLES; i += 1) {
+    const point = cubicPoint(a, c1, c2, b, i / LENGTH_SAMPLES);
+    length += Math.hypot(point.x - previous.x, point.y - previous.y);
+    previous = point;
+  }
+  return length;
+}
+
 /**
- * Finds a curve that clears every bubble the stroke merely passes.
+ * Finds the shortest curve that clears every bubble the stroke merely passes.
  *
- * The reach needed is measured, not guessed: each blocker alongside the run is
- * projected onto the chord's normal, which says how far the curve has to swing
- * to get by. Symmetric bows are tried first because they read as a simple arc;
- * S-shapes come next, for the cases where something sits near one end only. The
- * sampled count is authoritative — a measured reach can still graze a bubble the
- * projection did not consider, and the search keeps going until nothing is hit.
+ * Two things make this hard, and an earlier version got both wrong by measuring
+ * every blocker whose *projection onto the chord* fell within the run. On a
+ * dense layer that includes bubbles sitting hundreds of pixels off to the side
+ * which the stroke was never going to touch, so the reach was computed to clear
+ * the whole neighbourhood: strokes ballooned to 3000px arcs around compositions
+ * a quarter that size. So the reach is measured from the bubbles the curve
+ * genuinely runs into, found by sampling, and re-measured against the union
+ * after each attempt — swinging clear of one bubble can push a curve into
+ * another, and that one then joins the set the next reach has to clear.
+ *
+ * The second is that the first curve to come back clean is not the best one. A
+ * bow that clears by a mile clears, and looks absurd. Every clean candidate is
+ * measured and the shortest wins, which is the same quantity a reader perceives
+ * as "that line went the long way round".
  */
 function solveBow(a: Point, b: Point, blockers: readonly Obstacle[], base: number): Bow {
   const flat: Bow = { b1: base, b2: base };
-  if (blockers.length === 0 || strikes(a, b, flat, blockers) === 0) return flat;
+  if (blockers.length === 0) return flat;
+  let hit = hitBy(a, b, flat, blockers);
+  if (hit.length === 0) return flat;
 
   const f = frameOf(a, b);
-  let needPos = 0;
-  let needNeg = 0;
-  for (const entry of blockers) {
-    const { box } = entry;
-    const corners: Point[] = [
-      { x: box.x, y: box.y },
-      { x: box.x + box.w, y: box.y },
-      { x: box.x, y: box.y + box.h },
-      { x: box.x + box.w, y: box.y + box.h },
-    ];
-    let along = false;
-    for (const corner of corners) {
-      const t = ((corner.x - a.x) * f.ux + (corner.y - a.y) * f.uy) / f.len;
-      if (t > -0.15 && t < 1.15) along = true;
-    }
-    if (!along) continue;
-    for (const corner of corners) {
-      const d = (corner.x - a.x) * f.nx + (corner.y - a.y) * f.ny;
-      needPos = Math.max(needPos, d + STROKE_MARGIN);
-      needNeg = Math.max(needNeg, -d + STROKE_MARGIN);
-    }
-  }
+  const offending = new Map<string, Obstacle>();
 
-  const cheaper = needNeg < needPos ? -1 : 1;
-  const reachOf = (side: number): number =>
-    Math.max(60, (side > 0 ? needPos : needNeg) * BOW_PER_DEVIATION);
+  let best = flat;
+  let bestHits = strikes(a, b, flat, blockers);
+  let bestLength = Number.POSITIVE_INFINITY;
 
-  const candidates: Bow[] = [];
-  for (const side of [cheaper, -cheaper]) {
-    const b0 = reachOf(side) * side;
-    for (const factor of REACH) {
-      const magnitude = b0 * factor;
-      candidates.push({ b1: base + magnitude, b2: base + magnitude });
-    }
-  }
-  // S-shapes: swing wide at one end and stay tight at the other
-  for (const side of [cheaper, -cheaper]) {
-    const b0 = reachOf(side) * side;
-    for (const factor of REACH) {
-      const magnitude = b0 * factor;
-      candidates.push({ b1: base + magnitude, b2: base + magnitude * 0.15 });
-      candidates.push({ b1: base + magnitude * 0.15, b2: base + magnitude });
-      candidates.push({ b1: base + magnitude, b2: base - magnitude * 0.6 });
-      candidates.push({ b1: base - magnitude * 0.6, b2: base + magnitude });
-    }
-  }
+  for (let round = 0; round < ROUNDS; round += 1) {
+    for (const entry of hit) offending.set(entry.id, entry);
 
-  let best = candidates[0] ?? flat;
-  let bestHits = Number.POSITIVE_INFINITY;
-  for (const bow of candidates) {
-    const hits = strikes(a, b, bow, blockers);
-    if (hits === 0) return bow;
-    if (hits < bestHits) {
-      bestHits = hits;
+    // how far off the chord, to each side, the offenders reach
+    let needPos = 0;
+    let needNeg = 0;
+    for (const entry of offending.values()) {
+      const { box } = entry;
+      for (const corner of [
+        { x: box.x, y: box.y },
+        { x: box.x + box.w, y: box.y },
+        { x: box.x, y: box.y + box.h },
+        { x: box.x + box.w, y: box.y + box.h },
+      ]) {
+        const d = (corner.x - a.x) * f.nx + (corner.y - a.y) * f.ny;
+        needPos = Math.max(needPos, d + STROKE_MARGIN);
+        needNeg = Math.max(needNeg, -d + STROKE_MARGIN);
+      }
+    }
+
+    const cheaper = needNeg < needPos ? -1 : 1;
+    const candidates: Bow[] = [];
+    for (const side of [cheaper, -cheaper]) {
+      const reach = Math.max(MIN_REACH, (side > 0 ? needPos : needNeg) * BOW_PER_DEVIATION);
+      for (const factor of REACH) {
+        const magnitude = reach * factor * side;
+        candidates.push({ b1: base + magnitude, b2: base + magnitude });
+        // S-shapes: swing wide at one end and stay tight at the other, for the
+        // cases where something sits near one end only
+        candidates.push({ b1: base + magnitude, b2: base + magnitude * 0.15 });
+        candidates.push({ b1: base + magnitude * 0.15, b2: base + magnitude });
+        candidates.push({ b1: base + magnitude, b2: base - magnitude * 0.6 });
+        candidates.push({ b1: base - magnitude * 0.6, b2: base + magnitude });
+      }
+    }
+
+    let clean: Bow | null = null;
+    for (const bow of candidates) {
+      const hits = strikes(a, b, bow, blockers);
+      if (hits > 0) {
+        if (hits < bestHits) {
+          bestHits = hits;
+          best = bow;
+          bestLength = Number.POSITIVE_INFINITY;
+        }
+        continue;
+      }
+      const length = curveLength(a, b, bow);
+      if (bestHits === 0 && length >= bestLength) continue;
+      bestHits = 0;
+      bestLength = length;
       best = bow;
+      clean = bow;
     }
+    if (clean !== null) return best;
+
+    // nothing clean yet: whatever the best attempt still runs into joins the
+    // set the next round has to clear
+    hit = hitBy(a, b, best, blockers);
+    if (hit.every((entry) => offending.has(entry.id))) break;
   }
+
   return best;
 }
 
@@ -287,9 +360,27 @@ const SIDE_NAME: Record<Side, "top" | "right" | "bottom" | "left"> = {
 /** points sampled along a curve when testing labels against other strokes */
 const ROUTE_SAMPLES = 16;
 
-export function computeEdgeGeometry({ edges, boxes, obstacles }: GeometryInput): Record<string, EdgeGeom> {
-  const out: Record<string, EdgeGeom> = {};
+/** one stroke, anchored, bowed and sampled */
+export interface SolvedEdge {
+  edge: LayerEdge;
+  a: Point;
+  b: Point;
+  bow: Bow;
+  c1: Point;
+  c2: Point;
+  route: Vec2[];
+}
 
+/**
+ * Anchors and bows for every edge, plus a sampled polyline of each stroke so
+ * the label pass can keep labels off the other relations' routes.
+ *
+ * Separate from the label pass because a layout candidate is judged on its
+ * strokes alone: `layout.ts` runs this over each arrangement it is considering
+ * and keeps the one whose strokes come out shortest and clean, which would be
+ * absurdly expensive if choosing also meant placing every label.
+ */
+export function solveRoutes({ edges, boxes, obstacles }: GeometryInput): SolvedEdge[] {
   // a pair with strokes in both directions must curve apart or they coincide
   const seen = new Set<string>();
   const opposed = new Set<string>();
@@ -335,17 +426,6 @@ export function computeEdgeGeometry({ edges, boxes, obstacles }: GeometryInput):
     },
   });
 
-  // pass one: anchors and bows for every edge, plus a sampled polyline of each
-  // stroke so the label pass can keep labels off the other relations' routes
-  interface SolvedEdge {
-    edge: LayerEdge;
-    a: Point;
-    b: Point;
-    bow: Bow;
-    c1: Point;
-    c2: Point;
-    route: Vec2[];
-  }
   const solved: SolvedEdge[] = [];
   for (const edge of edges) {
     const source = boxes[edge.source];
@@ -372,6 +452,39 @@ export function computeEdgeGeometry({ edges, boxes, obstacles }: GeometryInput):
     }
     solved.push({ edge, a, b, bow, c1, c2, route });
   }
+  return solved;
+}
+
+/** what an arrangement's strokes cost the reader */
+export interface RoutingCost {
+  /** sampled points landing inside a bubble the stroke does not terminate at */
+  strikes: number;
+  /** the drawn length of the worst stroke */
+  longest: number;
+  /** and of all of them, as a tie-break between otherwise equal arrangements */
+  total: number;
+}
+
+export function routingCost(input: GeometryInput): RoutingCost {
+  let hits = 0;
+  let longest = 0;
+  let total = 0;
+  for (const solved of solveRoutes(input)) {
+    const blockers = input.obstacles.filter(
+      (entry) => entry.id !== solved.edge.source && entry.id !== solved.edge.target,
+    );
+    hits += strikes(solved.a, solved.b, solved.bow, blockers);
+    const length = curveLength(solved.a, solved.b, solved.bow);
+    longest = Math.max(longest, length);
+    total += length;
+  }
+  return { strikes: hits, longest, total };
+}
+
+export function computeEdgeGeometry(input: GeometryInput): Record<string, EdgeGeom> {
+  const out: Record<string, EdgeGeom> = {};
+  const { obstacles } = input;
+  const solved = solveRoutes(input);
 
   // each entry's index doubles as its relationIndex, so the vendored clearance
   // check skips a label's own stroke without any filtering
@@ -393,41 +506,61 @@ export function computeEdgeGeometry({ edges, boxes, obstacles }: GeometryInput):
   for (const { entry, index } of order) {
     const { edge, a, b, bow, c1, c2 } = entry;
     const text = edge.label !== null && edge.label.length > 0 ? edge.label : edge.kind;
-    const width = labelWidth(text);
+    const natural = labelWidth(text);
 
-    let labelT = 0.5;
-    let labelOff = 0;
-    let settled = false;
-    for (const t of LABEL_TS) {
-      if (settled) break;
-      for (const off of LABEL_OFFSETS) {
-        const point = cubicPoint(a, c1, c2, b, t);
-        const normal = cubicNormal(a, c1, c2, b, t);
-        const centre = { x: point.x + normal.x * off, y: point.y + normal.y * off };
-        const rect: Box = { x: centre.x - width / 2, y: centre.y - LABEL_H / 2, w: width, h: LABEL_H };
-        if (obstacles.some((blocker) => rectsOverlap(rect, blocker.box, LABEL_MARGIN))) continue;
-        if (placedLabels.some((other) => rectsOverlap(rect, other, LABEL_MARGIN))) continue;
-        // vendored archify clearance: a spot on someone else's stroke reads as
-        // labelling that relation, so it is rejected like any other collision
-        const crowded = collectLabelRouteClearance({
-          labels: [{ rect: { x: rect.x, y: rect.y, width: rect.w, height: rect.h }, relationIndex: index }],
-          routedRelations: routes,
-          threshold: LABEL_MARGIN,
-        });
-        if (crowded.length > 0) continue;
-        labelT = t;
-        labelOff = off;
-        placedLabels.push(rect);
-        settled = true;
-        break;
+    /**
+     * Bubbles and other labels are hard constraints: a pill on either is
+     * unreadable, so the pill gives up characters instead. Another relation's
+     * stroke is a soft one — the pill is opaque, so it hides a few pixels of a
+     * line, and the tether plus its position still say which relation it
+     * belongs to. Preferring a narrower pill over one crossing a stroke is how
+     * this pass ended up truncating seven of eighteen labels on a dense layer
+     * to two characters, which is a far worse trade than an occluded line.
+     */
+    let placed: { t: number; off: number; width: number; rect: Box } | null = null;
+    let fallback: Box | null = null;
+    for (const budget of LABEL_WIDTHS) {
+      const width = Math.min(natural, budget);
+      let bestCrossings = Number.POSITIVE_INFINITY;
+      for (const t of LABEL_TS) {
+        for (const off of LABEL_OFFSETS) {
+          const point = cubicPoint(a, c1, c2, b, t);
+          const normal = cubicNormal(a, c1, c2, b, t);
+          const centre = { x: point.x + normal.x * off, y: point.y + normal.y * off };
+          const rect: Box = { x: centre.x - width / 2, y: centre.y - LABEL_H / 2, w: width, h: LABEL_H };
+          if (fallback === null) fallback = rect;
+          if (obstacles.some((blocker) => rectsOverlap(rect, blocker.box, LABEL_MARGIN))) continue;
+          if (placedLabels.some((other) => rectsOverlap(rect, other, LABEL_MARGIN))) continue;
+          // vendored archify clearance: how many other relations' strokes run
+          // under this spot, so the least ambiguous one can be preferred
+          const crossings = collectLabelRouteClearance({
+            labels: [{ rect: { x: rect.x, y: rect.y, width: rect.w, height: rect.h }, relationIndex: index }],
+            routedRelations: routes,
+            threshold: LABEL_MARGIN,
+          }).length;
+          if (crossings >= bestCrossings) continue;
+          bestCrossings = crossings;
+          placed = { t, off, width, rect };
+          if (crossings === 0) break;
+        }
+        if (bestCrossings === 0) break;
       }
-    }
-    if (!settled) {
-      const point = cubicPoint(a, c1, c2, b, 0.5);
-      placedLabels.push({ x: point.x - width / 2, y: point.y - LABEL_H / 2, w: width, h: LABEL_H });
+      // the widest width with anywhere to sit wins; narrower is a last resort
+      if (placed !== null) break;
     }
 
-    out[edge.id] = { ax: a.x, ay: a.y, bx: b.x, by: b.y, bow, labelT, labelOff };
+    const rect = placed?.rect ?? fallback;
+    if (rect !== null) placedLabels.push(rect);
+    out[edge.id] = {
+      ax: a.x,
+      ay: a.y,
+      bx: b.x,
+      by: b.y,
+      bow,
+      labelT: placed?.t ?? 0.5,
+      labelOff: placed?.off ?? 0,
+      labelMax: placed?.width ?? Math.min(natural, LABEL_WIDTHS[LABEL_WIDTHS.length - 1] ?? natural),
+    };
   }
 
   return out;

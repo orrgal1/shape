@@ -34,6 +34,21 @@ export function parseClientMsg(raw: string): ClientMsg | null {
     if (!("revB" in parsed) || typeof parsed.revB !== "number" || !Number.isInteger(parsed.revB)) return null;
     return { type: "diff", revA: parsed.revA, revB: parsed.revB };
   }
+  if (parsed.type === "pty_open" || parsed.type === "pty_resize") {
+    // a terminal size must be a real geometry: the pty is resized with it
+    if (!("cols" in parsed) || typeof parsed.cols !== "number" || !Number.isInteger(parsed.cols) || parsed.cols <= 0) {
+      return null;
+    }
+    if (!("rows" in parsed) || typeof parsed.rows !== "number" || !Number.isInteger(parsed.rows) || parsed.rows <= 0) {
+      return null;
+    }
+    return { type: parsed.type, cols: parsed.cols, rows: parsed.rows };
+  }
+  if (parsed.type === "pty_input") {
+    if (!("data" in parsed) || typeof parsed.data !== "string") return null;
+    return { type: "pty_input", data: parsed.data };
+  }
+  if (parsed.type === "pty_close") return { type: "pty_close" };
   if (parsed.type !== "utterance") return null;
   if (!("text" in parsed) || typeof parsed.text !== "string") return null;
 

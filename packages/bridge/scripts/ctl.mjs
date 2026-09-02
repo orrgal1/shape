@@ -87,8 +87,16 @@ if (!hello) out(2, { ok: false, error: "no bridge" });
 const isRejection = (prefix) => (f) => f.type === "error" && f.message.startsWith(prefix);
 
 if (command === "status") {
-  const { cwd, sessionName, worktrees } = hello.session;
-  out(0, { ok: true, cwd, sessionName, worktrees });
+  const { cwd, sessionName, worktrees, backend } = hello.session;
+  out(0, {
+    ok: true,
+    cwd,
+    sessionName,
+    backend: backend?.id ?? null,
+    capabilities: backend?.capabilities ?? null,
+    nodes: hello.graph.nodes.length,
+    worktrees,
+  });
 }
 
 if (command === "switch-project") {

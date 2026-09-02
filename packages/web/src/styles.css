@@ -2784,3 +2784,137 @@ kbd {
 .project-recent[data-current="true"]:hover {
   background: none;
 }
+
+/* ==========================================================================
+   view switch — canvas or terminal (header)
+   ========================================================================== */
+
+.view-switch {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+}
+
+.view-tab {
+  height: 20px;
+  padding: 0 10px;
+  border-radius: var(--r-pill);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  transition:
+    color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+
+.view-tab:hover {
+  color: var(--text-dim);
+}
+
+.view-tab[aria-pressed="true"] {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+/* ==========================================================================
+   terminal pane — the project's shell, over the canvas
+   ========================================================================== */
+
+/* Covers the stage rather than sharing it: the canvas keeps its own measured
+   box (React Flow sizes itself from the container), and the pane clears the
+   header above and the steering bar below instead of hiding either. */
+.term {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  /* opaque: a bubble's edge peeking out from behind a shell is just noise */
+  background: var(--bg);
+  flex-direction: column;
+  padding: 52px var(--s4) 88px;
+}
+
+.term-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: 0 var(--s2) var(--s2);
+}
+
+.term-title {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.term-where {
+  font-size: var(--t-xs);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.term-shell {
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+  margin-right: auto;
+}
+
+.term-hint {
+  flex: none;
+  color: var(--text-faint);
+}
+
+.term-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+
+.term-host {
+  position: absolute;
+  inset: var(--s3);
+}
+
+/* xterm draws its own scrollbar area; keep it in the instrument's palette */
+.term-host .xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.term-veil {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s4);
+  background: color-mix(in oklab, var(--bg) 78%, transparent);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.term-veil-action {
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.term-veil-action:hover {
+  color: var(--text);
+}

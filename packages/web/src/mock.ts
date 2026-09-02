@@ -19,9 +19,10 @@ import {
   type WorktreeInfo,
 } from "../../shared/src/index.ts";
 import { useApp } from "./store.ts";
+import { isPlaygroundMock, startPlaygroundMock } from "./fixtures/playground.ts";
 
 export function isMockMode(): boolean {
-  return new URLSearchParams(window.location.search).get("mock") === "1";
+  return new URLSearchParams(window.location.search).get("mock") === "1" || isPlaygroundMock();
 }
 
 function isEmptyVariant(): boolean {
@@ -105,7 +106,7 @@ const MOCK_WORKTREES: readonly WorktreeInfo[] = [
   { path: "/Users/you/code/vireo-spike", branch: null, head: "b71e2fa", current: false },
 ];
 
-function mockSession(targetHasCode: boolean): SessionInfo {
+export function mockSession(targetHasCode: boolean): SessionInfo {
   return {
     sessionId: "mock-session",
     sessionName: "vireo field notebook",
@@ -113,6 +114,11 @@ function mockSession(targetHasCode: boolean): SessionInfo {
     cwd: "/Users/you/code/vireo",
     targetHasCode,
     worktrees: MOCK_WORKTREES.map((entry) => ({ ...entry })),
+    backend: {
+      id: "omp",
+      label: "omp",
+      capabilities: { steerMidTurn: true, hostTool: true, events: "native", resume: true, terminal: "shell" },
+    },
   };
 }
 
@@ -317,6 +323,7 @@ const ACTIVITY_PERIOD_MS = 2000;
 
 export function startMock(): () => void {
   const store = useApp.getState();
+  if (isPlaygroundMock()) return startPlaygroundMock();
 
   if (isEmptyVariant()) {
     // brownfield entry: code on disk, nothing mapped yet
@@ -462,6 +469,8 @@ export function mockSend(msg: ClientMsg): void {
     store.ingest({ type: "delta", delta: { revA: msg.revA, revB: msg.revB, nodes, edges } });
     return;
   }
+  // the mock has no shell: pty frames are the terminal pane's business
+  if (msg.type !== "utterance") return;
   const where = msg.referent === null ? "whole project" : `${msg.referent.kind} ${msg.referent.id}`;
   store.appendTranscript("user", msg.text);
   store.appendTranscript("tool", `steer -> ${where} (mock: no bridge attached)`);
