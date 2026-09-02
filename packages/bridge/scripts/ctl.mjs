@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Bridge control CLI — drives a *running* visual-harness bridge over its
+ * Bridge control CLI — drives a *running* Shape bridge over its
  * WebSocket, for scripts/skills that need to retarget the bridge or trigger
  * onboarding without the web UI.
  *

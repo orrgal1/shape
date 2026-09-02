@@ -118,7 +118,7 @@ function mockSession(targetHasCode: boolean): SessionInfo {
 
 const MOCK_RECENTS: readonly string[] = [
   "/Users/you/code/vireo",
-  "/Users/you/code/visual-harness",
+  "/Users/you/code/shape",
   "/Users/you/code/pomo",
   "/Users/you/work/atlas-api",
 ];

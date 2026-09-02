@@ -9,7 +9,7 @@ import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { WorktreeInfo } from "../../shared/src/index.ts";
 
-const EXCLUDE_LINE = ".visual-harness/";
+const EXCLUDE_LINE = ".shape/";
 
 /** Run git, resolving to null on any failure (missing git, not a repo, ...). */
 function git(cwd: string, args: string[]): Promise<string | null> {
@@ -98,7 +98,7 @@ export async function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
 }
 
 /**
- * Keep per-worktree canvas state out of every branch: `.visual-harness/` goes in
+ * Keep per-worktree canvas state out of every branch: `.shape/` goes in
  * the repo's shared `info/exclude` (common dir → covers every worktree). Silent
  * no-op outside a repo or when the file cannot be written.
  */

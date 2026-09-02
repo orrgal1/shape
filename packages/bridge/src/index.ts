@@ -1,5 +1,5 @@
 /**
- * visual-harness bridge: spawns `omp --mode rpc` in a target project, exposes the
+ * Shape bridge: spawns `omp --mode rpc` in a target project, exposes the
  * `canvas` host tool to the agent, and serves the browser canvas over WebSocket.
  *
  * Run: node src/index.ts [--cwd <dir>] [--port <n>] [--omp "<cmd ...>"]

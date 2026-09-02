@@ -1,6 +1,6 @@
 /**
- * Recently-targeted projects: ~/.visual-harness/recents.json, most-recent first,
- * deduped, capped. `VISUAL_HARNESS_HOME` overrides the home dir (tests).
+ * Recently-targeted projects: ~/.shape/recents.json, most-recent first,
+ * deduped, capped. `SHAPE_HOME` overrides the home dir (tests).
  */
 
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -10,8 +10,8 @@ import { join } from "node:path";
 const CAP = 10;
 
 function recentsFile(): string {
-  const home = process.env.VISUAL_HARNESS_HOME ?? homedir();
-  return join(home, ".visual-harness", "recents.json");
+  const home = process.env.SHAPE_HOME ?? homedir();
+  return join(home, ".shape", "recents.json");
 }
 
 async function isDirectory(path: string): Promise<boolean> {

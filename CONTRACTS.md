@@ -89,9 +89,9 @@ Client → server (`ClientMsg`):
   while the intent layer is empty
 - `switch_project` — `{ path: string }` retarget the bridge: abort any running turn, dispose
   the omp child, re-point at `path` (per-project graph persists at
-  `<path>/.visual-harness/graph.json`), re-extract reality, spawn a fresh omp, broadcast
+  `<path>/.shape/graph.json`), re-extract reality, spawn a fresh omp, broadcast
   `hello`. `~` expands; non-directory paths → `error` frame, current project untouched.
-  Recents persist in `~/.visual-harness/recents.json` (most-recent first, deduped, cap 10).
+  Recents persist in `~/.shape/recents.json` (most-recent first, deduped, cap 10).
 - `abort`
 
 `SessionInfo` includes `targetHasCode: boolean` (bridge runs `extractReality` once at startup;
@@ -101,11 +101,11 @@ when `targetHasCode` and `nodes.length === 0`.
 ## Worktrees (user decision 2026-08-28: toggle first, compare later)
 
 Each git worktree of the target's repo is an architecture variation with its own canvas
-state (its own `<worktree>/.visual-harness/graph.json`). `SessionInfo.worktrees` carries
+state (its own `<worktree>/.shape/graph.json`). `SessionInfo.worktrees` carries
 `{ path, branch, head, current }[]` from `git worktree list --porcelain`, re-detected on
 every hello; empty for non-git targets (client hides the switcher). Toggling a worktree IS
 `switch_project` to its path — full clean retarget, no separate message. The bridge appends
-`.visual-harness/` to the repo's `.git/info/exclude` (shared common dir → covers every
+`.shape/` to the repo's `.git/info/exclude` (shared common dir → covers every
 worktree) so canvas state never leaks between branches via a commit. Side-by-side /
 comparative views of two worktrees' GraphDocs are deferred by design.
 
@@ -158,16 +158,14 @@ intent `depends` edges with no reality counterpart once both ends are `building`
 
 ## Voice capture (web, v1)
 
-Tier 3 primary: selecting a node/edge focuses a hidden input under a visible steering bar;
-any dictation tool (incl. Wispr) types into it; Enter commits → `utterance`.
-Tier 2 opportunistic: press-and-hold ≥ 350 ms on a node attempts
-`wispr-flow://start-hands-free` via hidden iframe navigation, release fires
-`stop-hands-free`; harmless no-op when Wispr absent. No mic/WebSpeech in v1.
+Selecting a node/edge focuses a visible steering input; any dictation tool (or the
+keyboard) types into it; Enter commits → `utterance`. No vendor-specific integration;
+no mic/WebSpeech in v1.
 
 ## Revision snapshots + delta
 
 Every accepted change bumps `rev`; the bridge then persists a canonical snapshot of the
-intent layer at `<target>/.visual-harness/revisions/<rev>.json` (`SnapshotStore` in
+intent layer at `<target>/.shape/revisions/<rev>.json` (`SnapshotStore` in
 packages/bridge/src/snapshots.ts). One file per rev, never rewritten; retention keeps the
 newest 50 and prunes the rest. Snapshots hold nodes + edges only — reality and drift are
 re-derivable, so they stay out.

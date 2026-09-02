@@ -1,0 +1,133 @@
+# Shape
+
+Builders don't look at code any more — they look at the *shape* of the product they are
+building. Shape is that view: an agent-maintained, live picture of the system, rendered as
+drillable bubbles. The agent declares the **intent** layer (what each part of the system
+promises, in plain English) while it works; a **reality** layer is derived mechanically from
+the code itself (workspace packages and the imports between them); where the two disagree,
+**drift** is rendered on the bubble instead of quietly rotting like a README diagram. To
+steer, you click a bubble or a relation and speak — or type — one sentence. Selection is the
+referent, the sentence is the requirement, and the running agent gets both as an addressed
+instruction.
+
+## Independence
+
+Shape is standalone. Voice input is just text arriving in a focused input, so any dictation
+tool works — selecting a bubble focuses the steering field, whatever puts text there commits
+on Enter. There is nothing vendor-specific in the code: no dependency on a particular
+dictation product (Wispr Flow or otherwise) and none on a workspace manager (herdr or
+otherwise). The one thing Shape does need is a coding agent behind the bridge; today that is
+the `omp` harness, spoken to over its RPC mode. Optional integrations may arrive later as
+configurable adapters, never as dependencies.
+
+## Status
+
+Early, and dogfooded daily. The v1 slice works end to end:
+
+- Greenfield: speak an idea → the agent decomposes it into bubbles → it builds, advancing
+  each bubble's phase (`idea → concept → component → building → built | failed`) as it goes.
+- Onboarding an existing repo: mechanical package skeleton first, then an agent survey turn
+  that must anchor every bubble to real paths, then drift verification.
+- Single-layer drill-down as the default view: one layer at a time, drill chip and breadcrumb,
+  relations lifted to the nearest visible ancestors, liveness and drift bubbled up.
+- Git worktrees as architecture variations, each with its own canvas state.
+- Revision snapshots with compare: every accepted change bumps a revision, and any two
+  revisions can be diffed.
+
+Known rough edges: drift UX has only been exercised on synthetic drift, the reality extractor
+covers pnpm/TypeScript monorepos (other stacks degrade to a pure agent survey), and empty-state
+copy can overlap reality ghosts.
+
+## How it works
+
+```
+browser (Vite dev :5173)
+   │  WebSocket  ws://127.0.0.1:4400/ws
+   ▼
+bridge (Node 26)  — graph store, steering composer, reality extractor
+   │  JSONL over stdio (omp rpc protocol v1)
+   ▼
+omp --mode rpc   (spawned child, cwd = target project)
+```
+
+The bridge spawns `omp --mode rpc` in the target project and registers exactly one host tool,
+`canvas`. The agent mutates the picture only through that tool (`upsert_node`, `remove_node`,
+`upsert_edge`, `remove_edge`, `set_phase`); the bridge validates each op, applies it, and
+broadcasts the whole document to every connected browser. Steering is delivered as `steer`
+while a turn is streaming, otherwise as a fresh `prompt`. Nothing is installed into the target
+project except state:
+
+- `<target>/.shape/graph.json` — the canvas for that project (per worktree).
+- `<target>/.shape/revisions/<rev>.json` — one snapshot per revision, newest 50 kept.
+- `~/.shape/recents.json` — recently targeted projects (override the home dir with `SHAPE_HOME`).
+- The bridge appends `.shape/` to the repo's `.git/info/exclude`, so canvas state never lands
+  in a commit.
+
+Packages:
+
+- `packages/bridge` — Node process: omp RPC client, `canvas` host tool, graph + snapshot
+  stores, steering composer, reality/drift extractor, WebSocket server on 127.0.0.1:4400.
+- `packages/web` — Vite + React + React Flow canvas: layer policy, layout and motion, side
+  panel, steering bar, project/worktree switcher.
+- `packages/shared` — the contract both sides import: types, `applyOps` validation, the
+  `canvas` tool schema, the WebSocket message shapes, and revision diffing.
+
+## Requirements
+
+- Node 26 (the bridge runs TypeScript sources directly).
+- pnpm 11.6.
+- The `omp` CLI on `PATH` — [oh-my-pi](https://github.com/can1357/oh-my-pi).
+
+## Run
+
+```bash
+pnpm install
+pnpm bridge -- --cwd <target-project>   # bridge, pointed at the project you want to see
+pnpm web                                # canvas dev server
+```
+
+Then open http://localhost:5173. Append `?mock=1` to render a fixture graph without a bridge.
+
+Smoke tests:
+
+```bash
+pnpm --filter @shape/bridge smoke   # protocol checks against a fake omp child
+pnpm smoke:shared                   # validation + revision-diff checks
+```
+
+## Onboard an existing repo
+
+Install the `visualize` skill once per machine, from this checkout:
+
+```bash
+ln -s "$PWD/skills/visualize" ~/.claude/skills/
+```
+
+Then, from any repo, say "onboard this repo to Shape". The skill starts (or reuses) the bridge
+and web server, retargets the bridge at that repo, triggers the onboarding survey, and hands
+back the canvas URL. See `skills/visualize/SKILL.md` for what it does step by step.
+
+## Docs
+
+- `vision.md` — the design document: what this is for and why it is shaped this way.
+- `CONTRACTS.md` — the authoritative cross-package contracts (topology, graph document,
+  `canvas` tool, WebSocket protocol, drift, revisions). `packages/shared/src/index.ts` is its
+  machine-readable form and wins on disagreement.
+- `onboarding.md` — the brownfield pipeline: mechanical skeleton, survey turn, verification.
+- `HANDOFF.md` — build log and current state, step by step.
+
+## Third-party
+
+- `packages/web/src/canvas/vendor/archify-geometry.ts` — geometry helpers (edge-anchor port
+  spread, label placement, label/route clearance) vendored from
+  [archify](https://github.com/tt-a1i/archify) @ `5de7275`
+  (`renderers/shared/geometry.mjs`), ported to TypeScript. MIT; the upstream notice is kept
+  verbatim at the top of the file.
+- `packages/web/src/canvas/kind.tsx` — glyph path data adapted from the same project
+  (`renderers/shared/utils.mjs`), MIT, attributed in the file header.
+
+Runtime dependencies are declared in each package's `package.json`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

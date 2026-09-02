@@ -103,7 +103,7 @@ Structural re-derivation only at quiet points, but the canvas still feels alive:
 while an agent works inside them, edges animate on data-contract changes, failures mark the bubble.
 Presence and progress are cheap streaming events; *structure* changes only on verified delta.
 
-## Wispr Flow integration ladder (deepest → shallowest)
+## (historical, superseded 2026-09-02) Wispr Flow integration ladder (deepest → shallowest)
 
 Scout-verified 2026-08 (links in research brief, agent://WisprIntegration):
 
@@ -156,8 +156,14 @@ layer appears at first commit and drift renders. One ecosystem (TS monorepo), on
   the harness — an interface people use *instead of* the default text interface, not a separate
   product with its own agent runtime.
 - **Decision: graduated out of the ideas funnel** to a standalone project at
-  `~/code/visual-harness`. Funnel record (understand/evaluate/log) travels with this directory;
+  `~/code/shape`. Funnel record (understand/evaluate/log) travels with this directory;
   the ideas repo retains the history in git.
+- **Rebrand + independence (2026-09-02, user).** The project is **Shape** — builders look at the
+  shape of the product, and Shape is that view. It is standalone: no coupling to any dictation
+  vendor (the ladder above is history) or workspace manager (herdr). Voice input is any dictation
+  tool typing into the focused steering input; integrations may return later only as optional,
+  configurable adapters, never as dependencies. `omp` remains the harness backend behind the
+  bridge.
 
 ## Client decision (2026-08-28): browser first, TUI later at most
 
@@ -190,5 +196,5 @@ Flow/SvelteFlow + elkjs runtime-state sync), `langchain-ai/open-canvas` (MIT —
 canvas/chat), `skovalik/cognograph` (React Flow + Zustand semantic-zoom LOD tiers),
 `miltonian/cartographer` (React Flow boundary-zoom codebase viz).
 
-**omp note:** no public web frontend exists; visual-harness would be its first graphical client,
+**omp note:** no public web frontend exists; Shape would be its first graphical client,
 speaking to the harness's instruction-injection/steering surface.

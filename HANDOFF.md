@@ -10,7 +10,7 @@ codebase visualizers).
 
 - Vision, client decision (browser-first, TUI ruled out for v1), and stack
   (React Flow v12 + elkjs + Zustand) are settled — see `vision.md` §"Client decision".
-- Research briefs preserved in `research/`: Wispr integration ladder, canvas/voice prior art,
+- Research briefs preserved in `research/`: dictation-vendor integration ladder (historical),
   stack evaluation. Links are scout-sourced — verify before load-bearing use.
 - **User said "Go"** — implementation was greenlit; nothing has been scaffolded yet.
 
@@ -34,8 +34,8 @@ machine), pnpm workspace, Vite 7 + React 19 + React Flow 12 + elkjs + Zustand we
 Step 3 done — v1 slice built and proven end-to-end (2026-08-28):
 
 - `packages/bridge` — Node 26, spawns `omp --mode rpc`, WS on 127.0.0.1:4400/ws, graph store
-  persisted to `<target>/.visual-harness/graph.json`, steering composer, reality extractor +
-  drift differ. Dev smoke: `pnpm --filter @visual-harness/bridge smoke` (24 protocol checks,
+  persisted to `<target>/.shape/graph.json`, steering composer, reality extractor +
+  drift differ. Dev smoke: `pnpm --filter @shape/bridge smoke` (24 protocol checks,
   runs against `scripts/fake-omp.mjs`).
 - `packages/web` — Vite/React Flow canvas. Hierarchy renders as a tree/DAG (user decision:
   no nested bubbles), depth policy = top level + active/drifted/selected + "+N" expansion
@@ -53,12 +53,12 @@ skeleton (bridge, web) in <1s, survey added the `shared` seam mechanics missed, 
 accurate relations, zero drift. Bridge smoke now 43 checks.
 
 Step 5 done — navigation (user-directed): project switcher (`switch_project` retargets the
-bridge: fresh omp child, per-project graph, recents in `~/.visual-harness/recents.json`,
+bridge: fresh omp child, per-project graph, recents in `~/.shape/recents.json`,
 re-hello to all clients; bridge smoke now 58 checks) and single-layer drill-down as THE
 default view (depth selector removed): canvas shows only the focused bubble's children,
 drill chip + breadcrumb, edge lifting to visible ancestors, liveness/drift bubbling
 (`packages/web/src/layer.ts`). Verified live: drilled bridge → 4 children with focus card;
-switched visual-harness ↔ /tmp/vh-e2e-target with clean state reset. Fixed en route:
+switched the harness repo ↔ /tmp/vh-e2e-target with clean state reset. Fixed en route:
 `.canvas-row` grid-row pin (blank canvas at root) and drill refit racing async elk.
 
 Step 6 done — motion + register (user-directed): (a) one-choreography canvas motion
@@ -79,7 +79,7 @@ else ellipse/grid, aspect-aware; single geometry source for edges+labels
 under non-endpoint bubbles); parallel edges merge with count badges. (b) Worktrees =
 architecture variations (CONTRACTS.md §Worktrees): `SessionInfo.worktrees` from
 `git worktree list --porcelain`, toggle reuses `switch_project`, per-worktree
-`.visual-harness/graph.json`, bridge appends `.visual-harness/` to git common-dir
+`.shape/graph.json`, bridge appends `.shape/` to git common-dir
 info/exclude; UI shows a plain-English "variation" pill (worktrees ≥ 2). Compare/side-by-
 side views deferred by design. Bridge smoke 68 checks. Fixed en route: zustand selector
 minting fresh `[]` per snapshot (`?? []` on null session) crashed live loads — stable
@@ -87,7 +87,7 @@ module-level empties required; verify web changes once without mock.
 
 Run: `pnpm bridge -- --cwd <target-project>` + `pnpm web`, open http://localhost:5173.
 Known nit: empty-state copy overlaps reality ghosts when the reality layer is non-empty.
-Next candidates: drift UX on real drift, Wispr Tier-2 press-hold field test, model-role →
+Next candidates: drift UX on real drift, model-role →
 subtree binding, session-info repush frame (sessionName changes aren't rebroadcast),
 per-language reality extractors.
 
@@ -96,4 +96,15 @@ per-language reality extractors.
 ## Long-term memory
 
 Project location, form-factor decision, and design summary were retained to Mnemopi memory —
-`recall "visual-harness"` in a new session will surface them.
+`recall "shape"` in a new session will surface them.
+
+## 2026-09-02: rebrand + independence
+
+Renamed to **Shape** (package `shape`, workspaces `@shape/*`, state dir `.shape/`,
+user-global `~/.shape/` with `SHAPE_HOME` override).
+
+Shape is standalone: no coupling to any dictation vendor (the vendor-specific press-and-hold
+URI-scheme path is deleted) or workspace manager (herdr). Voice input is just any dictation
+tool typing into the focused steering input. Future integrations arrive only as optional,
+configurable adapters — never as dependencies. `omp` remains the harness backend behind the
+bridge, unchanged.

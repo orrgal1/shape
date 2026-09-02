@@ -1,6 +1,6 @@
 # Onboarding an existing project (design, 2026-08-28)
 
-Brownfield entry: point visual-harness at a repo that already exists, get a trustworthy canvas,
+Brownfield entry: point Shape at a repo that already exists, get a trustworthy canvas,
 continue steering/building from there. This is the funnel's original brownfield idea returning as
 a feature — the design decisions below are the corrections `understand.md` derived, applied.
 

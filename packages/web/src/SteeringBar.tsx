@@ -36,7 +36,7 @@ function describe(
 }
 
 /**
- * The dictation target. Any voice tool — Wispr included — types plain text into
+ * The dictation target. Any dictation tool types plain text into
  * this input, so it takes focus the instant a referent changes: click a bubble,
  * speak, press Enter.
  */
@@ -119,7 +119,7 @@ export function SteeringBar() {
       />
 
       <span className="steer-hint">
-        {comparing ? "comparing versions" : ready ? "enter to send" : "hold a bubble to dictate"}
+        {comparing ? "comparing versions" : ready ? "enter to send" : "dictate or type here"}
       </span>
 
       {busy ? (

@@ -284,7 +284,7 @@ function Header() {
   return (
     <header className="header">
       <div className="brand">
-        <span className="brand-mark">visual-harness</span>
+        <span className="brand-mark">Shape</span>
         <ProjectSelector />
         <VariationSwitcher />
       </div>

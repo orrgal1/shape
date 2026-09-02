@@ -1,5 +1,5 @@
 /**
- * visual-harness shared contract — the machine-readable half of ../../../CONTRACTS.md.
+ * Shape shared contract — the machine-readable half of ../../../CONTRACTS.md.
  *
  * Imported by RELATIVE PATH with explicit .ts extension from both the bridge
  * (Node 26 type-stripping) and the web client (Vite). Must remain erasable-syntax

@@ -1,6 +1,6 @@
 /**
  * Graph store: owns the single GraphDoc, applies `canvas` tool ops through the
- * shared validator, and persists to <targetCwd>/.visual-harness/graph.json.
+ * shared validator, and persists to <targetCwd>/.shape/graph.json.
  */
 
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
@@ -69,7 +69,7 @@ export class GraphStore {
   #writing: Promise<void> = Promise.resolve();
 
   constructor(targetCwd: string) {
-    this.#dir = join(targetCwd, ".visual-harness");
+    this.#dir = join(targetCwd, ".shape");
     this.#file = join(this.#dir, "graph.json");
   }
 

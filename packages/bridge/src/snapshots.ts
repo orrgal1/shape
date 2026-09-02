@@ -1,6 +1,6 @@
 /**
  * Revision snapshots: one canonical GraphSnapshot per `rev` under
- * <targetCwd>/.visual-harness/revisions/<rev>.json, so the browser can diff any
+ * <targetCwd>/.shape/revisions/<rev>.json, so the browser can diff any
  * two points in the canvas's history.
  *
  * A revision is immutable once written (a rev never means two different graphs),
@@ -37,7 +37,7 @@ export class SnapshotStore {
   #writing: Promise<RevisionInfo | null> = Promise.resolve(null);
 
   constructor(targetCwd: string) {
-    this.#dir = join(targetCwd, ".visual-harness", "revisions");
+    this.#dir = join(targetCwd, ".shape", "revisions");
   }
 
   /**

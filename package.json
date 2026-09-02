@@ -1,13 +1,13 @@
 {
-  "name": "visual-harness",
+  "name": "shape",
   "private": true,
   "version": "0.0.1",
   "type": "module",
   "packageManager": "pnpm@11.6.0",
   "description": "Voice-driven, canvas-first frontend for the omp harness",
   "scripts": {
-    "bridge": "pnpm --filter @visual-harness/bridge start",
-    "web": "pnpm --filter @visual-harness/web dev",
-    "smoke:shared": "pnpm --filter @visual-harness/shared smoke"
+    "bridge": "pnpm --filter @shape/bridge start",
+    "web": "pnpm --filter @shape/web dev",
+    "smoke:shared": "pnpm --filter @shape/shared smoke"
   }
 }

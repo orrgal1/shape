@@ -17,7 +17,7 @@ const SKIP_DIRS: Record<string, true> = {
   ".git": true,
   ".next": true,
   ".venv": true,
-  ".visual-harness": true,
+  ".shape": true,
   __pycache__: true,
   build: true,
   coverage: true,

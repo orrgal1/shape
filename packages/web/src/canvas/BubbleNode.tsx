@@ -1,6 +1,5 @@
 import { Handle, Position, useStore, type NodeProps } from "@xyflow/react";
 import { useApp } from "../store.ts";
-import { useVoiceHold, type HoldHandlers } from "../wispr.ts";
 import { KindSigil, resolveKind } from "./kind.tsx";
 import type { BubbleNodeType } from "./types.ts";
 
@@ -13,9 +12,6 @@ const TIER_MIN_BELOW = 0.38;
 /** comparison marks, in the same words the comparison legend uses */
 const DELTA_WORD: Record<string, string> = { added: "new", changed: "changed", removed: "gone" };
 
-/** press-and-hold dictation is meaningless on a past version, so it is unwired there */
-const NO_HOLD: Partial<HoldHandlers> = {};
-
 export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
   const tier = useStore((state): Tier => {
     const zoom = state.transform[2];
@@ -24,7 +20,6 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
     return "full";
   });
   const setFocus = useApp((state) => state.setFocus);
-  const { holding, handlers } = useVoiceHold();
 
   const {
     node,
@@ -85,11 +80,9 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
       data-active-inside={liveInside && !active}
       data-drift={hasDrift}
       data-drift-inside={!hasDrift && driftInside > 0}
-      data-holding={holding}
       data-tier={tier}
       data-delta={deltaStatus ?? undefined}
       data-motion={motion}
-      {...(comparing ? NO_HOLD : handlers)}
     >
       {active || liveInside ? <span className="activity-ring" /> : null}
 
@@ -158,15 +151,6 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
         >
           {tier === "min" ? null : `${childCount} inside`} <span className="drill-caret">›</span>
         </button>
-      ) : null}
-
-      {holding ? (
-        <span className="hold-bar" aria-hidden="true">
-          <i />
-          <i />
-          <i />
-          <i />
-        </span>
       ) : null}
 
       <Handle type="target" position={Position.Top} isConnectable={false} />

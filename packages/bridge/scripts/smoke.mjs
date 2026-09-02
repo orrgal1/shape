@@ -168,8 +168,8 @@ try {
     {
       cwd: process.cwd(),
       // held turns keep the session streaming long enough to test the steer branch;
-      // VISUAL_HARNESS_HOME/HOME keep recents.json and "~" out of the real home dir
-      env: { ...process.env, FAKE_OMP_TURN_HOLD_MS: "1200", VISUAL_HARNESS_HOME: fakeHome, HOME: fakeHome },
+      // SHAPE_HOME/HOME keep recents.json and "~" out of the real home dir
+      env: { ...process.env, FAKE_OMP_TURN_HOLD_MS: "1200", SHAPE_HOME: fakeHome, HOME: fakeHome },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -229,8 +229,8 @@ try {
     JSON.stringify({ branch: variation?.branch, head: variation?.head?.slice(0, 8), main: mainEntry?.branch }),
   );
   check(
-    "`.visual-harness/` was added to the repo's shared info/exclude",
-    readFileSync(join(target, ".git", "info", "exclude"), "utf8").split("\n").filter((l) => l.trim() === ".visual-harness/").length === 1,
+    "`.shape/` was added to the repo's shared info/exclude",
+    readFileSync(join(target, ".git", "info", "exclude"), "utf8").split("\n").filter((l) => l.trim() === ".shape/").length === 1,
   );
 
   // --- onboarding stage 1: mechanical skeleton ------------------------------
@@ -313,7 +313,7 @@ try {
   check("survey enrichment replaced the placeholder summary", surveyed.summary.startsWith("Validates credentials"), surveyed.summary);
   check("rejected node never entered the graph", !enriched.graph.nodes.some((n) => n.id === "ghost"));
 
-  const persistedSurvey = JSON.parse(await readFile(join(target, ".visual-harness", "graph.json"), "utf8"));
+  const persistedSurvey = JSON.parse(await readFile(join(target, ".shape", "graph.json"), "utf8"));
   check(
     "status persisted to graph.json",
     persistedSurvey.nodes.find((n) => n.id === "t-auth")?.status === "reading how the other parts use it",
@@ -464,7 +464,7 @@ try {
   check("steer acknowledgement reached the transcript", true);
 
   // --- persistence ----------------------------------------------------------
-  const persisted = JSON.parse(await readFile(join(target, ".visual-harness", "graph.json"), "utf8"));
+  const persisted = JSON.parse(await readFile(join(target, ".shape", "graph.json"), "utf8"));
   check(
     "graph.json persisted in the target dir",
     persisted.rev >= 1 && persisted.nodes.length === 4 && persisted.edges.length === 2,
@@ -472,7 +472,7 @@ try {
   );
 
   // --- revision snapshots + diff --------------------------------------------
-  const revDir = join(target, ".visual-harness", "revisions");
+  const revDir = join(target, ".shape", "revisions");
   const revsOnDisk = () => {
     if (!existsSync(revDir)) return [];
     return readdirSync(revDir)
@@ -487,7 +487,7 @@ try {
     return found.length >= 2 ? found : null;
   });
   check(
-    "one snapshot file per revision under .visual-harness/revisions",
+    "one snapshot file per revision under .shape/revisions",
     revs.length >= 2 && revs[revs.length - 1] === persisted.rev,
     `revs=${revs.join(",")} docRev=${persisted.rev}`,
   );
@@ -601,11 +601,11 @@ try {
   );
   check("recents are most-recent-first and deduped", helloB.recentProjects.join(" | ") === `${targetB} | ${target}`, helloB.recentProjects.join(" | "));
   check(
-    "recents.json written under VISUAL_HARNESS_HOME",
-    JSON.parse(await readFile(join(fakeHome, ".visual-harness", "recents.json"), "utf8"))[0] === targetB,
+    "recents.json written under SHAPE_HOME",
+    JSON.parse(await readFile(join(fakeHome, ".shape", "recents.json"), "utf8"))[0] === targetB,
   );
 
-  const persistedA = JSON.parse(await readFile(join(target, ".visual-harness", "graph.json"), "utf8"));
+  const persistedA = JSON.parse(await readFile(join(target, ".shape", "graph.json"), "utf8"));
   check("the old project's graph was persisted before switching away", persistedA.nodes.length === 4 && persistedA.edges.length === 2, `nodes=${persistedA.nodes.length}`);
 
   await waitFor("old child exited", () => ompFrames(ompLog).some((f) => f.type === "__exit"));
@@ -668,7 +668,7 @@ try {
       toggled.find((w) => w.path === mainPath)?.current === false,
     JSON.stringify(toggled.map((w) => `${w.branch}:${w.current}`)),
   );
-  const wtPersisted = JSON.parse(await readFile(join(worktree, ".visual-harness", "graph.json"), "utf8"));
+  const wtPersisted = JSON.parse(await readFile(join(worktree, ".shape", "graph.json"), "utf8"));
   check(
     "the worktree carries its own canvas state, empty and separate from the original's",
     helloWt.graph.nodes.length === 0 && wtPersisted.nodes.length === 0 && wtPersisted.reality.nodes.length === 2,
@@ -676,7 +676,7 @@ try {
   );
   check(
     "info/exclude stayed idempotent across both startups",
-    readFileSync(join(target, ".git", "info", "exclude"), "utf8").split("\n").filter((l) => l.trim() === ".visual-harness/").length === 1,
+    readFileSync(join(target, ".git", "info", "exclude"), "utf8").split("\n").filter((l) => l.trim() === ".shape/").length === 1,
   );
 
   console.log(`\n--- addressed instruction as omp received it ---\n${addressed.message}\n---`);
