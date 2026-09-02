@@ -3,11 +3,15 @@
  *
  * `playground.json` is a verbatim copy of `.shape/graph.json` from the Ledgerly
  * mock project (9 top-level bubbles, 8 children, 18 sibling relations at the
- * root, 9 extracted packages, real drift notes). It is the only fixture in the
- * tree that was produced by the agent rather than written by hand, which makes
- * it the regression target for layout at real scale: the 3x3 grid with
- * 3000px looping edges, and the reality band that filled half the canvas even
- * though every package was already claimed by a bubble, were both measured here.
+ * root, 9 extracted packages). It is the only fixture in the tree that was
+ * produced by the agent rather than written by hand, which makes it the
+ * regression target for layout at real scale: the 3x3 grid with 3000px looping
+ * edges, and the reality band that filled half the canvas even though every
+ * package was already claimed by a bubble, were both measured here.
+ *
+ * Its `drift` is empty, and that is the honest value: under the attribution
+ * rule every reality edge in this project has a declared counterpart at some
+ * altitude. The drift-glow rendering is exercised by `?mock=1` instead.
  *
  * Nothing animates: activity pulses would make the numbers this fixture exists
  * to measure move around.
@@ -61,6 +65,8 @@ export function startPlaygroundMock(): () => void {
     session: { ...PLAYGROUND_SESSION, worktrees: PLAYGROUND_SESSION.worktrees.map((entry) => ({ ...entry })) },
     agent: "idle",
     recentProjects: [PLAYGROUND_ROOT],
+    // this fixture is about layout, not adoption: nothing to attach to
+    sessions: [],
     revisions: [],
   });
   // after `hello`, which would otherwise report a live bridge

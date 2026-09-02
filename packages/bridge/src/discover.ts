@@ -19,21 +19,9 @@ import { closeSync, openSync, readFileSync, readSync, readdirSync, readlinkSync,
 import { homedir, platform } from "node:os";
 import { basename, join } from "node:path";
 
-export type Harness = "omp" | "claude" | "codex" | "opencode" | "cursor";
+import type { DiscoveredSession, Harness } from "../../shared/src/index.ts";
 
-export interface DiscoveredSession {
-  harness: Harness;
-  pid: number;
-  command: string;
-  cwd: string | null;
-  sessionId: string | null;
-  sessionFile: string | null;
-  startedAt: string | null;
-  resumeCommand: string[] | null;
-  attach: "socket" | "daemon" | "http" | "none";
-  /** omp child spawned by a Shape bridge (`omp --mode rpc` under packages/bridge). */
-  spawnedByShape: boolean;
-}
+export type { DiscoveredSession, Harness } from "../../shared/src/index.ts";
 
 const EXEC_TIMEOUT_MS = 3_000;
 /** Bytes read from the head of a session log to sniff its metadata line. */

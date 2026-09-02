@@ -13,8 +13,14 @@ import { isAbsolute, join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 
 export interface BackendSettings {
-  /** argv of the harness CLI; argv[0] is the executable */
-  command: string[];
+  /** argv of the harness CLI; argv[0] is the executable. Absent ⇒ the adapter's default. */
+  command?: string[];
+  /** adapter-specific mode (claude: "headless" | "tui") */
+  mode?: string;
+  /** extra argv the adapter appends to `command` */
+  args?: string[];
+  /** harness permission mode, passed through to the adapter */
+  permissionMode?: string;
 }
 
 export interface ShapeConfig {
@@ -59,12 +65,30 @@ async function readConfigFile(file: string): Promise<Partial<ShapeConfig> | null
       if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
         throw new Error(`config file ${file}: backends.${id} must be an object`);
       }
-      if (!("command" in entry)) continue;
-      const command = entry.command;
-      if (!Array.isArray(command) || command.length === 0 || command.some((t) => typeof t !== "string")) {
-        throw new Error(`config file ${file}: backends.${id}.command must be a non-empty array of strings`);
+      const settings: BackendSettings = {};
+      if ("command" in entry) {
+        const command = entry.command;
+        if (!Array.isArray(command) || command.length === 0 || command.some((t) => typeof t !== "string")) {
+          throw new Error(`config file ${file}: backends.${id}.command must be a non-empty array of strings`);
+        }
+        settings.command = command as string[];
       }
-      backends[id] = { command: command as string[] };
+      if ("args" in entry) {
+        const args = entry.args;
+        if (!Array.isArray(args) || args.some((t) => typeof t !== "string")) {
+          throw new Error(`config file ${file}: backends.${id}.args must be an array of strings`);
+        }
+        settings.args = args as string[];
+      }
+      for (const key of ["mode", "permissionMode"] as const) {
+        if (!(key in entry)) continue;
+        const value = entry[key];
+        if (typeof value !== "string" || value.trim().length === 0) {
+          throw new Error(`config file ${file}: backends.${id}.${key} must be a non-empty string`);
+        }
+        settings[key] = value.trim();
+      }
+      backends[id] = settings;
     }
     layer.backends = backends;
   }
@@ -96,7 +120,7 @@ function mergeLayer(base: ShapeConfig, layer: Partial<ShapeConfig> | null): Shap
 export interface ConfigOverrides {
   /** target project dir, for `<cwd>/.shape/config.json` */
   cwd: string;
-  /** CLI `--backend <id>`; beats both config files */
+  /** CLI `--backend <id>`, or the harness id an `adopt` names; beats both config files */
   backend?: string | undefined;
   /** CLI `--omp "<cmd ...>"`; replaces the omp adapter's command */
   ompCommand?: string[] | undefined;
@@ -112,12 +136,13 @@ export async function loadShapeConfig(overrides: ConfigOverrides): Promise<Shape
 
   if (overrides.backend !== undefined) config = { ...config, backend: overrides.backend };
   if (overrides.ompCommand !== undefined) {
-    config = { ...config, backends: { ...config.backends, omp: { command: overrides.ompCommand } } };
+    const omp = { ...config.backends.omp, command: overrides.ompCommand };
+    config = { ...config, backends: { ...config.backends, omp } };
   }
 
   const resolved: Record<string, BackendSettings> = {};
   for (const [id, entry] of Object.entries(config.backends)) {
-    resolved[id] = { command: resolveCommand(entry.command) };
+    resolved[id] = entry.command === undefined ? { ...entry } : { ...entry, command: resolveCommand(entry.command) };
   }
   return { backend: config.backend, backends: resolved };
 }

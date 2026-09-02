@@ -2,6 +2,7 @@ import { create } from "zustand";
 import {
   emptyGraph,
   type AgentState,
+  type DiscoveredSession,
   type GraphDelta,
   type GraphDoc,
   type Referent,
@@ -71,6 +72,11 @@ export interface AppState {
   focus: string | null;
   /** project paths offered by the bridge in `hello`, most recent first */
   recentProjects: string[];
+  /**
+   * Agent sessions running on this machine, newest first — the adopt list. The
+   * bridge refreshes it on every hello and on demand (`discover`).
+   */
+  sessions: DiscoveredSession[];
   /** saved versions of this project's canvas the bridge can compare, oldest first */
   revisions: RevisionInfo[];
   /** the pair a comparison was asked about; set the moment the request goes out */
@@ -127,6 +133,7 @@ export const useApp = create<AppState>((set, get) => ({
   showReality: true,
   focus: null,
   recentProjects: [],
+  sessions: [],
   revisions: [],
   compare: null,
   delta: null,
@@ -145,6 +152,7 @@ export const useApp = create<AppState>((set, get) => ({
           doc: msg.graph,
           session: msg.session,
           recentProjects: msg.recentProjects,
+          sessions: msg.sessions,
           revisions: msg.revisions,
           agent: msg.agent,
           conn: "live",
@@ -176,6 +184,9 @@ export const useApp = create<AppState>((set, get) => ({
         return;
       case "revisions":
         set({ revisions: msg.revisions });
+        return;
+      case "sessions":
+        set({ sessions: msg.sessions });
         return;
       case "delta": {
         // The answer is broadcast to every attached browser, so a client that

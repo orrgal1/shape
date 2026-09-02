@@ -9,8 +9,10 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import WebSocket from "ws";
 
 const PORT = Number(process.env.SMOKE_PORT ?? 4409);
@@ -781,6 +783,293 @@ try {
     "info/exclude stayed idempotent across both startups",
     readFileSync(join(target, ".git", "info", "exclude"), "utf8").split("\n").filter((l) => l.trim() === ".shape/").length === 1,
   );
+
+  // --- the link: canvas over MCP + external agent events --------------------
+  // The worktree is the live target and its canvas is empty, so the link can
+  // add bubbles here without disturbing anything asserted above. A second
+  // socket stands in for an external process (MCP server, harness hook).
+  const linkUrl = `ws://127.0.0.1:${PORT}/ws`;
+  const linkPkg = join(process.cwd(), "..", "link");
+  const linkFrames = [];
+  const linkSocket = new WebSocket(linkUrl);
+  linkSocket.on("message", (data) => linkFrames.push(JSON.parse(data.toString())));
+  {
+    const opened = Promise.withResolvers();
+    linkSocket.once("open", opened.resolve);
+    linkSocket.once("error", opened.reject);
+    await opened.promise;
+  }
+
+  linkSocket.send(
+    JSON.stringify({
+      type: "canvas_call",
+      id: "smoke-link-1",
+      args: {
+        ops: [
+          {
+            op: "upsert_node",
+            node: {
+              id: "linked",
+              parentId: null,
+              label: "Linked",
+              summary: "Reached the canvas through the link.",
+              phase: "component",
+              codeRefs: ["packages/auth"],
+            },
+          },
+        ],
+        note: "from the link",
+      },
+    }),
+  );
+  const linkResult = await waitFor("canvas_result on the caller's socket", () =>
+    linkFrames.find((f) => f.type === "canvas_result" && f.id === "smoke-link-1"),
+  );
+  check(
+    "canvas_call is answered on the calling socket, correlated by id",
+    linkResult.text.startsWith("applied 1 op(s);") && linkResult.isError === false,
+    JSON.stringify(linkResult),
+  );
+  await waitFor("graph broadcast for the link's node", () =>
+    frames.find((f) => f.type === "graph" && f.graph.nodes.some((n) => n.id === "linked")),
+  );
+  check("what the link applies is broadcast to the browsers", true);
+  check(
+    "a canvas result never reaches a socket that did not ask for it",
+    !frames.some((f) => f.type === "canvas_result"),
+    JSON.stringify(frames.filter((f) => f.type === "canvas_result")),
+  );
+
+  // external events are indistinguishable from native ones: same activity
+  // mapping, same transcript, same turn accounting
+  linkSocket.send(
+    JSON.stringify({
+      type: "agent_event",
+      event: {
+        kind: "tool_start",
+        name: "Edit",
+        paths: ["packages/auth/src/index.ts"],
+        summary: "packages/auth/src/index.ts",
+      },
+    }),
+  );
+  const linkActivity = await waitFor("activity from an external tool_start", () =>
+    frames.find((f) => f.type === "activity" && f.nodeIds.includes("linked")),
+  );
+  check(
+    "an external tool_start maps its paths onto the codeRefs node",
+    linkActivity.nodeIds.join(",") === "linked",
+    linkActivity.nodeIds.join(","),
+  );
+
+  linkSocket.send(
+    JSON.stringify({ type: "agent_event", event: { kind: "text", text: "the link is speaking" } }),
+  );
+  await waitFor("transcript from an external text event", () =>
+    frames.find((f) => f.type === "transcript" && f.role === "assistant" && f.text === "the link is speaking"),
+  );
+  check("an external text event lands in the transcript", true);
+
+  const activityAt = frames.indexOf(linkActivity);
+  linkSocket.send(JSON.stringify({ type: "agent_event", event: { kind: "turn_end" } }));
+  await waitFor("activity cleared by an external turn_end", () =>
+    frames.slice(activityAt + 1).find((f) => f.type === "activity" && f.nodeIds.length === 0),
+  );
+  check("an external turn_end ends the turn's activity", true);
+
+  linkSocket.send(
+    JSON.stringify({
+      type: "agent_event",
+      event: { kind: "session", sessionId: "link-session-1", model: { provider: "anthropic", id: "claude-x" } },
+    }),
+  );
+  const sessionProbe = new WebSocket(linkUrl);
+  const probeFrames = [];
+  sessionProbe.on("message", (data) => probeFrames.push(JSON.parse(data.toString())));
+  const probeHello = await waitFor("hello for the session probe", () =>
+    probeFrames.find((f) => f.type === "hello" && f.session.sessionId === "link-session-1"),
+  );
+  check(
+    "a session reported by the link becomes the bridge's session",
+    probeHello.session.model?.id === "claude-x",
+    JSON.stringify({ id: probeHello.session.sessionId, model: probeHello.session.model }),
+  );
+  sessionProbe.close();
+
+  // the link is a boundary like the browser is: a frame the bridge cannot make
+  // sense of is refused, not half-applied
+  linkSocket.send(JSON.stringify({ type: "agent_event", event: { kind: "not-an-event" } }));
+  const badEvent = await waitFor("unknown event kind refused", () =>
+    linkFrames.find((f) => f.type === "error"),
+  );
+  check(
+    "an unknown agent_event kind is refused at the boundary",
+    badEvent.message === "unparseable client message",
+    badEvent.message,
+  );
+  linkSocket.send(
+    JSON.stringify({
+      type: "agent_event",
+      event: { kind: "tool_start", name: "Edit", paths: "packages/auth", summary: "" },
+    }),
+  );
+  linkSocket.send(JSON.stringify({ type: "canvas_call", args: { ops: [] } }));
+  await waitFor("mistyped link frames refused", () =>
+    linkFrames.filter((f) => f.type === "error").length >= 3,
+  );
+  check("a mistyped event field and an id-less canvas_call are both refused", true);
+
+  // --- the canvas tool as an MCP server, end to end -------------------------
+  // Resolved from the link package, not this one: the sdk is its dependency.
+  const linkRequire = createRequire(join(linkPkg, "package.json"));
+  const { Client } = await import(
+    pathToFileURL(linkRequire.resolve("@modelcontextprotocol/sdk/client/index.js")).href
+  );
+  const { StdioClientTransport } = await import(
+    pathToFileURL(linkRequire.resolve("@modelcontextprotocol/sdk/client/stdio.js")).href
+  );
+  const mcpClient = new Client({ name: "shape-smoke", version: "0.0.1" });
+  await mcpClient.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [join(linkPkg, "src", "mcp.ts")],
+      env: { ...process.env, SHAPE_BRIDGE_URL: linkUrl },
+      stderr: "inherit",
+    }),
+  );
+  const listed = await mcpClient.listTools();
+  check(
+    "the MCP server exposes exactly the canvas tool, with the canvas schema",
+    listed.tools.length === 1 && listed.tools[0].name === "canvas" &&
+      listed.tools[0].inputSchema.required.join(",") === "ops",
+    JSON.stringify(listed.tools.map((t) => t.name)),
+  );
+  check(
+    "the MCP tool carries the bridge's own tool description",
+    listed.tools[0].description.includes("PLAIN ENGLISH, NO JARGON:"),
+    listed.tools[0].description.slice(0, 60),
+  );
+  const mcpCall = await mcpClient.callTool({
+    name: "canvas",
+    arguments: {
+      ops: [
+        {
+          op: "upsert_node",
+          node: {
+            id: "mcp-linked",
+            parentId: null,
+            label: "Through MCP",
+            summary: "Arrived on the canvas through the MCP server.",
+            phase: "idea",
+          },
+        },
+      ],
+      note: "via mcp",
+    },
+  });
+  check(
+    "a canvas call over MCP is applied and answered to the caller",
+    mcpCall.isError !== true && mcpCall.content[0].text.startsWith("applied 1 op(s);"),
+    JSON.stringify(mcpCall.content),
+  );
+  await waitFor("graph gained the node the MCP client asked for", () =>
+    frames.find((f) => f.type === "graph" && f.graph.nodes.some((n) => n.id === "mcp-linked")),
+  );
+  check("an MCP tool call reaches the canvas the browser is watching", true);
+  await mcpClient.close();
+
+  // --- harness hooks as the events channel ----------------------------------
+  const transcriptPath = join(fakeHome, "hook-transcript.jsonl");
+  await writeFile(
+    transcriptPath,
+    `${[
+      { type: "user", message: { role: "user", content: "make the login part quicker" } },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", name: "Edit", input: {} }] } },
+      {
+        type: "assistant",
+        message: { role: "assistant", content: [{ type: "text", text: "Tightened how the login part checks passwords." }] },
+      },
+    ]
+      .map((line) => JSON.stringify(line))
+      .join("\n")}\n`,
+  );
+
+  const runHook = async (payload) => {
+    const child = spawn(process.execPath, [join(linkPkg, "src", "hook.ts")], {
+      env: { ...process.env, SHAPE_BRIDGE_URL: linkUrl },
+      stdio: ["pipe", "ignore", "pipe"],
+    });
+    let hookErr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (d) => {
+      hookErr += d;
+    });
+    child.stdin.end(JSON.stringify(payload));
+    const exited = Promise.withResolvers();
+    child.once("exit", (code) => exited.resolve(code));
+    return { code: await exited.promise, stderr: hookErr };
+  };
+
+  const clearedAt = frames.length;
+  const preToolHook = await runHook({
+    hook_event_name: "PreToolUse",
+    session_id: "link-session-1",
+    cwd: worktree,
+    tool_name: "Edit",
+    tool_input: { file_path: "packages/auth/src/login.ts", old_string: "slow", new_string: "fast" },
+  });
+  check(
+    "the hook exits 0 and stays silent, whatever the harness asked",
+    preToolHook.code === 0 && preToolHook.stderr === "",
+    `code=${preToolHook.code} stderr=${preToolHook.stderr.slice(0, 200)}`,
+  );
+  const hookActivity = await waitFor("activity from a PreToolUse hook", () =>
+    frames.slice(clearedAt).find((f) => f.type === "activity" && f.nodeIds.includes("linked")),
+  );
+  check(
+    "a harness hook lights up the bubble whose code the tool touched",
+    hookActivity.nodeIds.join(",") === "linked",
+    hookActivity.nodeIds.join(","),
+  );
+
+  // the session is idle at this point, so "back to idle" is only observable
+  // after a prompt-submit hook has marked it streaming
+  const promptAt = frames.length;
+  const promptHook = await runHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "link-session-1",
+    cwd: worktree,
+    prompt: "make the login part quicker",
+  });
+  check("the UserPromptSubmit hook exits 0", promptHook.code === 0, `code=${promptHook.code}`);
+  await waitFor("streaming from the UserPromptSubmit hook", () =>
+    frames.slice(promptAt).find((f) => f.type === "agent" && f.state === "streaming"),
+  );
+  check("a prompt-submit hook marks the session streaming", true);
+
+  const stopAt = frames.length;
+  const stopHook = await runHook({
+    hook_event_name: "Stop",
+    session_id: "link-session-1",
+    transcript_path: transcriptPath,
+    cwd: worktree,
+  });
+  check("the Stop hook exits 0", stopHook.code === 0, `code=${stopHook.code}`);
+  await waitFor("transcript from the Stop hook", () =>
+    frames.find(
+      (f) => f.type === "transcript" && f.role === "assistant" &&
+        f.text === "Tightened how the login part checks passwords.",
+    ),
+  );
+  check("the Stop hook reports the last assistant message from the transcript file", true);
+  await waitFor("turn end from the Stop hook", () =>
+    frames.slice(stopAt).find((f) => f.type === "activity" && f.nodeIds.length === 0),
+  );
+  await waitFor("idle from the Stop hook", () =>
+    frames.slice(stopAt).find((f) => f.type === "agent" && f.state === "idle"),
+  );
+  check("the Stop hook clears activity and returns the session to idle", true);
+  linkSocket.close();
 
   console.log(`\n--- addressed instruction as omp received it ---\n${addressed.message}\n---`);
 } catch (err) {

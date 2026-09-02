@@ -9,12 +9,14 @@ import {
   PHASES,
   type AgentState,
   type BackendInfo,
+  type DiscoveredSession,
   type DriftMap,
   type EdgeKind,
   type EntityDelta,
   type GraphDelta,
   type GraphDoc,
   type GraphEdge,
+  type Harness,
   type IntentNode,
   type ModelRole,
   type Phase,
@@ -275,6 +277,42 @@ function asSessionInfo(value: unknown): SessionInfo | null {
   return { sessionId, sessionName, model, cwd, targetHasCode: value.targetHasCode, worktrees, backend };
 }
 
+const HARNESSES: readonly string[] = ["omp", "claude", "codex", "opencode", "cursor"];
+const SESSION_ATTACH: readonly string[] = ["socket", "daemon", "http", "none"];
+
+/** one row of the bridge's `discoverSessions()` scan */
+function asDiscoveredSession(value: unknown): DiscoveredSession | null {
+  if (!isRecord(value)) return null;
+  const harness = asStr(value.harness);
+  const command = asStr(value.command);
+  const attach = asStr(value.attach);
+  const cwd = asNullableStr(value.cwd);
+  const sessionId = asNullableStr(value.sessionId);
+  const sessionFile = asNullableStr(value.sessionFile);
+  const startedAt = asNullableStr(value.startedAt);
+  if (harness === null || !HARNESSES.includes(harness)) return null;
+  if (command === null || attach === null || !SESSION_ATTACH.includes(attach)) return null;
+  if (cwd === undefined || sessionId === undefined || sessionFile === undefined || startedAt === undefined) return null;
+  if (typeof value.pid !== "number" || !Number.isInteger(value.pid)) return null;
+  if (typeof value.spawnedByShape !== "boolean") return null;
+  // null is a legitimate value here: not every harness can be resumed
+  const resumeCommand = value.resumeCommand === null ? null : asStrArray(value.resumeCommand);
+  if (resumeCommand === null && value.resumeCommand !== null) return null;
+  return {
+    // membership checked above; the casts only name the narrowed unions
+    harness: harness as Harness,
+    pid: value.pid,
+    command,
+    cwd,
+    sessionId,
+    sessionFile,
+    startedAt,
+    resumeCommand,
+    attach: attach as DiscoveredSession["attach"],
+    spawnedByShape: value.spawnedByShape,
+  };
+}
+
 export function parseServerMsg(raw: unknown): ServerMsg | null {
   if (!isRecord(raw)) return null;
   switch (raw.type) {
@@ -284,10 +322,16 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
       const agent = asAgentState(raw.agent);
       const recentProjects = asStrArray(raw.recentProjects);
       const revisions = mapAll(raw.revisions, asRevisionInfo);
+      const sessions = mapAll(raw.sessions, asDiscoveredSession);
       if (graph === null || session === null || agent === null || recentProjects === null || revisions === null) {
         return null;
       }
-      return { type: "hello", graph, session, agent, recentProjects, revisions };
+      if (sessions === null) return null;
+      return { type: "hello", graph, session, agent, recentProjects, revisions, sessions };
+    }
+    case "sessions": {
+      const sessions = mapAll(raw.sessions, asDiscoveredSession);
+      return sessions === null ? null : { type: "sessions", sessions };
     }
     case "graph": {
       const graph = asGraphDoc(raw.graph);

@@ -39,13 +39,30 @@ assumption. `packages/bridge/src/backend/types.ts` is the whole surface:
 ```ts
 interface Backend {
   readonly id: string; readonly label: string; readonly capabilities: BackendCapabilities;
-  start(opts: { cwd, events: BackendEvents, canvasTool: { description, schema } }): Promise<void>;
+  start(opts: { cwd, events: BackendEvents, canvasTool: { description, schema },
+                resumeSessionId?: string, bridgeUrl: string }): Promise<void>;
   state(): Promise<BackendState>;                  // { streaming, sessionId, sessionName, model }
   send(message: string, mode: "prompt" | "steer"): Promise<void>;
   abort(): Promise<void>;
   dispose(): Promise<void>;
+  terminal?(): TerminalSource | null;              // non-null ⇒ the pane shows the harness TUI
+}
+interface TerminalSource {
+  write(data: string): void; resize(cols: number, rows: number): void;
+  onData(cb: (data: string) => void): () => void; onExit(cb: (code: number | null) => void): () => void;
 }
 ```
+
+`bridgeUrl` is `ws://127.0.0.1:<port>/ws` of THIS bridge, so an adapter can point the link
+(§The link) at it — an MCP server for the canvas, a hook for events. `resumeSessionId` is
+passed only when an `adopt` named a session to continue; `capabilities.resume` says whether
+the adapter can honor it. `terminal()` is the harness's own terminal surface: when it
+returns non-null, `PtyManager.attach(source)` makes the terminal pane show that TUI instead
+of a project shell (`pty_input`/`pty_resize` go to the source, `pty_close` is a no-op — the
+agent is not closable from the pane), and the bridge calls `attach(null)` before disposing a
+backend. `BackendEvents` also has an optional `onSession({ sessionId, model })` for
+hook-driven adapters, whose session id reaches the bridge out of band rather than through
+`state()`; the bridge merges it into `SessionInfo` and re-broadcasts `hello`.
 
 The adapter owns everything harness-shaped: process spawn, frame decoding, coalescing text
 deltas into whole assistant messages, projecting tool arguments into `{ name, paths, summary }`,
@@ -61,19 +78,26 @@ terminal: "tui" | "shell" | "none" }`. Delivery rule: `steer` when `steerMidTurn
 prompt still goes out and the transcript says it is queued for the next turn.
 
 Config, lowest precedence first: built-in default (`omp`), `~/.shape/config.json`
-(`SHAPE_HOME` overrides the home dir), `<target>/.shape/config.json`, then CLI `--backend <id>`.
+(`SHAPE_HOME` overrides the home dir), `<target>/.shape/config.json`, then CLI `--backend <id>`,
+then a per-call override (an `adopt` passes the harness id it discovered).
 `--omp "<cmd ...>"` still replaces the omp adapter's command (smoke uses it). Shape:
 
 ```json
-{ "backend": "omp", "backends": { "omp": { "command": ["omp"] } } }
+{ "backend": "omp", "backends": { "omp": { "command": ["omp"], "mode": "tui", "args": [], "permissionMode": "…" } } }
 ```
+
+`command` is optional (absent ⇒ the adapter's default); `mode`, `args` and `permissionMode`
+are adapter-specific passthrough, validated but not interpreted by the loader.
 
 Missing files are fine; a malformed one is a startup error naming the file, and an unknown
 backend id is a startup error listing the known ids. Config is re-read per project, so
 `switch_project` disposes the backend and creates the one the new target asks for.
 omp adapter: `omp --mode rpc` (`--mode rpc` appended when the configured command omits it),
 `set_host_tools` for `canvas`, capabilities `{ steerMidTurn: true, hostTool: true,
-events: "native", resume: true, terminal: "shell" }`.
+events: "native", resume: true, terminal: "shell" }`. Resume is real: `--resume <id>` composes
+with `--mode rpc` (verified against omp 18.1.2 — the resumed session's own id and message
+count come back from `get_state`), and an explicit `--resume`/`-r` already on the configured
+command wins over the adopted id.
 
 ## Graph document
 
@@ -120,14 +144,16 @@ summary required and ≤ 200 chars.
 ## WebSocket protocol (bridge ↔ browser)
 
 Server → client (`ServerMsg`):
-- `hello` — full `GraphDoc` + `SessionInfo` + `recentProjects: string[]` on connect AND
-  after every successful `switch_project` (retarget = fresh hello to all clients)
+- `hello` — full `GraphDoc` + `SessionInfo` + `recentProjects: string[]` +
+  `sessions: DiscoveredSession[]` on connect AND after every successful `switch_project` /
+  `adopt` (retarget = fresh hello to all clients)
 - `graph` — full `GraphDoc` after every change (graphs are small; no patch protocol in v1)
 - `agent` — `{ state: "idle" | "streaming" | "compacting" }`
 - `activity` — `{ nodeIds: string[] }` currently-working intent nodes (pulse rendering)
 - `transcript` — `{ role, text }` appended lines for the side panel (assistant text deltas
   coalesced per message_end; tool lines summarized)
 - `error` — `{ message }`
+- `sessions` — `{ sessions: DiscoveredSession[] }` answer to `discover` (broadcast)
 - `pty_data` / `pty_exit` / `pty_state` — terminal output and lifecycle (see below)
 
 Client → server (`ClientMsg`):
@@ -142,6 +168,18 @@ Client → server (`ClientMsg`):
   Recents persist in `~/.shape/recents.json` (most-recent first, deduped, cap 10).
 - `abort`
 - `pty_open` / `pty_input` / `pty_resize` / `pty_close` — terminal input and geometry
+- `discover` — re-scan this machine for running agent sessions; answered with a `sessions`
+  broadcast. The scan is `ps` plus a walk of each harness's session store (~150 ms), so the
+  bridge also runs it inside every `hello` rather than making the client ask first.
+- `adopt` — `{ pid: number }` take over a session someone else started. The pid is resolved
+  in a FRESH scan (the client's list is as old as its last hello), then it is a
+  `switch_project` to that session's `cwd` with the backend forced to `session.harness`
+  (harness ids ARE backend ids) and `resumeSessionId` = `session.sessionId` when it has one.
+  Unknown pid → `error` "adopt rejected: no running agent session with pid <n>"; unreadable
+  cwd → `error` naming the pid; a harness with no adapter → `error`
+  "no Shape adapter for <harness> yet". A `.shape/graph.json` with nodes in that project
+  loads as usual; otherwise the client shows its "Map this project" CTA — that is the
+  bootstrap path for an adopted project.
 
 Terminal frames live in `packages/shared/src/pty.ts` (`PtyClientMsg` / `PtyServerMsg`) and
 are merged into `ClientMsg` / `ServerMsg`; the bridge answers them from `PtyManager`
@@ -155,6 +193,36 @@ non-TS repos fall back to a cheap source-file scan). Client shows the "Map this 
 when `targetHasCode` and `nodes.length === 0`. It also carries
 `backend: { id, label, capabilities }` (§Backends) — the harness this session runs on,
 re-derived on every `switch_project`.
+
+`DiscoveredSession` (shared/) is one row of the bridge's `discoverSessions()`
+(`packages/bridge/src/discover.ts`): `{ harness: "omp" | "claude" | "codex" | "opencode" |
+"cursor", pid, command, cwd, sessionId, sessionFile, startedAt, resumeCommand, attach:
+"socket" | "daemon" | "http" | "none", spawnedByShape }`. Rows with `spawnedByShape` are
+excluded from the wire: those are Shape's own harness children, and adopting one is a loop.
+`attach` records what a live process would offer (Claude Code's IPC socket, Codex's
+app-server daemon, opencode's HTTP port); adopting today always starts a fresh harness for
+that project and resumes the session by id rather than joining the running process.
+
+## The link (external process ↔ bridge, 2026-09-02)
+
+Anything that is not a browser speaks two extra frames on the same socket, defined in
+`packages/shared/src/link.ts` and merged into `ClientMsg` / `ServerMsg`:
+
+- `canvas_call` — `{ id, args }` a host-tool round trip carried over the socket. The bridge
+  applies the ops and answers `canvas_result` `{ id, text, isError }` to THAT socket only
+  (a canvas result is nobody else's business; the `graph` broadcast is the public part).
+  This is how a harness that cannot host a tool for us still writes to the canvas — Shape
+  ships an MCP server (`packages/link/src/mcp.ts`, tool `canvas`) that is just a caller.
+- `agent_event` — `{ event: AgentEvent }` one already-projected harness event
+  (`state` | `text` | `tool_start` | `tool_end` | `turn_end` | `session`). It feeds the SAME
+  `BackendEvents` object the active backend uses, so an adapter with no native event stream
+  (Claude Code's hooks, a transcript tail) lights up activity, transcript and agent state
+  through the bridge's normal path.
+
+Both are routed in `packages/bridge/src/external.ts` (`isLinkMsg` → `ExternalIo.handle`),
+immediately after the terminal branch and before any agent routing. The link is trusted
+exactly as much as the browser: the socket is bound to 127.0.0.1 and every frame was
+validated in `ws.ts`.
 
 ## Worktrees (user decision 2026-08-28: toggle first, compare later)
 
@@ -210,9 +278,19 @@ Trigger: on terminal `agent_end` (`isTerminal !== false`), if `git rev-parse HEA
 target cwd changed since last extraction (or first run with any commit). v1 scope: pnpm/TS
 monorepos — packages = workspace globs' dirs with package.json; edges = cross-package
 import specifiers (regex scan of .ts/.tsx sources, workspace-name and relative imports).
-Drift rule v1: an intent node whose `codeRefs` map into package P gets a drift note for
-every reality edge P→Q with no corresponding intent edge (and vice versa for declared
-intent `depends` edges with no reality counterpart once both ends are `building`+).
+Drift rule v2 (attribution): each intent node maps to the reality packages its own
+`codeRefs` cover (longest package dir wins per ref, so a nested package beats its parent);
+a node *covers* P if it or any descendant maps into P — hierarchy is transparent. A reality
+edge P→Q is satisfied when some intent edge of any kind runs from a node covering P to a
+node covering Q (direction matters: a Q→P edge does not answer a P→Q import), or when one
+node's own refs straddle both P and Q (the dependency lives inside a single bubble). An
+unsatisfied edge produces exactly ONE note, on the highest-altitude node covering P (ties:
+a node whose own refs map into P first, then document order) — descendants stay clean and
+the client's liveness bubbling carries the glow up. The reverse rule is evaluated the same
+way: a declared `depends` edge whose ends are both `building`+ is contradicted only when no
+reality edge connects any package covered by its source to any package covered by its
+target; that test is direction-blind (a backwards declaration is already reported once by
+the forward rule) and ends that share a package are skipped.
 
 ## Voice capture (web, v1)
 

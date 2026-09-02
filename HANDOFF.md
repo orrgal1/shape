@@ -154,3 +154,35 @@ descendant bubble with codeRefs in that package (12 of 17 playground bubbles glo
 drift should be satisfied when any node mapped into P relates to any node mapped into Q,
 ancestors included. Batch two also: `canvas` as an MCP server + Claude Code adapter (spawn
 mode), discovery/adopt UI, then Codex/opencode adapters and live attach.
+
+## 2026-09-02: roadmap batch two (Opus builders, integrated + verified)
+
+- **The link** (`packages/link`, `@shape/link`): `src/mcp.ts` is a stdio MCP server exposing
+  the `canvas` tool to any harness (forwards `canvas_call` over WS, result comes back on the
+  same socket); `src/hook.ts` turns one harness hook payload into `agent_event` frames that
+  feed the SAME `BackendEvents` the native adapter uses. Bridge side: `external.ts`, `ws.ts`
+  `onMessage(msg, reply)`. Wire types in `shared/src/link.ts`. Bridge smoke 94 → 114.
+- **Claude Code adapter** (`backend/claude.ts`, modes `headless` | `tui` (default)):
+  headless = `claude -p --input/--output-format stream-json` + link via `--mcp-config`;
+  tui = interactive `claude` in an adapter-owned pty, hooks via `--settings`, terminal pane
+  attaches to it (`PtyManager.attach`), steer = bracketed-paste typing (queued, not mid-turn).
+  The UDS at `/tmp/cc-socks/<pid>.sock` accepts unauthenticated injections but Claude renders
+  them as untrusted "peer" messages, so it is deliberately not used for user steering.
+  `smoke:claude` 42 checks against `scripts/fake-claude.mjs`. NOT yet proven with a real
+  model turn: this machine's Claude OAuth is expired (`claude auth status` → loggedIn false);
+  run `claude login`, then re-run the headless real check (see agent://ClaudeAdapter).
+- **Discover / adopt**: hello carries `sessions` (Shape's own rpc children excluded);
+  `discover` re-scans; `adopt {pid}` retargets to the session's cwd with backend = harness and
+  `--resume <id>` (verified: `omp --mode rpc --resume` works; `claude --resume` wired).
+  Project pop-up shows "Running sessions"; header shows the backend pill. `ctl.mjs discover|adopt`.
+  `smoke:adopt` 17 checks (adopts a real omp session).
+- **Drift rule v2** (reality.ts): hierarchy-transparent coverage, one note per unsatisfied
+  reality edge on the top-level owner; playground 59 notes → 0. `smoke:drift` 23 checks.
+
+Smokes: `pnpm --filter @shape/bridge run smoke|smoke:claude|smoke:adopt|smoke:drift` (must run
+from the package — they resolve `src/index.ts` relative to cwd), `pnpm smoke:shared`.
+
+Next: Codex + opencode adapters (both "full" per research; app-server / HTTP), live attach
+(Codex daemon, opencode `--port`), spawn-mode UX (open the harness TUI from the canvas when
+no session is running), Cursor (partial). Open question for the user: whether omp's own
+interactive TUI can be driven (hub injection) so omp gets a tui mode like Claude.

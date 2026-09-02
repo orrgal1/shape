@@ -10,6 +10,7 @@
 import {
   emptyGraph,
   type ClientMsg,
+  type DiscoveredSession,
   type EntityDelta,
   type GraphDoc,
   type GraphEdge,
@@ -130,6 +131,51 @@ const MOCK_RECENTS: readonly string[] = [
 ];
 
 const MINUTE_MS = 60_000;
+
+/**
+ * Three sessions the adopt list can offer: one omp with a resumable id, one
+ * Claude Code with a live IPC socket, and one Codex whose cwd is a worktree of
+ * the fixture project. Covers the harness badge, the resume tag and the
+ * "nothing to attach to" case.
+ */
+const MOCK_SESSIONS: readonly DiscoveredSession[] = [
+  {
+    harness: "omp",
+    pid: 4821,
+    command: "omp",
+    cwd: "/Users/you/code/pomo",
+    sessionId: "01a05f7c-2b41-7f00-9d3a-6c1e4b8a0d92",
+    sessionFile: "/Users/you/.omp/agent/sessions/--Users-you-code-pomo/2026-09-02T09-12-04Z.jsonl",
+    startedAt: new Date(Date.now() - 62 * MINUTE_MS).toISOString(),
+    resumeCommand: ["omp", "--resume", "01a05f7c-2b41-7f00-9d3a-6c1e4b8a0d92"],
+    attach: "none",
+    spawnedByShape: false,
+  },
+  {
+    harness: "claude",
+    pid: 5107,
+    command: "claude",
+    cwd: "/Users/you/work/atlas-api",
+    sessionId: "9f31c0de-7ab2-4c15-8f60-2d7e9a441bb3",
+    sessionFile: "/Users/you/.claude/projects/-Users-you-work-atlas-api/9f31c0de.jsonl",
+    startedAt: new Date(Date.now() - 18 * MINUTE_MS).toISOString(),
+    resumeCommand: ["claude", "--resume", "9f31c0de-7ab2-4c15-8f60-2d7e9a441bb3"],
+    attach: "socket",
+    spawnedByShape: false,
+  },
+  {
+    harness: "codex",
+    pid: 5620,
+    command: "codex",
+    cwd: "/Users/you/code/vireo-offline-sync",
+    sessionId: null,
+    sessionFile: null,
+    startedAt: new Date(Date.now() - 3 * MINUTE_MS).toISOString(),
+    resumeCommand: null,
+    attach: "daemon",
+    spawnedByShape: false,
+  },
+];
 
 /**
  * Three saved versions of the fixture canvas, timed relative to page load so the
@@ -333,6 +379,7 @@ export function startMock(): () => void {
       session: mockSession(true),
       agent: "idle",
       recentProjects: [...MOCK_RECENTS],
+      sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })),
       revisions: [],
     });
     // after `hello`, which would otherwise report a live bridge
@@ -347,6 +394,7 @@ export function startMock(): () => void {
       session: mockSession(true),
       agent: "idle",
       recentProjects: [...MOCK_RECENTS],
+      sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })),
       revisions: mockRevisions(7),
     });
     store.setConn("mock");
@@ -360,6 +408,7 @@ export function startMock(): () => void {
     session: mockSession(false),
     agent: "streaming",
     recentProjects: [...MOCK_RECENTS],
+    sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })),
     revisions: mockRevisions(41),
   });
   store.setConn("mock");
@@ -408,6 +457,9 @@ export function startMock(): () => void {
 
 export function mockSend(msg: ClientMsg): void {
   const store = useApp.getState();
+  // mock mode is also how the adopt UI is verified: every outbound frame is
+  // announced, because there is no socket to watch for it
+  console.info(`[mock] client frame ${JSON.stringify(msg)}`);
   if (msg.type === "abort") {
     store.ingest({ type: "agent", state: "idle" });
     store.appendTranscript("tool", "abort requested (mock)");
@@ -426,6 +478,23 @@ export function mockSend(msg: ClientMsg): void {
     // a real bridge answers with a fresh hello; the mock has one project, so it
     // reports what it would have done instead of faking a second graph
     store.pushError(`switch_project "${msg.path}" needs the bridge — mock mode has one fixture project`);
+    return;
+  }
+  if (msg.type === "discover") {
+    // the fixture list is fixed, so a re-scan legitimately answers the same rows
+    store.ingest({ type: "sessions", sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })) });
+    store.appendTranscript("tool", `discover: ${MOCK_SESSIONS.length} running session(s) (mock)`);
+    return;
+  }
+  if (msg.type === "adopt") {
+    const found = MOCK_SESSIONS.find((entry) => entry.pid === msg.pid);
+    if (found === undefined) {
+      store.pushError(`adopt rejected: no running agent session with pid ${msg.pid} (mock)`);
+      return;
+    }
+    // adopting is a bridge-side retarget; the mock reports the intent instead
+    store.appendTranscript("tool", `adopt ${found.harness} pid ${found.pid} in ${found.cwd ?? "?"} (mock)`);
+    store.pushError(`adopt needs the bridge — mock mode cannot attach to ${found.harness} pid ${found.pid}`);
     return;
   }
   if (msg.type === "diff") {

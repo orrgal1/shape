@@ -265,6 +265,69 @@ button {
   margin-bottom: var(--s4);
 }
 
+/* the "running sessions" heading carries its own rescan control */
+.project-menu-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+/* the title's "space before the list" rule must not push the rescan control */
+.project-menu-head .project-menu-title + * {
+  margin-bottom: 0;
+}
+
+.project-rescan {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.project-rescan:hover {
+  color: var(--text);
+}
+
+.project-sessions .project-session {
+  flex-wrap: wrap;
+}
+
+.session-harness {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--text-dim);
+}
+
+.session-meta {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* what clicking will do, spelled out: adopting is not a preview */
+.session-hint {
+  flex: none;
+  width: 100%;
+  padding-left: 2px;
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+}
+
+.project-session:hover .session-hint {
+  color: var(--text-dim);
+}
+
 .project-recents {
   display: flex;
   flex-direction: column;

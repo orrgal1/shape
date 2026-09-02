@@ -1,6 +1,6 @@
 import { ReactFlowProvider } from "@xyflow/react";
 import { useEffect, useMemo, useState } from "react";
-import type { WorktreeInfo } from "../../shared/src/index.ts";
+import type { DiscoveredSession, Harness, WorktreeInfo } from "../../shared/src/index.ts";
 import { Compare } from "./Compare.tsx";
 import { SidePanel } from "./SidePanel.tsx";
 import { SteeringBar } from "./SteeringBar.tsx";
@@ -62,6 +62,60 @@ function basename(path: string): string {
   return cut === -1 ? trimmed : trimmed.slice(cut + 1);
 }
 
+/** how a person names the harness, not how its binary is spelled */
+const HARNESS_LABEL: Record<Harness, string> = {
+  omp: "omp",
+  claude: "Claude Code",
+  codex: "Codex",
+  opencode: "opencode",
+  cursor: "Cursor",
+};
+
+const MINUTE_MS = 60_000;
+
+/** how long ago a session started — the thing that identifies "the one I left open" */
+function startedAgo(iso: string | null): string {
+  if (iso === null) return "started unknown";
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms)) return "started unknown";
+  const minutes = Math.max(0, Math.round(ms / MINUTE_MS));
+  if (minutes < 1) return "just started";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+}
+
+/**
+ * One running agent session, offered for adoption. Clicking retargets the
+ * bridge at that session's folder on that harness — resuming the conversation
+ * when the session has an id, and otherwise opening a fresh one there.
+ */
+function SessionRow({ session, current }: { session: DiscoveredSession; current: boolean }) {
+  const folder = session.cwd === null ? "unknown folder" : basename(session.cwd);
+  const short = session.sessionId === null ? null : session.sessionId.slice(0, 8);
+  return (
+    <li>
+      <button
+        type="button"
+        className="project-recent project-session"
+        data-current={current}
+        onClick={() => send({ type: "adopt", pid: session.pid })}
+        title={`${session.command} (pid ${session.pid}) in ${session.cwd ?? "an unreadable folder"} — attach: ${session.attach}`}
+      >
+        <span className="session-harness">{HARNESS_LABEL[session.harness]}</span>
+        <span className="project-recent-name">{folder}</span>
+        <span className="session-meta mono">
+          {startedAgo(session.startedAt)}
+          {short === null ? null : ` · ${short}`}
+        </span>
+        <span className="session-hint">
+          {session.sessionId === null ? "opens a new conversation here" : "reopens this conversation"}
+        </span>
+      </button>
+    </li>
+  );
+}
+
 /**
  * Current project plus a menu of recents and a free-text path. Switching is a
  * bridge-side retarget, so the answer arrives as a fresh `hello` — which is
@@ -70,6 +124,7 @@ function basename(path: string): string {
 function ProjectSelector() {
   const session = useApp((state) => state.session);
   const recents = useApp((state) => state.recentProjects);
+  const sessions = useApp((state) => state.sessions);
   const errors = useApp((state) => state.errors);
   const [open, setOpen] = useState(false);
   const [path, setPath] = useState("");
@@ -105,6 +160,27 @@ function ProjectSelector() {
 
       {open ? (
         <div className="project-menu">
+          <div className="project-menu-head">
+            <p className="project-menu-title">running sessions</p>
+            <button
+              type="button"
+              className="project-rescan"
+              title="re-scan this machine for running agent sessions"
+              onClick={() => send({ type: "discover" })}
+            >
+              rescan
+            </button>
+          </div>
+          {sessions.length === 0 ? (
+            <p className="tl-empty">No agent is running anywhere else on this machine.</p>
+          ) : (
+            <ul className="project-recents project-sessions">
+              {sessions.map((entry) => (
+                <SessionRow key={entry.pid} session={entry} current={entry.cwd === cwd} />
+              ))}
+            </ul>
+          )}
+
           <p className="project-menu-title">recent projects</p>
           {recents.length === 0 ? (
             <p className="tl-empty">The bridge has not reported any recents yet.</p>
@@ -317,6 +393,7 @@ function Header() {
   const comparing = useApp((state) => state.delta !== null);
 
   const model = session?.model;
+  const backend = session?.backend;
   return (
     <header className="header">
       <div className="brand">
@@ -341,6 +418,14 @@ function Header() {
       {model === undefined || model === null ? null : (
         <span className="pill" title={`${model.provider}/${model.id}`}>
           {model.id}
+        </span>
+      )}
+      {backend === undefined ? null : (
+        <span
+          className="pill pill-backend"
+          title={`harness: ${backend.label} (${backend.id}) — events: ${backend.capabilities.events}, terminal: ${backend.capabilities.terminal}`}
+        >
+          {backend.label}
         </span>
       )}
       <span className="brand-meta">

@@ -316,7 +316,9 @@ process.stdin.on("end", () => {
   });
 });
 
-record({ type: "__start", pid: process.pid, cwd: process.cwd() });
+// argv is part of the marker so a test can prove what the bridge asked for
+// (e.g. `--resume <id>` when a session was adopted)
+record({ type: "__start", pid: process.pid, cwd: process.cwd(), argv: process.argv.slice(2) });
 
 out({
   type: "ready",

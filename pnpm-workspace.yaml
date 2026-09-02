@@ -2,5 +2,6 @@ packages:
   - packages/bridge
   - packages/web
   - packages/shared
+  - packages/link
 allowBuilds:
   esbuild: true

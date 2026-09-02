@@ -12,8 +12,12 @@
 
 import { spawn, type IPty } from "@lydell/node-pty";
 import type { PtyClientMsg, PtyServerMsg } from "../../shared/src/pty.ts";
+import type { TerminalSource } from "./backend/types.ts";
 
 const FALLBACK_SHELL = "/bin/zsh";
+
+/** `pty_state.shell` while the pane shows a harness TUI rather than a shell */
+const AGENT_SHELL = "agent";
 
 /** a terminal smaller than this is a resize race, not a window */
 const MIN_DIM = 1;
@@ -47,6 +51,14 @@ export class PtyManager {
   /** last size the browser asked for; a fresh pty is spawned at this size */
   #cols = DEFAULT_COLS;
   #rows = DEFAULT_ROWS;
+  /**
+   * A harness TUI shown instead of the shell. The adapter owns the child, so
+   * this manager never spawns or kills it — it only wires the pane to it.
+   */
+  #source: TerminalSource | null = null;
+  #sourceAlive = false;
+  /** unsubscribes for `#source`; dropped on the next attach */
+  #sourceOff: Array<() => void> = [];
 
   /**
    * Terminal output arrives in many small chunks (a shell prompt alone is
@@ -68,6 +80,12 @@ export class PtyManager {
       case "pty_open":
         this.#cols = clampDim(msg.cols, this.#cols);
         this.#rows = clampDim(msg.rows, this.#rows);
+        // an attached TUI is already running: the pane joins it, nothing starts
+        if (this.#source !== null) {
+          this.#source.resize(this.#cols, this.#rows);
+          this.#emitState();
+          return;
+        }
         // a second tab attaching must not restart the shell out from under the
         // first: answer with the state it can already see
         if (this.#pty !== null) {
@@ -78,7 +96,12 @@ export class PtyManager {
         this.#spawn();
         return;
       case "pty_input":
-        if (typeof msg.data !== "string" || this.#pty === null) return;
+        if (typeof msg.data !== "string") return;
+        if (this.#source !== null) {
+          if (this.#sourceAlive) this.#source.write(msg.data);
+          return;
+        }
+        if (this.#pty === null) return;
         this.#pty.write(msg.data);
         return;
       case "pty_resize": {
@@ -87,15 +110,54 @@ export class PtyManager {
         if (cols === this.#cols && rows === this.#rows) return;
         this.#cols = cols;
         this.#rows = rows;
-        this.#pty?.resize(cols, rows);
+        if (this.#source !== null) this.#source.resize(cols, rows);
+        else this.#pty?.resize(cols, rows);
         return;
       }
       case "pty_close":
+        // the agent's own terminal is not closable from the pane — killing it
+        // would take the session Shape is driving with it
+        if (this.#source !== null) return;
         // deliberately keeps `#pty` set: the child's own exit is what reports
         // the close, so the browser learns about it the same way either way
         this.#pty?.kill();
         return;
     }
+  }
+
+  /**
+   * Point the pane at a harness's own terminal instead of a project shell, or
+   * back again with `null`. The adapter owns the source's child: attaching
+   * only subscribes, detaching only unsubscribes. Nothing is replayed — the
+   * pane shows the session from the moment it joins.
+   */
+  attach(source: TerminalSource | null): void {
+    if (this.#disposed || source === this.#source) return;
+    for (const off of this.#sourceOff) off();
+    this.#sourceOff = [];
+    // a shell and a harness TUI must never share the pane
+    if (source !== null) this.#detach();
+    this.#source = source;
+    this.#sourceAlive = source !== null;
+    if (source !== null) {
+      this.#sourceOff.push(
+        source.onData((data) => {
+          if (this.#source !== source) return;
+          this.#pending.push(data);
+          if (this.#flushing) return;
+          this.#flushing = true;
+          setImmediate(() => this.#flush());
+        }),
+        source.onExit((code) => {
+          if (this.#source !== source) return;
+          this.#sourceAlive = false;
+          this.#flush();
+          this.#broadcast({ type: "pty_exit", code });
+          this.#emitState();
+        }),
+      );
+    }
+    this.#emitState();
   }
 
   /**
@@ -106,6 +168,12 @@ export class PtyManager {
   retarget(cwd: string): void {
     if (this.#disposed) return;
     this.#cwd = cwd;
+    // an attached TUI is the harness's, and the harness is being replaced by
+    // whoever called this: leave it to `attach`
+    if (this.#source !== null) {
+      this.#emitState();
+      return;
+    }
     const wasOpen = this.#pty !== null;
     this.#detach();
     if (wasOpen) this.#spawn();
@@ -114,6 +182,9 @@ export class PtyManager {
 
   dispose(): void {
     this.#disposed = true;
+    for (const off of this.#sourceOff) off();
+    this.#sourceOff = [];
+    this.#source = null;
     this.#detach();
     this.#pending = [];
   }
@@ -187,6 +258,8 @@ export class PtyManager {
   }
 
   #emitState(): void {
-    this.#broadcast({ type: "pty_state", open: this.#pty !== null, shell: this.#shell, cwd: this.#cwd });
+    // an attached TUI is "open" for as long as the harness's own child lives
+    const open = this.#source !== null ? this.#sourceAlive : this.#pty !== null;
+    this.#broadcast({ type: "pty_state", open, shell: this.#source !== null ? AGENT_SHELL : this.#shell, cwd: this.#cwd });
   }
 }

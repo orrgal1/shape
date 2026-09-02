@@ -1,5 +1,5 @@
 {
-  "rev": 11,
+  "rev": 15,
   "nodes": [
     {
       "id": "ledgerly-api",
@@ -460,8 +460,92 @@
         "target": "r:@ledgerly/store"
       }
     ],
-    "extractedAt": "2026-09-02T13:17:54.621Z",
+    "extractedAt": "2026-09-02T19:13:00.914Z",
     "head": "6e47abbe7e9a0ec0ce3a6e205b033f746d4bdcff"
   },
-  "drift": {}
+  "drift": {
+    "api-no-auth": [
+      "code imports @ledgerly/config (node \"settings\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"fairness rules\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared",
+      "code imports @ledgerly/notify (node \"messages out\") but no edge is declared",
+      "code imports @ledgerly/queue (node \"waiting work\") but no edge is declared",
+      "code imports @ledgerly/store (node \"saved records\") but no edge is declared",
+      "code imports @ledgerly/store (node \"crash-proof saving\") but no edge is declared",
+      "code imports @ledgerly/store (node \"throwaway copy\") but no edge is declared"
+    ],
+    "ledgerly-api": [
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared",
+      "code imports @ledgerly/store (node \"crash-proof saving\") but no edge is declared",
+      "code imports @ledgerly/store (node \"throwaway copy\") but no edge is declared"
+    ],
+    "ledgerly-cli": [
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared",
+      "code imports @ledgerly/store (node \"crash-proof saving\") but no edge is declared",
+      "code imports @ledgerly/store (node \"throwaway copy\") but no edge is declared"
+    ],
+    "ledgerly-notify": [
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared"
+    ],
+    "ledgerly-store": [
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared"
+    ],
+    "store-safe-write": [
+      "code imports @ledgerly/domain (node \"fairness rules\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared"
+    ],
+    "store-scratch": [
+      "code imports @ledgerly/domain (node \"fairness rules\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared"
+    ],
+    "ledgerly-web": [
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared"
+    ],
+    "web-read-only": [
+      "code imports @ledgerly/domain (node \"fairness rules\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared"
+    ],
+    "ledgerly-worker": [
+      "code imports @ledgerly/api (node \"no door lock\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared",
+      "code imports @ledgerly/store (node \"crash-proof saving\") but no edge is declared",
+      "code imports @ledgerly/store (node \"throwaway copy\") but no edge is declared"
+    ],
+    "worker-recheck": [
+      "code imports @ledgerly/api (node \"the service\") but no edge is declared",
+      "code imports @ledgerly/api (node \"no door lock\") but no edge is declared",
+      "code imports @ledgerly/config (node \"settings\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"fairness rules\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared",
+      "code imports @ledgerly/notify (node \"messages out\") but no edge is declared",
+      "code imports @ledgerly/queue (node \"waiting work\") but no edge is declared",
+      "code imports @ledgerly/store (node \"saved records\") but no edge is declared",
+      "code imports @ledgerly/store (node \"crash-proof saving\") but no edge is declared",
+      "code imports @ledgerly/store (node \"throwaway copy\") but no edge is declared"
+    ],
+    "worker-snapshot-gap": [
+      "code imports @ledgerly/api (node \"the service\") but no edge is declared",
+      "code imports @ledgerly/api (node \"no door lock\") but no edge is declared",
+      "code imports @ledgerly/config (node \"settings\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"fairness rules\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"dividing a bill\") but no edge is declared",
+      "code imports @ledgerly/domain (node \"who pays whom\") but no edge is declared",
+      "code imports @ledgerly/notify (node \"messages out\") but no edge is declared",
+      "code imports @ledgerly/queue (node \"waiting work\") but no edge is declared",
+      "code imports @ledgerly/store (node \"saved records\") but no edge is declared",
+      "code imports @ledgerly/store (node \"crash-proof saving\") but no edge is declared",
+      "code imports @ledgerly/store (node \"throwaway copy\") but no edge is declared"
+    ]
+  }
 }

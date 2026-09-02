@@ -61,11 +61,24 @@ export class OmpBackend implements Backend {
     cwd: string;
     events: BackendEvents;
     canvasTool: { description: string; schema: object };
+    resumeSessionId?: string;
+    bridgeUrl: string;
   }): Promise<void> {
     const events = opts.events;
     this.#events = events;
+    // `--resume <id>` composes with `--mode rpc` (verified against omp 18.1.2:
+    // the resumed session's own id and message count come back from get_state),
+    // and an id already on the command line wins over the one we were handed.
+    const command = [...this.#command];
+    if (
+      opts.resumeSessionId !== undefined &&
+      !command.includes("--resume") &&
+      !command.includes("-r")
+    ) {
+      command.push("--resume", opts.resumeSessionId);
+    }
     const rpc = new RpcClient({
-      command: this.#command,
+      command,
       cwd: opts.cwd,
       onEvent: (frame) => this.#onFrame(frame),
       onStderr: (text) => process.stderr.write(text),

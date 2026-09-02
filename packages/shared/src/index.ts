@@ -6,8 +6,10 @@
  * TypeScript (no enums, no namespaces) and dependency-free.
  */
 
+import type { LinkClientMsg, LinkServerMsg } from "./link.ts";
 import type { PtyClientMsg, PtyServerMsg } from "./pty.ts";
 
+export type { AgentEvent, LinkClientMsg, LinkServerMsg } from "./link.ts";
 export type { PtyClientMsg, PtyServerMsg } from "./pty.ts";
 
 // ---------------------------------------------------------------------------
@@ -149,6 +151,21 @@ export const MODEL_ROLES: readonly ModelRole[] = ["explore", "build", "small"];
 export const NODE_KINDS: readonly NodeKind[] = ["ui", "service", "api", "store", "queue", "external", "security"];
 
 const NODE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * Description of the `canvas` tool, shared by both channels it is exposed
+ * through: the host tool a native adapter registers, and the MCP server the
+ * link ships. One text, or the two channels would drift apart.
+ */
+export const CANVAS_TOOL_DESCRIPTION = `Maintain the visual canvas the user is watching — this is their only view of your work.
+
+ops (batch, applied per-op): upsert_node, remove_node (rejected while it has children), upsert_edge, remove_edge, set_phase.
+ids are slugs: ^[a-z0-9][a-z0-9-]*$. Node summary is REQUIRED: one sentence stating what the bubble promises, <= 200 chars; a bubble that cannot be summarized in one sentence is at the wrong altitude.
+Hierarchy is parentId (null = root); edges are ONLY non-hierarchical relations (depends | dataflow | relates) — never an edge to mean "contains".
+Phases: idea -> concept -> component -> building -> built | failed. Set codeRefs (workspace-relative path prefixes) once a bubble owns files.
+summary = the bubble's stable promise. status (optional, <= 140 chars) = what is happening in it RIGHT NOW; refresh it on bubbles you are building and omit it when done — an upsert without status clears it.
+PLAIN ENGLISH, NO JARGON: every label, summary, status, edge label and note is read by a non-programmer steering by voice — everyday words, outcomes not mechanisms, no acronyms or protocol/library/file-format names or code identifiers unless the bubble is literally about that thing. Only codeRefs stay technical.
+Call this as you think and work, in the same turn your understanding changes. The result tells you what applied; rejections come back as JSON repair receipts ({code, subject, evidence, supportedFixes}) — apply a supported fix and resend just the rejected ops.`;
 
 /** JSON-Schema sent to omp via set_host_tools. */
 export const CANVAS_TOOL_SCHEMA = {
@@ -525,6 +542,32 @@ export interface WorktreeInfo {
   current: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Session discovery / adopt
+// ---------------------------------------------------------------------------
+
+/**
+ * A coding agent Shape knows how to look for. Harness ids ARE backend ids: a
+ * discovered `claude` session adopts onto the `claude` backend, and a harness
+ * with no adapter registered is rejected by name.
+ */
+export type Harness = "omp" | "claude" | "codex" | "opencode" | "cursor";
+
+/** one agent session already running on this machine (bridge/src/discover.ts) */
+export interface DiscoveredSession {
+  harness: Harness;
+  pid: number;
+  command: string;
+  cwd: string | null;
+  sessionId: string | null;
+  sessionFile: string | null;
+  startedAt: string | null;
+  resumeCommand: string[] | null;
+  attach: "socket" | "daemon" | "http" | "none";
+  /** omp child spawned by a Shape bridge (`omp --mode rpc` under packages/bridge). */
+  spawnedByShape: boolean;
+}
+
 /**
  * What the bridge can do with the backend it is driving. The client renders
  * from this instead of assuming omp: a backend that cannot steer mid-turn
@@ -582,6 +625,8 @@ export type ServerMsg =
       recentProjects: string[];
       /** available snapshots, ascending by rev */
       revisions: RevisionInfo[];
+      /** agent sessions running on this machine, newest first; Shape's own children excluded */
+      sessions: DiscoveredSession[];
     }
   | { type: "graph"; graph: GraphDoc }
   | { type: "agent"; state: AgentState }
@@ -591,8 +636,11 @@ export type ServerMsg =
   | { type: "revisions"; revisions: RevisionInfo[] }
   /** broadcast reply to a `diff` request */
   | { type: "delta"; delta: GraphDelta }
+  /** broadcast answer to `discover`, and re-broadcast whenever the bridge re-scans */
+  | { type: "sessions"; sessions: DiscoveredSession[] }
   | { type: "error"; message: string }
-  | PtyServerMsg;
+  | PtyServerMsg
+  | LinkServerMsg;
 
 export type ClientMsg =
   | { type: "utterance"; referent: Referent | null; text: string }
@@ -601,4 +649,9 @@ export type ClientMsg =
   /** compare two snapshots; `revA` = before, `revB` = after. Unknown rev → `error` frame */
   | { type: "diff"; revA: number; revB: number }
   | { type: "abort" }
-  | PtyClientMsg;
+  /** re-scan running agent sessions; answered with a `sessions` broadcast */
+  | { type: "discover" }
+  /** retarget this bridge onto a discovered session (by pid), resuming it when it has an id */
+  | { type: "adopt"; pid: number }
+  | PtyClientMsg
+  | LinkClientMsg;

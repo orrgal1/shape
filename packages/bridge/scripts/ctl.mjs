@@ -38,11 +38,16 @@ for (let i = 0; i < argv.length; i++) {
   else if (targetPath === undefined) targetPath = a;
   else out(1, { ok: false, error: `unexpected argument: ${a}` });
 }
-if (!["status", "switch-project", "onboard"].includes(command ?? "")) {
-  out(1, { ok: false, error: "usage: ctl.mjs [--port <n>] status | switch-project <abs-path> | onboard [--focus <text>]" });
+if (!["status", "switch-project", "onboard", "discover", "adopt"].includes(command ?? "")) {
+  out(1, {
+    ok: false,
+    error:
+      "usage: ctl.mjs [--port <n>] status | switch-project <abs-path> | onboard [--focus <text>] | discover | adopt <pid>",
+  });
 }
 if (!Number.isInteger(port) || port <= 0) out(1, { ok: false, error: "invalid --port" });
 if (command === "switch-project" && !targetPath) out(1, { ok: false, error: "switch-project needs a path" });
+if (command === "adopt" && !/^\d+$/.test(targetPath ?? "")) out(1, { ok: false, error: "adopt needs a pid" });
 
 // --- connection ------------------------------------------------------------
 const frames = [];
@@ -114,4 +119,35 @@ if (command === "onboard") {
   const rejection = await nextFrame(isRejection("onboard rejected"), 1500);
   if (rejection) out(1, { ok: false, error: rejection.message });
   out(0, { ok: true });
+}
+
+if (command === "discover") {
+  socket.send(JSON.stringify({ type: "discover" }));
+  // a scan is `ps` + a walk of every harness's session store
+  const result = await nextFrame((f) => f.type === "sessions", 10_000);
+  if (!result) out(1, { ok: false, error: "timed out waiting for a sessions frame" });
+  out(0, {
+    ok: true,
+    count: result.sessions.length,
+    sessions: result.sessions.map((s) => ({
+      harness: s.harness,
+      pid: s.pid,
+      cwd: s.cwd,
+      sessionId: s.sessionId,
+      startedAt: s.startedAt,
+      attach: s.attach,
+    })),
+  });
+}
+
+if (command === "adopt") {
+  socket.send(JSON.stringify({ type: "adopt", pid: Number(targetPath) }));
+  // adopt = a project switch with a backend override: same budget as switch-project
+  const result = await nextFrame(
+    (f) => f.type === "hello" || (f.type === "error" && /^(adopt rejected|no Shape adapter|switch_project)/.test(f.message)),
+    60_000,
+  );
+  if (!result) out(1, { ok: false, error: "timed out waiting for the bridge to re-hello" });
+  if (result.type === "error") out(1, { ok: false, error: result.message });
+  out(0, { ok: true, cwd: result.session.cwd, backend: result.session.backend?.id ?? null, sessionId: result.session.sessionId });
 }

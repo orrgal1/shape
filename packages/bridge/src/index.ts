@@ -11,11 +11,12 @@ import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { diffSnapshots } from "../../shared/src/delta.ts";
-import { BRIDGE_PORT, BRIDGE_WS_PATH, CANVAS_TOOL_SCHEMA } from "../../shared/src/index.ts";
+import { BRIDGE_PORT, BRIDGE_WS_PATH, CANVAS_TOOL_DESCRIPTION, CANVAS_TOOL_SCHEMA } from "../../shared/src/index.ts";
 import type {
   AgentState,
   BackendInfo,
   ClientMsg,
+  DiscoveredSession,
   DriftMap,
   GraphDoc,
   RealityLayer,
@@ -24,8 +25,10 @@ import type {
   SessionInfo,
   WorktreeInfo,
 } from "../../shared/src/index.ts";
-import { createBackend, loadShapeConfig } from "./backend/index.ts";
+import { KNOWN_BACKENDS, createBackend, loadShapeConfig } from "./backend/index.ts";
 import type { Backend, BackendEvents } from "./backend/types.ts";
+import { discoverSessions } from "./discover.ts";
+import { ExternalIo, isLinkMsg } from "./external.ts";
 import {
   composeSurveyPrompt,
   hasSourceCode,
@@ -40,16 +43,6 @@ import { composeUtterance } from "./steering.ts";
 import { GraphStore } from "./store.ts";
 import { WsHub } from "./ws.ts";
 import { ensureGitExclude, listWorktrees } from "./worktrees.ts";
-
-const CANVAS_TOOL_DESCRIPTION = `Maintain the visual canvas the user is watching — this is their only view of your work.
-
-ops (batch, applied per-op): upsert_node, remove_node (rejected while it has children), upsert_edge, remove_edge, set_phase.
-ids are slugs: ^[a-z0-9][a-z0-9-]*$. Node summary is REQUIRED: one sentence stating what the bubble promises, <= 200 chars; a bubble that cannot be summarized in one sentence is at the wrong altitude.
-Hierarchy is parentId (null = root); edges are ONLY non-hierarchical relations (depends | dataflow | relates) — never an edge to mean "contains".
-Phases: idea -> concept -> component -> building -> built | failed. Set codeRefs (workspace-relative path prefixes) once a bubble owns files.
-summary = the bubble's stable promise. status (optional, <= 140 chars) = what is happening in it RIGHT NOW; refresh it on bubbles you are building and omit it when done — an upsert without status clears it.
-PLAIN ENGLISH, NO JARGON: every label, summary, status, edge label and note is read by a non-programmer steering by voice — everyday words, outcomes not mechanisms, no acronyms or protocol/library/file-format names or code identifiers unless the bubble is literally about that thing. Only codeRefs stay technical.
-Call this as you think and work, in the same turn your understanding changes. The result tells you what applied; rejections come back as JSON repair receipts ({code, subject, evidence, supportedFixes}) — apply a supported fix and resend just the rejected ops.`;
 
 interface Cli {
   cwd: string;
@@ -117,6 +110,16 @@ class Bridge {
   #backend: Backend | null = null;
   /** wire projection of `#backend`; assigned with it in #createBackend */
   #backendInfo!: BackendInfo;
+  /**
+   * ONE event sink for the whole bridge life: the active backend and the link
+   * (hooks, sidecars) must land in the same place, or a hook-driven adapter
+   * would lose activity and transcript.
+   */
+  readonly #events: BackendEvents = this.#backendEvents();
+  /** assigned in start(): the link's address for THIS bridge, handed to every backend */
+  #bridgeUrl = "";
+  /** assigned in start(), once the port is known */
+  #external!: ExternalIo;
   /** shared project shell; retargeted, never re-created, across switches */
   #pty!: PtyManager;
   #agent: AgentState = "idle";
@@ -142,24 +145,36 @@ class Bridge {
   }
 
   async start(): Promise<void> {
+    this.#bridgeUrl = `ws://127.0.0.1:${this.#cli.port}${BRIDGE_WS_PATH}`;
     await this.#createBackend();
     await this.#openProject();
-    await this.#startBackend();
+    // the terminal pane exists before the harness starts: a backend with its
+    // own TUI is attached to it the moment it comes up
     this.#pty = new PtyManager({ cwd: this.#cwd, broadcast: (msg) => this.#broadcast(msg) });
+    this.#external = new ExternalIo({ applyCanvas: (a) => this.#canvasCall(a), events: this.#events });
 
+    // The socket listens BEFORE the harness is started, and that order matters:
+    // a hook-driven adapter's first event (Claude Code fires SessionStart within
+    // a second of the TUI coming up) arrives over the link, and a hook that finds
+    // nobody listening exits silently — the bridge would never learn the session
+    // id. The banner is still printed last, so "canvas at ..." means fully up.
     const hub = new WsHub({
       port: this.#cli.port,
       hello: () => this.#hello(),
-      onMessage: (msg) => this.#onClientMsg(msg),
+      onMessage: (msg, reply) => this.#onClientMsg(msg, reply),
     });
     this.#hub = hub;
     await hub.listening();
-    console.error(
-      `[bridge] canvas at ws://127.0.0.1:${this.#cli.port}${BRIDGE_WS_PATH} (target ${this.#cwd})`,
-    );
+
+    await this.#startBackend();
+    console.error(`[bridge] canvas at ${this.#bridgeUrl} (target ${this.#cwd})`);
   }
 
-  /** Worktrees are re-detected on every hello (connect and post-switch). */
+  /**
+   * Worktrees and running sessions are re-detected on every hello (connect and
+   * post-switch). Discovery is a ~150 ms `ps` + session-store walk: worth it to
+   * have the adopt list correct the instant the pop-up opens.
+   */
   async #hello(): Promise<ServerMsg> {
     this.#session = { ...this.#session, worktrees: await listWorktrees(this.#cwd) };
     return {
@@ -169,7 +184,22 @@ class Bridge {
       agent: this.#agent,
       recentProjects: this.#recents,
       revisions: await this.#snapshots.list(),
+      sessions: await this.#discoverSessions(),
     };
+  }
+
+  /**
+   * Agent sessions worth adopting: everything running on this machine except
+   * the harness children Shape itself spawned (adopting our own child would be
+   * a loop).
+   */
+  async #discoverSessions(): Promise<DiscoveredSession[]> {
+    try {
+      return (await discoverSessions()).filter((session) => !session.spawnedByShape);
+    } catch (err) {
+      console.error(`[bridge] session discovery failed: ${errText(err)}`);
+      return [];
+    }
   }
 
   /** Load (or start) the graph for `#cwd`, extract reality, answer targetHasCode. */
@@ -199,10 +229,11 @@ class Bridge {
    * then CLI flags) and instantiate its backend. An unknown id is a startup
    * error naming the ones we know.
    */
-  async #createBackend(): Promise<void> {
+  async #createBackend(backendOverride?: string): Promise<void> {
     const config = await loadShapeConfig({
       cwd: this.#cwd,
-      backend: this.#cli.backend,
+      // an adopt names the harness it found; otherwise the CLI flag decides
+      backend: backendOverride ?? this.#cli.backend,
       ompCommand: this.#cli.ompCommand,
     });
     const backend = createBackend(config.backend, config);
@@ -211,14 +242,18 @@ class Bridge {
   }
 
   /** Start the harness in `#cwd`, register the canvas tool, prime session state. */
-  async #startBackend(): Promise<void> {
+  async #startBackend(resumeSessionId?: string): Promise<void> {
     const backend = this.#backend;
     if (backend === null) throw new Error("bridge: no backend to start");
     await backend.start({
       cwd: this.#cwd,
-      events: this.#backendEvents(),
+      events: this.#events,
       canvasTool: { description: CANVAS_TOOL_DESCRIPTION, schema: CANVAS_TOOL_SCHEMA },
+      bridgeUrl: this.#bridgeUrl,
+      ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
     });
+    // a harness with its own TUI owns the terminal pane; everything else gets a shell
+    this.#pty.attach(backend.terminal?.() ?? null);
     try {
       const state = await backend.state();
       this.#session = {
@@ -259,6 +294,21 @@ class Bridge {
       },
       onTurnEnd: () => this.#setActivity([]),
       onCanvasCall: (args) => this.#canvasCall(args),
+      // hook-driven adapters cannot answer this from `state()`: only the harness
+      // knows which session it is on, and it tells the bridge, not the adapter.
+      onSession: (info) => {
+        const sessionId = info.sessionId ?? this.#session.sessionId;
+        const model = info.model ?? this.#session.model;
+        if (
+          sessionId === this.#session.sessionId &&
+          model?.provider === this.#session.model?.provider &&
+          model?.id === this.#session.model?.id
+        ) {
+          return;
+        }
+        this.#session = { ...this.#session, sessionId, model };
+        void this.#hello().then((hello) => this.#broadcast(hello));
+      },
       onExit: (reason) => {
         console.error(`[bridge] ${reason}`);
         this.#broadcast({ type: "error", message: reason });
@@ -292,10 +342,16 @@ class Bridge {
    * and a retarget must never land mid-delivery. The live child is resolved when
    * the queued work runs, not when it is queued.
    */
-  #onClientMsg(msg: ClientMsg): void {
+  #onClientMsg(msg: ClientMsg, reply: (msg: ServerMsg) => void): void {
     if (isPtyMsg(msg)) {
       // the terminal is its own channel: never queued behind agent delivery
       this.#pty.handle(msg);
+      return;
+    }
+    if (isLinkMsg(msg)) {
+      // MCP callers and harness hooks: a canvas result belongs to the socket
+      // that asked, so this branch answers instead of broadcasting
+      this.#external.handle(msg, reply);
       return;
     }
     if (msg.type === "abort") {
@@ -317,6 +373,20 @@ class Bridge {
     if (msg.type === "diff") {
       // read-only: must not queue behind an in-flight delivery
       void this.#diff(msg.revA, msg.revB);
+      return;
+    }
+    if (msg.type === "discover") {
+      // read-only scan: must not queue behind an in-flight delivery
+      void this.#discoverSessions().then((sessions) => this.#broadcast({ type: "sessions", sessions }));
+      return;
+    }
+    if (msg.type === "adopt") {
+      if (this.#switching) {
+        this.#error("adopt rejected: a project switch is already in progress");
+        return;
+      }
+      this.#switching = true;
+      this.#delivering = this.#delivering.then(() => this.#adopt(msg.pid));
       return;
     }
     if (msg.type === "onboard") {
@@ -348,8 +418,15 @@ class Bridge {
    * Retarget the bridge at another project: stop the current turn and harness,
    * flush the graph, re-open the new project, re-read config, start a fresh
    * backend, re-hello. The terminal follows the new target.
+   *
+   * `opts.backend` is an adopt naming the harness it found (it beats config for
+   * this target); `opts.resumeSessionId` continues that harness's session
+   * instead of opening a fresh one.
    */
-  async #switchProject(rawPath: string): Promise<void> {
+  async #switchProject(
+    rawPath: string,
+    opts?: { backend?: string; resumeSessionId?: string },
+  ): Promise<void> {
     try {
       const expanded = rawPath.startsWith("~")
         ? join(homedir(), rawPath.slice(1))
@@ -359,13 +436,17 @@ class Bridge {
         this.#error(`switch_project rejected: "${rawPath}" is not an existing directory`);
         return;
       }
-      if (target === this.#cwd) {
+      // an adopt of a session in the current target still has work to do: the
+      // backend itself changes, so only a plain switch can short-circuit
+      if (target === this.#cwd && opts?.backend === undefined) {
         this.#broadcast(await this.#hello());
         return;
       }
 
       const old = this.#backend;
       this.#backend = null;
+      // the old harness's TUI dies with it; the pane goes back to a shell
+      this.#pty.attach(null);
       if (old !== null) await old.dispose();
       await this.#store.persist();
 
@@ -378,14 +459,47 @@ class Bridge {
       this.#realityHead = null;
 
       // config is per-project: the new target may name a different backend
-      await this.#createBackend();
+      await this.#createBackend(opts?.backend);
       await this.#openProject();
-      await this.#startBackend();
+      await this.#startBackend(opts?.resumeSessionId);
       this.#broadcast(await this.#hello());
       console.error(`[bridge] switched target to ${target}`);
     } catch (err) {
       this.#error(`switch_project failed: ${String(err)}`);
       setTimeout(() => process.exit(1), 50);
+    } finally {
+      this.#switching = false;
+    }
+  }
+
+  /**
+   * Adopt a session someone else started. The pid is resolved in a FRESH scan
+   * (the client's list is as old as its last hello), the harness id IS the
+   * backend id, and a session with an id is resumed rather than restarted.
+   */
+  async #adopt(pid: number): Promise<void> {
+    try {
+      const session = (await this.#discoverSessions()).find((candidate) => candidate.pid === pid);
+      if (session === undefined) {
+        this.#error(`adopt rejected: no running agent session with pid ${pid}`);
+        return;
+      }
+      if (session.cwd === null) {
+        this.#error(`adopt rejected: the working directory of pid ${pid} could not be read`);
+        return;
+      }
+      if (!KNOWN_BACKENDS.includes(session.harness)) {
+        this.#error(`no Shape adapter for ${session.harness} yet`);
+        return;
+      }
+      console.error(
+        `[bridge] adopting ${session.harness} pid ${pid} in ${session.cwd}` +
+          (session.sessionId === null ? " (no session id: fresh start)" : ` (resume ${session.sessionId})`),
+      );
+      await this.#switchProject(session.cwd, {
+        backend: session.harness,
+        ...(session.sessionId === null ? {} : { resumeSessionId: session.sessionId }),
+      });
     } finally {
       this.#switching = false;
     }

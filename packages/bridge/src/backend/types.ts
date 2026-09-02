@@ -28,6 +28,12 @@ export interface BackendEvents {
   onTurnEnd(): void;
   /** bridge applies the ops and returns the result the agent should see */
   onCanvasCall(args: unknown): Promise<{ text: string; isError: boolean }>;
+  /**
+   * The harness told us which session/model it is on. Hook-driven adapters
+   * learn this out of band (the hook process, not the adapter, sees it), so it
+   * is an event rather than part of `state()`.
+   */
+  onSession?(info: { sessionId: string | null; model: { provider: string; id: string } | null }): void;
   /** the backend process is gone; the bridge cannot serve this project anymore */
   onExit(reason: string): void;
   onError(message: string): void;
@@ -40,6 +46,18 @@ export interface BackendState {
   model: { provider: string; id: string } | null;
 }
 
+/**
+ * A live terminal the bridge can show in the terminal pane instead of a shell:
+ * the harness's own TUI, owned by the adapter. `onData`/`onExit` return their
+ * unsubscribe so PtyManager can detach on a project switch.
+ */
+export interface TerminalSource {
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  onData(cb: (data: string) => void): () => void;
+  onExit(cb: (code: number | null) => void): () => void;
+}
+
 export interface Backend {
   readonly id: string;
   readonly label: string;
@@ -49,9 +67,18 @@ export interface Backend {
     cwd: string;
     events: BackendEvents;
     canvasTool: { description: string; schema: object };
+    /** resume this harness session instead of starting a fresh one (adopt) */
+    resumeSessionId?: string;
+    /** `ws://127.0.0.1:<port>/ws` of THIS bridge, for adapters that wire the link */
+    bridgeUrl: string;
   }): Promise<void>;
   state(): Promise<BackendState>;
   send(message: string, mode: "prompt" | "steer"): Promise<void>;
   abort(): Promise<void>;
   dispose(): Promise<void>;
+  /**
+   * The harness's own terminal surface. Non-null ⇒ the terminal pane shows the
+   * TUI instead of a project shell. Absent/null ⇒ shell mode.
+   */
+  terminal?(): TerminalSource | null;
 }

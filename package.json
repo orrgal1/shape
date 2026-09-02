@@ -8,6 +8,7 @@
   "scripts": {
     "bridge": "pnpm --filter @shape/bridge start",
     "web": "pnpm --filter @shape/web dev",
-    "smoke:shared": "pnpm --filter @shape/shared smoke"
+    "smoke:shared": "pnpm --filter @shape/shared smoke",
+    "link:mcp": "node packages/link/src/mcp.ts"
   }
 }
