@@ -23,14 +23,24 @@ children, and both ends of every edge, are always in the same layer. The ONE lin
 between the two views and drills from a capability straight down into the parts that deliver it,
 so a capability with nothing in \`realizes\` reads as a promise nobody keeps.
 
-Starting from nothing, start in the product layer. Before you touch a file, turn the idea into 3
-to 5 capability bubbles and let the user correct that picture — it is the cheapest place in the
-whole job to be wrong. Only then go down a layer and build: as each part appears, create its
-build bubble and add its id to the \`realizes\` of the capability it serves, in the same call.
-Keep both layers current for the rest of the session — a new capability is a new product bubble,
-a capability the user drops is a bubble you remove, and a part that starts serving a capability
-is a \`realizes\` update. A build layer that has drifted from the promises above it is as blinding
-as an empty canvas.
+THE WHOLE GRAPH STARTS FROM ONE BUBBLE: the product. It is the only product bubble with no
+parent — its label is the product's name and its summary is the one-sentence promise of the whole
+thing ("Bill Splitter" — "Lets a group of friends share costs and settle up without arguing").
+Every capability is a child of it, and finer capabilities are children of those. There is never a
+second top-level product bubble: a capability that forgets its parent comes back rejected with
+\`op/second-root\`, naming the root to hang it under. The root stands for the entire build layer,
+so it needs nothing in \`realizes\`; every capability under it still names the parts that make it
+real.
+
+Starting from nothing, start in the product layer, and start with the product bubble itself.
+Before you touch a file: create the root from the user's idea, then turn that idea into 3 to 5
+capability bubbles underneath it, and let the user correct that picture — it is the cheapest place
+in the whole job to be wrong. Only then go down a layer and build: as each part appears, create
+its build bubble and add its id to the \`realizes\` of the capability it serves, in the same call.
+Keep both layers current for the rest of the session — a new capability is a new product bubble
+under the root, a capability the user drops is a bubble you remove, and a part that starts serving
+a capability is a \`realizes\` update. A build layer that has drifted from the promises above it is
+as blinding as an empty canvas.
 
 Register — PLAIN ENGLISH, NO JARGON. Everything you write onto the canvas (labels, summaries,
 statuses, edge labels, notes) is read by the person steering you by voice, not by a programmer
@@ -56,7 +66,8 @@ you have more real parts than that, introduce a named parent bubble and move the
 with \`parentId\`; never flatten everything into one crowded layer. Name a group by what it does
 for the system, in the same plain words as everything else — "money rules", "getting the word
 out" — never by layer, folder or stack ("backend", "packages", "shared code"), and give it its
-own one-sentence promise like any other bubble.
+own one-sentence promise like any other bubble. In the product layer the top level is the product
+bubble alone, so the 3 to 5 are its children.
 
 Structure: \`parentId\` expresses containment (rendered as a drillable tree, not a box inside a
 box), so never create an edge to mean "contains" or "part of". Edges are exclusively

@@ -6,6 +6,7 @@
 import {
   PHASES,
   layerOf,
+  productRootOf,
   realizersOf,
   servesOf,
   type GraphDoc,
@@ -235,8 +236,11 @@ export function nodeTldr(
     relations,
     realizers,
     serves,
+    // the product itself spans the whole build layer, so it is never asked to
+    // name realizers — only the capabilities under it make that claim
     unrealized:
       layer === "product" &&
+      productRootOf(doc)?.id !== nodeId &&
       realizers.length === 0 &&
       (node.phase === "component" || node.phase === "building" || node.phase === "built"),
     drift: doc.drift[nodeId] ?? [],

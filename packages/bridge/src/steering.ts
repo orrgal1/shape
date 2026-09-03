@@ -3,18 +3,20 @@
  * plus an utterance become one addressed instruction for the running session.
  */
 
-import { layerOf, realizersOf, servesOf } from "../../shared/src/index.ts";
+import { layerOf, productRootOf, realizersOf, servesOf } from "../../shared/src/index.ts";
 import type { Referent } from "../../shared/src/index.ts";
 import type { GraphStore } from "./store.ts";
 
 const REMINDER = "Apply the change and keep the canvas current via the canvas tool.";
 
-function neighborsOfNode(store: GraphStore, id: string): string[] {
+function neighborsOfNode(store: GraphStore, id: string, isProductRoot: boolean): string[] {
   const out: string[] = [];
   const node = store.node(id);
   if (node?.parentId != null) out.push(`${node.parentId} [parent]`);
   for (const child of store.doc.nodes) {
-    if (child.parentId === id) out.push(`${child.id} [child]`);
+    if (child.parentId !== id) continue;
+    // the product root's children ARE the product's capabilities, so name them
+    out.push(isProductRoot ? `${nameOf(store, child.id)} [capability]` : `${child.id} [child]`);
   }
   for (const edge of store.doc.edges) {
     const other = edge.source === id ? edge.target : edge.target === id ? edge.source : null;
@@ -35,8 +37,11 @@ function nameOf(store: GraphStore, id: string): string {
  * The one cross-layer line: a capability names the parts that make it real, a
  * part names the capabilities it serves. Kept out of `Neighbors` on purpose —
  * neighbors are same-layer relations, this is the bridge between the layers.
+ * The product root gets none: it stands for the whole build layer, and its
+ * capabilities are already listed as its neighbors.
  */
-function layerLines(store: GraphStore, id: string): string[] {
+function layerLines(store: GraphStore, id: string, isProductRoot: boolean): string[] {
+  if (isProductRoot) return [];
   if (layerOf(store.node(id) ?? {}) === "product") {
     const realizers = realizersOf(store.doc, id);
     return [
@@ -59,11 +64,13 @@ export function composeUtterance(store: GraphStore, text: string, referent: Refe
   if (referent !== null && referent.kind === "node") {
     const node = store.node(referent.id);
     if (node !== undefined) {
-      const neighbors = neighborsOfNode(store, node.id);
+      const isProductRoot = productRootOf(store.doc)?.id === node.id;
+      const neighbors = neighborsOfNode(store, node.id, isProductRoot);
+      const kind = isProductRoot ? "the product" : layerOf(node) === "product" ? "product capability" : "component";
       return [
         "<canvas-steering>",
-        `Referent: ${layerOf(node) === "product" ? "product capability" : "component"} "${node.label}" (id: ${node.id}) — "${node.summary}" (phase: ${node.phase})`,
-        ...layerLines(store, node.id),
+        `Referent: ${kind} "${node.label}" (id: ${node.id}) — "${node.summary}" (phase: ${node.phase})`,
+        ...layerLines(store, node.id, isProductRoot),
         `Neighbors: ${neighbors.length > 0 ? neighbors.join(", ") : "none"}`,
         said,
         REMINDER,

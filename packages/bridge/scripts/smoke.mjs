@@ -181,16 +181,28 @@ let socket = null;
       },
     ],
   });
-  const product = (id, label, realizes) => ({
+  const product = (id, label, parentId, realizes) => ({
     op: "upsert_node",
-    node: { id, parentId: null, label, summary: `${label} — the promise a person gets.`, phase: "component", layer: "product", ...(realizes === undefined ? {} : { realizes }) },
+    node: { id, parentId, label, summary: `${label} — the promise a person gets.`, phase: "component", layer: "product", ...(realizes === undefined ? {} : { realizes }) },
   });
-  // `target` is a committed workspace, so the codeRefs half of the gate is live
+  // `target` is a committed workspace, so the codeRefs half of the gate is live.
+  // The survey's product pass opens with the root: the product itself, which owes
+  // neither codeRefs nor realizes.
+  const rootCall = store.applyCanvasCall(
+    { ops: [product("bill-splitter", "Bill Splitter", null)] },
+    onboardingOpGate(target, store.doc),
+  );
+  check(
+    "survey accepts the product root with no realizes and no codeRefs",
+    rootCall.text.startsWith("applied 1 op(s);") && store.node("bill-splitter")?.layer === "product" &&
+      store.node("bill-splitter")?.realizes === undefined && store.node("bill-splitter")?.codeRefs === undefined,
+    rootCall.text.split("\n")[0],
+  );
   const outcome = store.applyCanvasCall(
     {
       ops: [
-        product("see-who-owes", "See who owes what"),
-        product("split-a-bill", "Split a bill", ["money-rules"]),
+        product("see-who-owes", "See who owes what", "bill-splitter"),
+        product("split-a-bill", "Split a bill", "bill-splitter", ["money-rules"]),
         { op: "upsert_node", node: { id: "ghost-part", parentId: null, label: "Ghost", summary: "A part nobody wrote." , phase: "built" } },
       ],
     },
@@ -199,16 +211,17 @@ let socket = null;
   const productReceipts = JSON.parse(outcome.text.slice(outcome.text.indexOf("\n") + 1)).rejections;
   const unrealized = productReceipts.find((r) => r.code === "onboarding/unrealized-product");
   check(
-    "survey vetoes a product bubble that nothing on the build side realizes",
+    "survey vetoes a capability under the root that nothing on the build side realizes",
     unrealized?.index === 0 && unrealized.subject.path === "/ops/0/node/realizes" &&
       unrealized.subject.id === "see-who-owes" && unrealized.severity === "error" &&
       unrealized.supportedFixes.length >= 1 && store.node("see-who-owes") === undefined,
     JSON.stringify(unrealized),
   );
   check(
-    "survey accepts a product bubble with a real realizes and no codeRefs at all",
+    "survey accepts a capability with a real realizes and no codeRefs at all",
     outcome.text.startsWith("applied 1 op(s);") &&
       store.node("split-a-bill")?.codeRefs === undefined &&
+      store.node("split-a-bill")?.parentId === "bill-splitter" &&
       store.node("split-a-bill")?.realizes?.join(",") === "money-rules",
     outcome.text.split("\n")[0],
   );
@@ -217,26 +230,51 @@ let socket = null;
     productReceipts.some((r) => r.index === 2 && r.code === "onboarding/no-coderefs"),
     JSON.stringify(productReceipts.map((r) => `${r.index}:${r.code}`)),
   );
+  // a capability that forgets its parent: shared validation rejects it and the
+  // receipt names the root to hang it under
+  const second = store.applyCanvasCall(
+    { ops: [product("plan-a-trip", "Plan a trip", null, ["money-rules"])] },
+    onboardingOpGate(target, store.doc),
+  );
+  const secondRoot = JSON.parse(second.text.slice(second.text.indexOf("\n") + 1)).rejections
+    .find((r) => r.code === "op/second-root");
+  check(
+    "a second top-level product bubble is rejected, receipt naming the root",
+    secondRoot?.index === 0 && secondRoot.subject.path === "/ops/0/node/parentId" &&
+      secondRoot.evidence.rootId === "bill-splitter" &&
+      secondRoot.supportedFixes.some((f) => f.includes("bill-splitter")) &&
+      store.node("plan-a-trip") === undefined,
+    JSON.stringify(secondRoot),
+  );
   // a status refresh omits layer and realizes; the bubble must stay a grounded
   // capability rather than becoming a build bubble that owes codeRefs
   const refresh = store.applyCanvasCall(
     {
-      ops: [{ op: "upsert_node", node: { id: "split-a-bill", parentId: null, label: "Split a bill", summary: "Split a bill — the promise a person gets.", phase: "component", status: "reading the routes" } }],
+      ops: [{ op: "upsert_node", node: { id: "split-a-bill", parentId: "bill-splitter", label: "Split a bill", summary: "Split a bill — the promise a person gets.", phase: "component", status: "reading the routes" } }],
     },
     onboardingOpGate(target, store.doc),
   );
   check(
-    "re-upserting a product bubble without layer keeps it a capability, not a codeRefs debt",
+    "re-upserting a capability without layer keeps it a capability, not a codeRefs debt",
     refresh.text.startsWith("applied 1 op(s);") && store.node("split-a-bill")?.layer === "product" &&
       store.node("split-a-bill")?.status === "reading the routes",
     refresh.text.split("\n")[0],
   );
 
+  const root = composeUtterance(store, "call it something friendlier", { kind: "node", id: "bill-splitter" });
+  check(
+    "root referent composes as the product and lists its capabilities as neighbors",
+    root.includes('Referent: the product "Bill Splitter" (id: bill-splitter)') &&
+      root.includes('Neighbors: split-a-bill "Split a bill" [capability]') &&
+      !root.includes("Realized by:"),
+    root.split("\n").slice(1, 3).join(" | "),
+  );
   const capability = composeUtterance(store, "make this the first thing people see", { kind: "node", id: "split-a-bill" });
   check(
-    "product referent composes Realized by with the build bubble's label",
+    "capability referent composes Realized by with the build bubble's label",
     capability.includes('Referent: product capability "Split a bill" (id: split-a-bill)') &&
       capability.includes('Realized by: money-rules "Money rules"') &&
+      capability.includes("bill-splitter [parent]") &&
       capability.includes("make this the first thing people see"),
     capability.split("\n").slice(1, 3).join(" | "),
   );
@@ -248,10 +286,10 @@ let socket = null;
     part.split("\n").slice(1, 3).join(" | "),
   );
   // legal AFTER onboarding: this is how the user says "I want this next"
-  store.applyCanvasCall({ ops: [product("see-who-owes", "See who owes what")] });
+  store.applyCanvasCall({ ops: [product("see-who-owes", "See who owes what", "bill-splitter")] });
   const promise = composeUtterance(store, "build this next", { kind: "node", id: "see-who-owes" });
   check(
-    "product referent nothing realizes composes the unrealized line",
+    "capability nothing realizes composes the unrealized line",
     promise.includes("Realized by: nothing yet — no part on the build side makes this capability real") &&
       /Realized by: .*\nNeighbors: /.test(promise),
     promise.split("\n")[2],
@@ -465,19 +503,23 @@ try {
       survey.message.includes("introduce named parent bubbles"),
   );
   check(
-    "survey prompt states the product pass: 3-5 capabilities, layer product, realizes required",
-    survey.message.includes("9. Then the product pass.") &&
-      survey.message.includes("add 3-5 product bubbles") &&
-      survey.message.includes('with `layer: "product"`') &&
-      survey.message.includes("Every product bubble MUST set `realizes` to the ids of those build bubbles") &&
-      survey.message.includes("a product bubble without one") &&
-      survey.message.includes("Product bubbles need no codeRefs"),
+    "survey prompt states the product pass: root first, then 3-5 capabilities under it",
+    survey.message.includes("9. Then the product pass, and it starts from ONE bubble: the product itself.") &&
+      survey.message.includes('`layer: "product"` with `parentId: null`') &&
+      /is the only top-level product bubble: a second one is rejected with `op\/second-root`/.test(survey.message) &&
+      /the root stands for the entire build layer it needs no `realizes`/.test(survey.message) &&
+      /Then hang 3-5\s+capability bubbles under it/.test(survey.message) &&
+      /Every capability under the root MUST\s+set `realizes` to the ids of those build bubbles/.test(survey.message) &&
+      /a capability without one is rejected/.test(survey.message) &&
+      survey.message.includes("Product bubbles need no"),
   );
   check(
-    "preamble opens greenfield work in the product layer and names the one cross-layer link",
+    "preamble opens greenfield work at the product root and names the one cross-layer link",
     survey.message.includes("Two layers — PRODUCT and BUILD.") &&
-      survey.message.includes("Starting from nothing, start in the product layer.") &&
-      /turn the idea into 3\s+to 5 capability bubbles/.test(survey.message) &&
+      survey.message.includes("THE WHOLE GRAPH STARTS FROM ONE BUBBLE: the product.") &&
+      /second top-level product bubble: a capability that forgets its parent comes back rejected with\s+`op\/second-root`/.test(survey.message) &&
+      survey.message.includes("Starting from nothing, start in the product layer, and start with the product bubble itself.") &&
+      /create the root from the user's idea, then turn that idea into 3 to 5\s+capability bubbles underneath it/.test(survey.message) &&
       /The ONE link across them is\s+`realizes` on a capability/.test(survey.message) &&
       survey.message.includes('Set `layer: "product"` on a capability bubble'),
   );

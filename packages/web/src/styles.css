@@ -3209,6 +3209,31 @@ kbd {
   background: color-mix(in oklab, var(--capability) 6%, var(--surface-2));
 }
 
+/* The product itself: the card is a title, not a step in a trail. It is wider
+   and quieter than a drilled-into bubble — the product's name at heading size,
+   its whole promise underneath — because everything else on the canvas is read
+   as part of what it claims. No ‹ button, so the body owns the left edge. */
+.focus-card[data-root="true"] {
+  max-width: 620px;
+  padding: var(--s3) var(--s4);
+  border-color: color-mix(in oklab, var(--capability) 34%, var(--line-strong));
+  background: color-mix(in oklab, var(--capability) 8%, var(--surface-2));
+}
+
+.focus-card[data-root="true"] .focus-label {
+  font-size: var(--t-xl);
+  letter-spacing: -0.02em;
+}
+
+.focus-card[data-root="true"] .focus-promise {
+  font-size: var(--t-md);
+  color: var(--text);
+}
+
+.focus-card[data-root="true"] .focus-count {
+  color: color-mix(in oklab, var(--capability) 55%, var(--text-dim));
+}
+
 /* --- side panel: the cross-layer chips and the unrealized note --- */
 
 .node-chip-cross {

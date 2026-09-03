@@ -197,8 +197,16 @@
       ]
     },
     {
-      "id": "cap-split-bill",
+      "id": "ledgerly",
       "parentId": null,
+      "label": "Ledgerly",
+      "summary": "Split costs with the people you share them with, and always know who owes whom.",
+      "phase": "building",
+      "layer": "product"
+    },
+    {
+      "id": "cap-split-bill",
+      "parentId": "ledgerly",
       "label": "Split a bill",
       "summary": "Say who paid and for whom, and have everyone's share worked out the same way every time.",
       "phase": "built",
@@ -211,7 +219,7 @@
     },
     {
       "id": "cap-who-owes",
-      "parentId": null,
+      "parentId": "ledgerly",
       "label": "See who owes whom",
       "summary": "One honest list of what each person is up or down after everything logged so far.",
       "phase": "built",
@@ -223,7 +231,7 @@
     },
     {
       "id": "cap-settle-up",
-      "parentId": null,
+      "parentId": "ledgerly",
       "label": "Settle up",
       "summary": "Get the shortest set of payments that clears the group, and record them once they happen.",
       "phase": "built",
@@ -236,7 +244,7 @@
     },
     {
       "id": "cap-get-nudged",
-      "parentId": null,
+      "parentId": "ledgerly",
       "label": "Get a nudge to pay",
       "summary": "A reminder that arrives only while you still owe something, and stops once you have paid.",
       "phase": "building",
@@ -250,7 +258,7 @@
     },
     {
       "id": "cap-run-group",
-      "parentId": null,
+      "parentId": "ledgerly",
       "label": "Run a group",
       "summary": "Start a shared pot for a trip or a flat, add the people in it, and keep it going.",
       "phase": "built",

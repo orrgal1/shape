@@ -17,6 +17,7 @@
  */
 import {
   layerOf,
+  productRootOf,
   realizersOf,
   servesOf,
   type EdgeKind,
@@ -115,6 +116,19 @@ export function focusParentOf(doc: GraphDoc, focus: string): string | null {
   const more = parseMoreId(focus);
   if (more !== null) return more.depth <= 1 ? more.base : moreIdOf(more.base, more.depth - 1);
   return doc.nodes.find((node) => node.id === focus)?.parentId ?? null;
+}
+
+/**
+ * Whether the focus is the product itself — the one bubble the whole graph
+ * starts from. Nothing sits above it: the product view has no altitude wider
+ * than the product, so both ways up (the focus card's ‹ and Backspace) are
+ * absent there rather than offered and then doing nothing. False in the build
+ * view and on a legacy graph with several top-level capabilities, which has no
+ * root and reads flat.
+ */
+export function isProductRoot(doc: GraphDoc, view: GraphLayer, focus: string | null): boolean {
+  if (view !== "product" || focus === null) return false;
+  return productRootOf(doc)?.id === focus;
 }
 
 /**
@@ -625,6 +639,11 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
     return span;
   };
 
+  // The product itself spans the whole build layer, so it is never asked to
+  // name realizers and never reads as unrealized; only the capabilities under
+  // it make that claim.
+  const rootId = productRootOf(whole)?.id ?? null;
+
   const nodes: LayerNode[] = shown.map((node) => {
     const isProduct = layerOf(node) === "product";
     const realizers = isProduct ? realizersOf(whole, node.id) : [];
@@ -658,7 +677,8 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
       failedInside: failedIn,
       realizerCount: realizers.length,
       serveCount: isProduct ? 0 : servesOf(whole, node.id).length,
-      unrealized: isProduct && realizers.length === 0 && UNREALIZED_PHASES.includes(node.phase),
+      unrealized:
+        isProduct && node.id !== rootId && realizers.length === 0 && UNREALIZED_PHASES.includes(node.phase),
     };
   });
   if (moreBubble !== null) {

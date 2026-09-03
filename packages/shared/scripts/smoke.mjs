@@ -8,7 +8,7 @@
  */
 
 import { canonicalJson, snapshotGraph } from "../src/delta.ts";
-import { applyOps, emptyGraph, layerOf, realizersOf, servesOf } from "../src/index.ts";
+import { applyOps, emptyGraph, layerOf, productRootOf, realizersOf, servesOf } from "../src/index.ts";
 
 const results = [];
 let failed = 0;
@@ -103,7 +103,10 @@ function checkReceipt(name, res, code) {
 
 // --- layers: product bubbles, realizes, and the two-layer walls -------------
 
-/** build parent `groups` with child `group-store`, plus a product bubble over the parent */
+/**
+ * build parent `groups` with child `group-store`, plus the product root over
+ * the parent — `share-costs` is the single top-level product bubble.
+ */
 function layeredDoc() {
   const doc = emptyGraph();
   const res = applyOps(doc, [
@@ -135,14 +138,16 @@ function layeredDoc() {
 
 {
   const { doc } = layeredDoc();
-  const res = applyOps(doc, [{ op: "upsert_node", node: node("split-fairly", { layer: "product", realizes: ["ghost"] }) }]);
+  const res = applyOps(doc, [
+    { op: "upsert_node", node: node("split-fairly", { parentId: "share-costs", layer: "product", realizes: ["ghost"] }) },
+  ]);
   checkReceipt("realizes missing id", res, "op/bad-realizes");
 }
 
 {
   const { doc } = layeredDoc();
   const res = applyOps(doc, [
-    { op: "upsert_node", node: node("split-fairly", { layer: "product", realizes: ["share-costs"] }) },
+    { op: "upsert_node", node: node("split-fairly", { parentId: "share-costs", layer: "product", realizes: ["share-costs"] }) },
   ]);
   checkReceipt("realizes a product id", res, "op/bad-realizes");
 }
@@ -151,6 +156,54 @@ function layeredDoc() {
   const { doc } = layeredDoc();
   const res = applyOps(doc, [{ op: "upsert_node", node: node("settle-up", { realizes: ["groups"] }) }]);
   checkReceipt("realizes on a build node", res, "op/bad-realizes");
+}
+
+// --- the product root: exactly one top-level product bubble ----------------
+
+{
+  const { doc } = layeredDoc();
+  check("root: productRootOf finds the single top-level product bubble", productRootOf(doc)?.id === "share-costs", JSON.stringify(productRootOf(doc)));
+  check("root: productRootOf is null with no product bubbles at all", productRootOf({ nodes: doc.nodes.filter((n) => layerOf(n) === "build") }) === null);
+
+  const res = applyOps(doc, [{ op: "upsert_node", node: node("settle-up", { layer: "product", realizes: ["groups"] }) }]);
+  checkReceipt("second top-level product bubble", res, "op/second-root");
+  const receipt = res.rejections[0];
+  check(
+    "root: receipt names the existing root",
+    receipt?.evidence?.rootId === "share-costs" && receipt.evidence.rootLabel === "share-costs" &&
+      receipt.subject.path === "/ops/0/node/parentId" &&
+      receipt.supportedFixes.some((f) => f.includes('"share-costs"')),
+    JSON.stringify(receipt),
+  );
+  check("root: the rejected bubble never entered the doc", !doc.nodes.some((n) => n.id === "settle-up"));
+
+  // the supported fix applies mechanically: same node, parented under the root
+  const parented = applyOps(doc, [
+    { op: "upsert_node", node: node("settle-up", { parentId: "share-costs", layer: "product", realizes: ["groups"] }) },
+  ]);
+  check("root: the same bubble is accepted under the root", parented.applied === 1 && parented.rejections.length === 0, JSON.stringify(parented));
+  check("root: still exactly one root after the capability lands", productRootOf(doc)?.id === "share-costs");
+
+  // moving the root itself back to top level is not a "second" root
+  const same = applyOps(doc, [{ op: "upsert_node", node: node("share-costs", { layer: "product", realizes: ["groups"] }) }]);
+  check("root: re-upserting the root at top level is fine", same.applied === 1 && same.rejections.length === 0, JSON.stringify(same));
+
+  // a root with no realizes at all: it spans the whole build layer
+  const bare = emptyGraph();
+  const bareRes = applyOps(bare, [{ op: "upsert_node", node: node("bill-splitter", { layer: "product" }) }]);
+  check("root: a product root without realizes is accepted", bareRes.applied === 1 && bareRes.rejections.length === 0, JSON.stringify(bareRes));
+  check("root: productRootOf finds it", productRootOf(bare)?.id === "bill-splitter");
+}
+
+{
+  // legacy graph: two top-level product bubbles already persisted -> no root
+  const legacy = emptyGraph();
+  legacy.nodes.push(
+    { ...node("share-costs"), layer: "product" },
+    { ...node("see-who-owes"), layer: "product" },
+  );
+  check("root: productRootOf is null for a legacy graph with two top-level product bubbles", productRootOf(legacy) === null);
+  check("root: productRootOf is null for an empty graph", productRootOf(emptyGraph()) === null);
 }
 
 {

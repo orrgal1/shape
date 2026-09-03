@@ -114,6 +114,23 @@ export function layerOf(node: Pick<IntentNode, "layer">): Layer {
   return node.layer === "product" ? "product" : "build";
 }
 
+/**
+ * The product root: the single top-level product bubble the whole graph starts
+ * from — its label is the product's name, its summary the promise of the whole
+ * thing. Returns null when there is none, and also when a legacy graph has
+ * several top-level product bubbles (no root to speak of; the client renders
+ * them flat). `op/second-root` keeps new graphs at exactly one.
+ */
+export function productRootOf(doc: Pick<GraphDoc, "nodes">): IntentNode | null {
+  let root: IntentNode | null = null;
+  for (const node of doc.nodes) {
+    if (node.parentId !== null || layerOf(node) !== "product") continue;
+    if (root !== null) return null;
+    root = node;
+  }
+  return root;
+}
+
 /** ids of the build nodes a product node claims to be realized by, deduped and existing-only */
 export function realizersOf(doc: Pick<GraphDoc, "nodes">, productId: string): string[] {
   const node = doc.nodes.find((n) => n.id === productId);
@@ -219,7 +236,8 @@ ops (batch, applied per-op): upsert_node, remove_node (rejected while it has chi
 ids are slugs: ^[a-z0-9][a-z0-9-]*$. Node summary is REQUIRED: one sentence stating what the bubble promises, <= 200 chars; a bubble that cannot be summarized in one sentence is at the wrong altitude.
 Hierarchy is parentId (null = root); edges are ONLY non-hierarchical relations (depends | dataflow | relates) — never an edge to mean "contains". A parent and both ends of an edge must be on the same layer.
 Phases: idea -> concept -> component -> building -> built | failed. Set codeRefs (workspace-relative path prefixes) once a bubble owns files.
-TWO LAYERS, set with layer on each node. layer "product" = what the person gets: the capabilities and surfaces they can name and use, no file names. layer "build" (the default when layer is omitted) = the parts that exist as code: services, stores, screens, jobs. realizes (product nodes only, up to 20 existing build node ids) is the ONLY link between the layers — it says which build bubbles make that capability real; keep it current as build bubbles appear, and give every product bubble at least one.
+TWO LAYERS, set with layer on each node. layer "product" = what the person gets: the capabilities and surfaces they can name and use, no file names. layer "build" (the default when layer is omitted) = the parts that exist as code: services, stores, screens, jobs. realizes (product nodes only, up to 20 existing build node ids) is the ONLY link between the layers — it says which build bubbles make that capability real; keep it current as build bubbles appear, and give every capability at least one.
+THE PRODUCT LAYER STARTS FROM ONE BUBBLE: the product itself, the only product node with parentId null — its label is the product's name and its summary the one-sentence promise of the whole thing. Create it before anything else, then hang the 3-5 capabilities under it as its children, and deeper capabilities under those. A second top-level product bubble is rejected with op/second-root, whose evidence names the root to parent it under. The root spans the whole build layer, so realizes on it is optional; every capability below it still needs one.
 summary = the bubble's stable promise. status (optional, <= 140 chars) = what is happening in it RIGHT NOW; refresh it on bubbles you are building and omit it when done — an upsert without status clears it.
 PLAIN ENGLISH, NO JARGON: every label, summary, status, edge label and note is read by a non-programmer steering by voice — everyday words, outcomes not mechanisms, no acronyms or protocol/library/file-format names or code identifiers unless the bubble is literally about that thing. Only codeRefs stay technical.
 Call this as you think and work, in the same turn your understanding changes. The result tells you what applied; rejections come back as JSON repair receipts ({code, subject, evidence, supportedFixes}) — apply a supported fix and resend just the rejected ops.`;
@@ -484,6 +502,24 @@ export function applyOps(doc: GraphDoc, ops: CanvasOp[]): ApplyResult {
               label: n.label,
               evidence: { realizedBy: sample(servedProducts) },
               fixes: ["drop this id from the listed product nodes' realizes first (earlier in the same batch works)"],
+            });
+        }
+        // the product layer starts from ONE bubble: the product itself. A second
+        // top-level product bubble is a capability that forgot its parent.
+        if (layer === "product" && n.parentId === null) {
+          const root = doc.nodes.find(
+            (other) => other.id !== n.id && other.parentId === null && layerOf(other) === "product",
+          );
+          if (root)
+            return reject("op/second-root", `the product layer already starts from "${root.id}"`, {
+              at: "/node/parentId",
+              id: n.id,
+              label: n.label,
+              evidence: { rootId: root.id, rootLabel: root.label },
+              fixes: [
+                `set parentId to "${root.id}" — the product bubble everything else hangs under`,
+                `make this a child of one of "${root.id}"'s capabilities instead`,
+              ],
             });
         }
         const clean: IntentNode = {

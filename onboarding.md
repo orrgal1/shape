@@ -58,21 +58,32 @@ Stages 1 and 2 survey the BUILD layer: the parts the project is made of. A canva
 there tells the user how the code is arranged and never says what the thing *does*, so the
 survey turn ends one layer up.
 
-After grouping the build layer, the agent adds 3–5 product bubbles (`layer: "product"`), each a
-capability said as a promise to a person ("split a bill with friends"), derived from the surfaces
-a user actually touches — screens and routes, commands, published entry points — and each
-cross-checked against code. Every product bubble MUST carry `realizes`: the ids of the build
-bubbles that deliver it. That is the only link between the layers (no cross-layer `parentId`, no
-cross-layer edges), and it is what makes the drill-down from a capability to its parts possible.
+The product pass starts from ONE bubble: the product itself. The agent creates it first —
+`layer: "product"`, `parentId: null`, label = the product's name in plain English (derived from
+the package name, the README title or the repository folder, said the way a person would say it),
+summary = the one-sentence promise of the whole thing. There is exactly one such bubble;
+`applyOps` rejects a second top-level product node with `op/second-root` (CONTRACTS.md §Graph
+document).
+
+Then the capabilities, as children of that root: 3–5 bubbles (`layer: "product"`, `parentId` =
+the root), each a capability said as a promise to a person ("split a bill with friends"), derived
+from the surfaces a user actually touches — screens and routes, commands, published entry points
+— and each cross-checked against code. Every capability MUST carry `realizes`: the ids of the
+build bubbles that deliver it. That is the only link between the layers (no cross-layer
+`parentId`, no cross-layer edges), and it is what makes the drill-down from a capability to its
+parts possible.
 
 **Anti-README rule, restated for the product layer.** A README names capabilities the code never
 grew; the survey is not allowed to repeat them. So product bubbles are exempt from
 codeRefs-must-exist (a capability owns no code of its own) but are gated instead: an
-`upsert_node` with `layer: "product"` is vetoed with code `onboarding/unrealized-product` unless
-at least one id in `realizes` resolves to a build node that already exists on the canvas (a build
-bubble upserted earlier in the same call counts). Same receipt shape as every other gate veto —
-`code` / `subject` / `evidence` / `supportedFixes`, the fixes being "point `realizes` at the build
-bubbles that make this real" or "drop the bubble".
+`upsert_node` with `layer: "product"` **and a non-null `parentId`** is vetoed with code
+`onboarding/unrealized-product` unless at least one id in `realizes` resolves to a build node
+that already exists on the canvas (a build bubble upserted earlier in the same call counts). Same
+receipt shape as every other gate veto — `code` / `subject` / `evidence` / `supportedFixes`, the
+fixes being "point `realizes` at the build bubbles that make this real" or "drop the bubble".
+The product root is the one product bubble the gate lets through with an empty `realizes`: it
+stands for the whole build layer the survey has just grounded, and uniqueness is already enforced
+by `op/second-root`.
 
 Unrealized capabilities are still a legitimate canvas state *after* onboarding — that is how the
 user says "I want this next", and the client glows those bubbles. The gate only bars them from
@@ -102,6 +113,18 @@ Deltas from the product layer (v1.2, 2026-09-03):
 - bridge: survey prompt rule 9 (product pass) + gate code `onboarding/unrealized-product`
 - bridge: the preamble opens greenfield work in the product layer (idea → 3–5 capabilities)
 - bridge: steering composer adds `Realized by:` for a capability referent, `Serves:` for a part
+
+Deltas from the product root (v1.3, 2026-09-03):
+
+- shared: `productRootOf(doc)` (the single top-level product node, else `null`) + validation
+  code `op/second-root`
+- bridge: survey prompt rule 9 creates the root first, capabilities as its children; the gate
+  applies `onboarding/unrealized-product` only to product nodes with a non-null `parentId`
+- bridge: the preamble opens greenfield work by creating the product bubble, then its 3–5
+  capabilities underneath it
+- bridge: steering composer renders the root as `Referent: the product "<label>"`, listing its
+  capabilities as neighbors instead of a `Realized by:` line
+- web: the product view opens focused on the root (first breadcrumb crumb = the product name)
 
 ## Degradation and non-goals
 

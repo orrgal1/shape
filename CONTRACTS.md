@@ -124,6 +124,19 @@ realized by its children. An upsert that omits `layer` leaves an existing bubble
 layer it already had (only a brand-new bubble defaults to build), so a status refresh
 cannot teleport a bubble across layers.
 
+**The product root (user decision 2026-09-03).** The product layer has exactly ONE
+top-level bubble: the product itself. Its label is the product's name, its summary the
+one-sentence promise of the whole thing, and every capability is a child of it (deeper
+capabilities below those). `productRootOf(doc)` in shared/ returns it, and `null` both when
+no product node exists and when several top-level product nodes do — a legacy graph written
+before this decision, which still renders (flat, focus `null`) instead of crashing.
+`applyOps` keeps new graphs at one: an `upsert_node` that creates or moves a product node to
+`parentId: null` while a different top-level product node exists is rejected with
+`op/second-root`, whose evidence names the root (`rootId`/`rootLabel`) and whose supported
+fix is to set `parentId` to it. The root stands for the whole build layer, so `realizes` on
+it is optional (allowed, never required); every capability under it still needs one. The
+build layer is unchanged — it keeps its 3–5 top-level groups.
+
 Node phase lifecycle: `idea → concept → component → building → built | failed`.
 Boundary test (enforced by bridge validation): every node MUST have a non-empty
 one-sentence `summary` — its promise. Reject ops that omit it.
@@ -162,6 +175,11 @@ Layer walls, with structured receipts in the same shape as the rest:
 - `op/node-realized` — a build node still named in some product node's `realizes` can
   neither be removed nor flipped onto the product layer (fix: update that `realizes`
   first). Product nodes may be removed freely.
+- `op/second-root` — the product layer has one top-level bubble; a product node upserted at
+  `parentId: null` while another top-level product node exists is rejected, the receipt
+  naming that root so the fix (`parentId` = root id) is mechanical. Checked after
+  `op/node-realized`, so a still-realized build node flipped to product hears about the
+  dangling link first.
 
 `codeRefs` are allowed on product nodes and validated no differently (the onboarding gate,
 not `applyOps`, is where product nodes stop being expected to own files).
@@ -297,6 +315,14 @@ jump the other way. Product bubbles roll up their realizers' activity/drift/fail
 product node past `concept` with no realizers renders as **unrealized** — nothing on the
 build side makes it real yet. Client-only derivation; no wire changes.
 
+**Product view opens on the root (user decision 2026-09-03):** the product view's default
+focus is the product root (`productRootOf(doc)`), not `null` — the root is the focus card at
+the top of the stage, styled as the product itself, and the layer under it is its
+capabilities. The first breadcrumb crumb in product view is therefore the product's name, and
+there is nothing above it: Backspace at the root does nothing. A legacy graph with several
+top-level product bubbles has no root, so the view falls back to focus `null` and renders
+them flat — never a crash.
+
 ## Steering composition (bridge)
 
 With referent, bridge resolves node/edge + immediate neighbors and sends:
@@ -309,6 +335,12 @@ User said: "this should also handle token refresh"
 Apply the change and keep the canvas current via the canvas tool.
 </canvas-steering>
 ```
+
+The referent line names what was clicked: `component` for a build node, `product
+capability` for a product node, and `the product "<label>"` for the product root. A
+capability also gets a `Realized by:` line (or the explicit "nothing yet" sentence) and a
+build node a `Serves:` line; the root gets neither — it stands for the whole build layer,
+and its capabilities are listed among its `Neighbors` as `<id> "<label>" [capability]`.
 
 Without referent: raw text, plus the trailing canvas reminder. Delivery: `steer` if
 streaming else `prompt`.

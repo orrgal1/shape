@@ -163,6 +163,9 @@ export async function synthesizeSkeleton(cwd: string, reality: RealityLayer): Pr
  * capability real is the build bubbles it `realizes`. One that names none is
  * vetoed the same way (`onboarding/unrealized-product`) — during a survey a
  * capability nobody built is exactly the narration this mode exists to stop.
+ * The product ROOT is the exception: it is the product itself, it spans the
+ * whole build layer, and shared validation already keeps it unique
+ * (`op/second-root`), so it passes with an empty `realizes`.
  *
  * The index is read at most once per gate (i.e. once per survey turn), and the
  * gate is created per canvas call, so build bubbles admitted earlier in the SAME
@@ -201,23 +204,28 @@ export function onboardingOpGate(cwd: string, doc: Pick<GraphDoc, "nodes">): OpG
     const layer = node.layer === "product" || node.layer === "build" ? node.layer : prior ? layerOf(prior) : "build";
 
     if (layer === "product") {
-      const claimed = Array.isArray(node.realizes) ? node.realizes : (prior?.realizes ?? []);
-      const realizes = claimed.filter((r) => typeof r === "string" && r.trim().length > 0);
-      const grounded = realizes.filter((id) => isBuildNode(id));
-      if (grounded.length === 0) {
-        return {
-          code: "onboarding/unrealized-product",
-          severity: "error",
-          message: `onboarding survey: product bubble "${String(node.id)}" must name at least one build bubble in \`realizes\` that already exists on the canvas — during a survey a capability nothing on the build side delivers is a claim you cannot point at`,
-          subject: { ...subject, path: "/node/realizes" },
-          evidence: { realizes, ...(realizes.length > 0 ? { unknown: realizes.filter((id) => !isBuildNode(id)) } : {}) },
-          supportedFixes: [
-            "set realizes to the ids of the build bubbles that make this capability real",
-            "drop the product bubble if nothing in this project delivers it yet",
-          ],
-        };
+      // the product root (no parent) IS the product: it stands for the whole
+      // build layer, so it owes no `realizes`; a capability under it still does
+      if (node.parentId !== null) {
+        const claimed = Array.isArray(node.realizes) ? node.realizes : (prior?.realizes ?? []);
+        const realizes = claimed.filter((r) => typeof r === "string" && r.trim().length > 0);
+        const grounded = realizes.filter((id) => isBuildNode(id));
+        if (grounded.length === 0) {
+          return {
+            code: "onboarding/unrealized-product",
+            severity: "error",
+            message: `onboarding survey: product bubble "${String(node.id)}" must name at least one build bubble in \`realizes\` that already exists on the canvas — during a survey a capability nothing on the build side delivers is a claim you cannot point at`,
+            subject: { ...subject, path: "/node/realizes" },
+            evidence: { realizes, ...(realizes.length > 0 ? { unknown: realizes.filter((id) => !isBuildNode(id)) } : {}) },
+            supportedFixes: [
+              "set realizes to the ids of the build bubbles that make this capability real",
+              "drop the product bubble if nothing in this project delivers it yet",
+            ],
+          };
+        }
       }
-      // product bubbles are exempt from codeRefs-must-exist: `realizes` grounds them
+      // product bubbles are exempt from codeRefs-must-exist: `realizes` grounds
+      // a capability, and the root is grounded by the whole build layer under it
       return null;
     }
 
@@ -270,7 +278,8 @@ export function composeSurveyPrompt(doc: GraphDoc, focus: string | undefined): s
     "it is your invention, and none of the placeholder summaries are trustworthy yet. This turn you",
     "make every bubble's promise true by reading code — and give the flat pile a readable shape.",
     "Everything the mechanics seeded is the BUILD layer: the parts this project is made of. Rule 9",
-    "adds the second layer, PRODUCT: what the project does for the people who use it.",
+    "adds the second layer, PRODUCT: what the project does for the people who use it, starting from",
+    "one bubble for the product itself.",
     "",
     "Rules for this survey turn:",
     "",
@@ -304,20 +313,26 @@ export function composeSurveyPrompt(doc: GraphDoc, focus: string | undefined): s
     "   paths that exist in this project. Ops without them are rejected with a reason. A parent",
     "   group bubble points at the paths of the parts it holds, so it satisfies this too. The one",
     "   exception is a product bubble from rule 9: it owns no code, so `realizes` grounds it",
-    "   instead of codeRefs.",
+    "   instead of codeRefs, and the product root is grounded by the whole build layer beneath it.",
     "8. Only what git tracks counts as real: a directory git ignores — typically a leftover folder",
     "   holding nothing but installed dependencies after a branch switch — is not part of this",
     "   project, so never survey it and never point codeRefs at it.",
-    "9. Then the product pass. Once the build layer is grouped and true, add 3-5 product bubbles",
-    '   with `layer: "product"` — one per capability this project gives a person, each stated as a',
-    '   promise to that person: "split a bill with friends", "see who owes what". Derive them from',
-    "   the surfaces a user actually touches — screens and routes, commands, the published entry",
-    "   points — and confirm every one against the code. A README may name capabilities the code",
-    "   never grew, so a product bubble exists only if you can point at the build bubbles that",
-    "   deliver it. Every product bubble MUST set `realizes` to the ids of those build bubbles:",
-    "   that is the only link between the two layers, and this turn a product bubble without one",
-    "   is rejected. Product bubbles need no codeRefs, are never a child of a build bubble, and",
-    "   never share an edge with one — the layers only meet through `realizes`.",
+    "9. Then the product pass, and it starts from ONE bubble: the product itself. Create that root",
+    '   first — `layer: "product"` with `parentId: null`, its label the product\'s name in plain',
+    "   English (take it from the package name, the README title or the repository folder, said the",
+    "   way a person would say it) and its summary the one-sentence promise of the whole thing. It",
+    "   is the only top-level product bubble: a second one is rejected with `op/second-root`, and",
+    "   because the root stands for the entire build layer it needs no `realizes`. Then hang 3-5",
+    '   capability bubbles under it (`layer: "product"`, `parentId` = the root) — one per capability',
+    "   this project gives a person, each stated as a promise to that person: \"split a bill with",
+    '   friends", "see who owes what". Derive them from the surfaces a user actually touches —',
+    "   screens and routes, commands, the published entry points — and confirm every one against",
+    "   the code. A README may name capabilities the code never grew, so a capability exists only",
+    "   if you can point at the build bubbles that deliver it. Every capability under the root MUST",
+    "   set `realizes` to the ids of those build bubbles: that is the only link between the two",
+    "   layers, and this turn a capability without one is rejected. Product bubbles need no",
+    "   codeRefs, are never a child of a build bubble, and never share an edge with one — the",
+    "   layers only meet through `realizes`.",
     "",
     skeleton.length > 0 ? `Mechanical skeleton (${doc.nodes.length} bubble(s)) — package names and placeholder summaries below are machine-generated and deliberately technical; replace every one of them with a plain-English promise:` : "No workspace packages were detected — build the skeleton yourself from what you read, under the same codeRefs and plain-English rules.",
     ...skeleton,

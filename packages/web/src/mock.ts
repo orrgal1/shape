@@ -309,13 +309,21 @@ export function sampleGraph(): GraphDoc {
         phase: "idea",
         kind: "api",
       },
-      // --- the product layer: what the project promises a person, and which of
-      // the bubbles above make each promise real. One of them promises nothing
-      // yet on purpose (`share-notes`), which is what the unrealized glow and
-      // its side-panel note are drawn from.
+      // --- the product layer: the product itself, then what it promises a
+      // person and which of the bubbles above make each promise real. One
+      // capability promises nothing yet on purpose (`share-notes`), which is
+      // what the unrealized glow and its side-panel note are drawn from.
+      {
+        id: "vireo",
+        parentId: null,
+        label: "Vireo field notebook",
+        summary: "Speak what you see on a walk and come home with a notebook you can search, name and hand on.",
+        phase: "building",
+        layer: "product",
+      },
       {
         id: "log-sighting",
-        parentId: null,
+        parentId: "vireo",
         label: "Log a sighting",
         summary: "Speak what you see and have a filed observation by the time you look up.",
         phase: "building",
@@ -325,7 +333,7 @@ export function sampleGraph(): GraphDoc {
       },
       {
         id: "notes-everywhere",
-        parentId: null,
+        parentId: "vireo",
         label: "Keep notes on every device",
         summary: "Write in the field with no signal and find it on the laptop that evening.",
         phase: "component",
@@ -334,7 +342,7 @@ export function sampleGraph(): GraphDoc {
       },
       {
         id: "name-what-i-saw",
-        parentId: null,
+        parentId: "vireo",
         label: "Name what I saw",
         summary: "Turn a description into a species and a habitat you can search by.",
         phase: "concept",
@@ -343,7 +351,7 @@ export function sampleGraph(): GraphDoc {
       },
       {
         id: "share-notes",
-        parentId: null,
+        parentId: "vireo",
         label: "Hand notes to a herbarium",
         summary: "Send a season of observations somewhere they will be kept and cited.",
         phase: "component",
