@@ -411,10 +411,11 @@ try {
   // --- 9. what a remote server keeps on disk --------------------------------
 
   const projectAId = hello.projectId;
-  const graphPath = join(dataDir, "projects", projectAId, "graph.json");
+  // an unauthenticated server files everything under the implicit `local` tenant
+  const graphPath = join(dataDir, "tenants", "local", "projects", projectAId, "graph.json");
   const storedGraph = await waitFor("the first project's graph under the data dir", () => readJson(graphPath), 10_000);
   check(
-    "a remote server keeps each project's graph at <data-dir>/projects/<projectId>/graph.json",
+    "a remote server keeps each project's graph at <data-dir>/tenants/local/projects/<projectId>/graph.json",
     storedGraph.nodes.some((n) => n.id === "auth-service") &&
       storedGraph.edges.some((e) => e.id === "auth-service--user-db"),
     JSON.stringify(storedGraph.nodes.map((n) => n.id)),

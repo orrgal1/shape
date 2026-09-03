@@ -263,19 +263,7 @@ export function parseAgentToServerMsg(raw: string): AgentToServerMsg | null {
       if (sessions === null) return null;
       const recentProjects = parseStringArray(m.recentProjects);
       if (recentProjects === null) return null;
-      const token = m.token;
-      if (token !== undefined && typeof token !== "string") return null;
-      const attach: Extract<AgentToServerMsg, { type: "attach" }> = {
-        type: "attach",
-        project,
-        session,
-        reality,
-        worktrees,
-        sessions,
-        recentProjects,
-      };
-      if (token !== undefined) attach.token = token;
-      return attach;
+      return { type: "attach", project, session, reality, worktrees, sessions, recentProjects };
     }
     case "agent_event": {
       const event = parseAgentEvent(m.event);

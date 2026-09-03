@@ -5,7 +5,9 @@
  *
  * A hub is also the room registry for browsers: each socket watches exactly
  * one project, so a frame a room broadcasts reaches its watchers and nobody
- * else. Only server-wide news (the project list) goes to everyone.
+ * else. The widest thing it sends — a tenant's project list — still stops at
+ * that tenant: a socket is admitted as one at the upgrade and never learns
+ * that another exists.
  *
  * A handler gets a `reply` alongside the message: frames a caller asked for by
  * id go back to the socket that asked, never to everyone. Link frames are not
@@ -13,6 +15,7 @@
  * `linkframes.ts`.
  */
 
+import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 import {
   BRIDGE_WS_PATH,
@@ -20,7 +23,8 @@ import {
   type Referent,
   type ServerMsg,
 } from "../../../shared/src/index.ts";
-import type { SocketServer } from "../wsserver.ts";
+import type { ConnectionHandler, SocketServer } from "../wsserver.ts";
+import { LOCAL_TENANT } from "./auth.ts";
 
 /** Boundary validator for browser input. */
 export function parseClientMsg(raw: string): ClientMsg | null {
@@ -93,11 +97,17 @@ export interface WsHubOptions {
   /** the shared listener; the hub takes BRIDGE_WS_PATH on it */
   sockets: SocketServer;
   /**
-   * The project a fresh browser joins: the most recently attached one, or null
-   * while the server hosts none — such a socket has nothing to be told yet and
-   * is greeted the moment the first room opens.
+   * The tenant a browser's upgrade speaks for, or null to refuse it (401). An
+   * unauthenticated server answers `LOCAL_TENANT` here, so the hub itself has
+   * no notion of "no auth" to get wrong.
    */
-  defaultRoom: () => string | null;
+  authorize: (request: IncomingMessage) => string | null;
+  /**
+   * The project a fresh browser joins: the most recently attached one of ITS
+   * tenant, or null while that tenant hosts none — such a socket has nothing to
+   * be told yet and is greeted the moment the first room of its tenant opens.
+   */
+  defaultRoom: (tenant: string) => string | null;
   /**
    * Frame sent to a socket that just joined `key` (worktrees are re-detected
    * here). `null` = that room is gone, so the socket waits like an early one.
@@ -109,16 +119,19 @@ export interface WsHubOptions {
 
 export class WsHub {
   readonly #clients = new Set<WebSocket>();
-  /** the browsers watching each project, by project key */
+  /** the browsers watching each project, by room key (`<tenant>/<projectKey>`) */
   readonly #rooms = new Map<string, Set<WebSocket>>();
   /** which project each browser is watching */
   readonly #joined = new Map<WebSocket, string>();
-  /** connected while there was no room: owed a hello when one opens */
+  /** connected while there was no room: owed a hello when one of its tenant opens */
   readonly #ungreeted = new Set<WebSocket>();
+  /** the tenant each browser was admitted as, decided at the upgrade */
+  readonly #tenants = new Map<WebSocket, string>();
 
   constructor(opts: WsHubOptions) {
-    opts.sockets.mount(BRIDGE_WS_PATH, (socket) => {
+    const mount: ConnectionHandler = (socket, _request, tenant) => {
       this.#clients.add(socket);
+      this.#tenants.set(socket, tenant);
       // handlers first: hello is async, and a client may talk before it lands
       socket.on("message", (data) => {
         const msg = parseClientMsg(data.toString());
@@ -133,7 +146,7 @@ export class WsHub {
       socket.on("close", () => this.#drop(socket));
       socket.on("error", () => this.#drop(socket));
 
-      const key = opts.defaultRoom();
+      const key = opts.defaultRoom(tenant);
       if (key === null) {
         this.#ungreeted.add(socket);
         return;
@@ -147,7 +160,8 @@ export class WsHub {
         }
         socket.send(JSON.stringify(msg));
       });
-    });
+    };
+    opts.sockets.mount(BRIDGE_WS_PATH, mount, { authorize: opts.authorize });
   }
 
   /** Move a browser onto a project; it hears only that room's frames from now on. */
@@ -167,6 +181,12 @@ export class WsHub {
     return this.#joined.get(socket) ?? null;
   }
 
+  /** the tenant a socket was admitted as; everything it may see is scoped to this */
+  tenantOf(socket: WebSocket): string {
+    // a socket the hub never saw cannot reach this: mounts hand it in
+    return this.#tenants.get(socket) ?? LOCAL_TENANT;
+  }
+
   /**
    * The agent that held `from` re-attached to `to`: its browsers asked for that
    * switch, so they follow it instead of watching a project nothing runs in.
@@ -177,11 +197,15 @@ export class WsHub {
     for (const socket of [...members]) this.join(socket, to);
   }
 
-  /** the hello owed to sockets that connected before any room existed */
-  greetPending(key: string, msg: ServerMsg): void {
+  /**
+   * The hello owed to sockets that connected before their tenant had a room.
+   * Another tenant's first room is no news to them: they keep waiting.
+   */
+  greetPending(tenant: string, key: string, msg: ServerMsg): void {
     if (this.#ungreeted.size === 0) return;
     const text = JSON.stringify(msg);
     for (const socket of [...this.#ungreeted]) {
+      if (this.tenantOf(socket) !== tenant) continue;
       this.join(socket, key);
       if (socket.readyState === socket.OPEN) socket.send(text);
     }
@@ -196,10 +220,11 @@ export class WsHub {
     }
   }
 
-  /** server-wide news (the project list), not one room's business */
-  broadcast(msg: ServerMsg): void {
+  /** a tenant's own news (its project list): every socket of that tenant, no room needed */
+  broadcastToTenant(tenant: string, msg: ServerMsg): void {
     const text = JSON.stringify(msg);
     for (const socket of this.#clients) {
+      if (this.tenantOf(socket) !== tenant) continue;
       if (socket.readyState === socket.OPEN) socket.send(text);
     }
   }
@@ -207,6 +232,7 @@ export class WsHub {
   #drop(socket: WebSocket): void {
     this.#clients.delete(socket);
     this.#ungreeted.delete(socket);
+    this.#tenants.delete(socket);
     const key = this.#joined.get(socket);
     if (key === undefined) return;
     this.#joined.delete(socket);

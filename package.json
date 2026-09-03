@@ -9,6 +9,8 @@
     "bridge": "pnpm --filter @shape/bridge start",
     "server": "pnpm --filter @shape/bridge server",
     "agent": "pnpm --filter @shape/bridge agent",
+    "login": "pnpm --filter @shape/bridge login",
+    "smoke:auth": "pnpm --filter @shape/bridge smoke:auth",
     "smoke:remote": "pnpm --filter @shape/bridge smoke:remote",
     "web": "pnpm --filter @shape/web dev",
     "smoke:shared": "pnpm --filter @shape/shared smoke",

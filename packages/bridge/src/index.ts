@@ -64,6 +64,8 @@ try {
     cwd: cli.cwd,
     ...(cli.backend === undefined ? {} : { backend: cli.backend }),
     ...(cli.ompCommand === undefined ? {} : { ompCommand: cli.ompCommand }),
+    // local mode is the operator's own machine: the terminal pane stays on
+    allowTerminal: true,
     sockets,
     link: link.agent,
     // the harness is this process's reason to exist: the browsers have already

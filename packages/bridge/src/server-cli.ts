@@ -7,13 +7,19 @@
  * Graphs live under `--data-dir`, not in the repos: the projects are on other
  * machines. That directory is also what a restart reads its rooms back from.
  *
+ * `--token-file` is what makes the server multi-tenant AND what makes it safe
+ * to expose: without one it admits everyone as the `local` tenant, so it may
+ * only bind loopback.
+ *
  * Run: node src/server-cli.ts [--port 4400] [--host 127.0.0.1] [--data-dir <dir>]
+ *                             [--token-file <file>]
  */
 
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { AGENT_WS_PATH, BRIDGE_PORT, BRIDGE_WS_PATH } from "../../shared/src/index.ts";
+import { isLoopbackHost, loadTokenFile } from "./server/auth.ts";
 import { ShapeServer } from "./server/server.ts";
 import { dataDirStorage } from "./server/storage.ts";
 import { SocketServer } from "./wsserver.ts";
@@ -21,12 +27,14 @@ import { SocketServer } from "./wsserver.ts";
 interface Cli {
   port: number;
   /**
-   * `--host`: a non-loopback bind is accepted while the server is unauthenticated
-   * (Phase 1); Phase 3 gates it behind a token.
+   * `--host`: anything but loopback needs `--token-file`; an unauthenticated
+   * server on a routable address is an open canvas and an open steer channel.
    */
   host: string;
   /** `--data-dir`: every project's graph, revisions and registry row */
   dataDir: string;
+  /** `--token-file`: `[{ token, tenant }, …]`; null ⇒ unauthenticated, one `local` tenant */
+  tokenFile: string | null;
 }
 
 function parseArgv(argv: string[]): Cli {
@@ -34,6 +42,7 @@ function parseArgv(argv: string[]): Cli {
     port: BRIDGE_PORT,
     host: "127.0.0.1",
     dataDir: join(process.env.SHAPE_HOME ?? homedir(), ".shape", "server"),
+    tokenFile: null,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -51,6 +60,9 @@ function parseArgv(argv: string[]): Cli {
     } else if (arg === "--data-dir" && next !== undefined) {
       cli.dataDir = resolve(next);
       i++;
+    } else if (arg === "--token-file" && next !== undefined) {
+      cli.tokenFile = resolve(next);
+      i++;
     } else {
       throw new Error(`unknown argument ${arg}`);
     }
@@ -62,11 +74,18 @@ function parseArgv(argv: string[]): Cli {
 // trace: the operator needs to read what went wrong.
 try {
   const cli = parseArgv(process.argv.slice(2));
+  // before anything binds or is read: an unauthenticated server on a routable
+  // address would hand every graph and every steer channel to the network
+  if (!isLoopbackHost(cli.host) && cli.tokenFile === null) {
+    throw new Error(`refusing to listen on ${cli.host} without --token-file`);
+  }
+  // one read at startup; a token change is an operator restarting the server
+  const auth = cli.tokenFile === null ? null : await loadTokenFile(cli.tokenFile);
   const sockets = new SocketServer({ port: cli.port, host: cli.host });
   await mkdir(cli.dataDir, { recursive: true });
   // mounts both paths and needs no further handle beyond the restore below:
   // agents arrive on their own
-  const server = new ShapeServer({ sockets, storage: dataDirStorage(cli.dataDir) });
+  const server = new ShapeServer({ sockets, storage: dataDirStorage(cli.dataDir), auth });
   // rooms are back — agentless — before the first browser or agent can arrive
   const restored = await server.restore();
   if (restored > 0) console.error(`[bridge] restored ${restored} project(s) from ${cli.dataDir}`);

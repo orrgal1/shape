@@ -65,6 +65,12 @@ export interface AgentRuntimeOptions {
   backend?: string;
   /** `--omp "<cmd ...>"`: replaces the omp adapter's command */
   ompCommand?: string[];
+  /**
+   * The terminal pane is a shell on the target machine, so a remote agent only
+   * offers it when the operator asks. Off means no pty at all: the advertised
+   * capability is `"none"` and every `pty_*` frame is ignored.
+   */
+  allowTerminal: boolean;
   /** the runtime mounts the loopback link (`/link`) here in start() */
   sockets: SocketServer;
   link: AgentEnd;
@@ -139,6 +145,8 @@ export class AgentRuntime {
   /** `--backend`, kept for every re-create: an adopt overrides it per switch */
   readonly #cliBackend: string | undefined;
   readonly #cliOmpCommand: string[] | undefined;
+  /** `--allow-terminal`: false gates the pane off for good (see #pty) */
+  readonly #allowTerminal: boolean;
 
   /** current target project; changed by `switch`/`adopt` */
   #cwd: string;
@@ -150,8 +158,11 @@ export class AgentRuntime {
   #backendInfo!: BackendInfo;
   /** see the file header: one sink for the runtime's whole life */
   readonly #events: BackendEvents = this.#backendEvents();
-  /** shared project shell; retargeted, never re-created, across switches */
-  readonly #pty: PtyManager;
+  /**
+   * Shared project shell; retargeted, never re-created, across switches. Null
+   * when the terminal is gated off — no pty is ever spawned in that mode.
+   */
+  readonly #pty: PtyManager | null;
   #loopback: LoopbackLink | null = null;
 
   #session: AgentSession = { sessionId: null, sessionName: null, model: null };
@@ -198,9 +209,12 @@ export class AgentRuntime {
     this.#cliBackend = opts.backend;
     this.#cliOmpCommand = opts.ompCommand;
     this.#cwd = opts.cwd;
+    this.#allowTerminal = opts.allowTerminal;
     // the pane exists before the harness starts: a backend with its own TUI is
     // attached to it the moment it comes up
-    this.#pty = new PtyManager({ cwd: opts.cwd, broadcast: (msg) => this.#post(msg) });
+    this.#pty = opts.allowTerminal
+      ? new PtyManager({ cwd: opts.cwd, broadcast: (msg) => this.#post(msg) })
+      : null;
   }
 
   /**
@@ -275,7 +289,15 @@ export class AgentRuntime {
     });
     const backend = createBackend(config.backend, config);
     this.#backend = backend;
-    this.#backendInfo = { id: backend.id, label: backend.label, capabilities: backend.capabilities };
+    // terminal off is the agent's answer whatever the harness offers: the
+    // canvas hides the pane and the server drops the room's `pty_*` frames
+    this.#backendInfo = {
+      id: backend.id,
+      label: backend.label,
+      capabilities: this.#allowTerminal
+        ? backend.capabilities
+        : { ...backend.capabilities, terminal: "none" },
+    };
   }
 
   /** Everything about `#cwd` the server cannot see for itself. */
@@ -303,7 +325,7 @@ export class AgentRuntime {
       ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
     });
     // a harness with its own TUI owns the terminal pane; everything else gets a shell
-    this.#pty.attach(backend.terminal?.() ?? null);
+    this.#pty?.attach(backend.terminal?.() ?? null);
     try {
       const state = await backend.state();
       this.#session = { sessionId: state.sessionId, sessionName: state.sessionName, model: state.model };
@@ -345,9 +367,9 @@ export class AgentRuntime {
     const backend = this.#backend;
     this.#backend = null;
     // the harness's TUI dies with it; the pane must not be left pointing at it
-    this.#pty.attach(null);
+    this.#pty?.attach(null);
     if (backend !== null) await backend.dispose();
-    this.#pty.dispose();
+    this.#pty?.dispose();
     this.#loopback?.close();
   }
 
@@ -447,8 +469,10 @@ export class AgentRuntime {
 
   #onServerMsg(msg: ServerToAgentMsg): void {
     if (isPtyMsg(msg)) {
-      // the terminal is its own channel: never queued behind agent delivery
-      this.#pty.handle(msg);
+      // the terminal is its own channel: never queued behind agent delivery.
+      // With the terminal gated off there is no pty and the frame is dropped
+      // without an answer — a stale tab must not be able to open a shell.
+      this.#pty?.handle(msg);
       return;
     }
     switch (msg.type) {
@@ -603,11 +627,11 @@ export class AgentRuntime {
       const old = this.#backend;
       this.#backend = null;
       // the old harness's TUI dies with it; the pane goes back to a shell
-      this.#pty.attach(null);
+      this.#pty?.attach(null);
       if (old !== null) await old.dispose();
 
       this.#cwd = target;
-      this.#pty.retarget(target);
+      this.#pty?.retarget(target);
       this.#promptSent = false; // a new session earns the preamble again
       // a switch is a new room, and deliver ids restart with it: keeping the
       // old room's receipts would let a fresh `req-1` look like a repeat

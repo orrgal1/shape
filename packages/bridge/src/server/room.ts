@@ -33,7 +33,7 @@ import { composeSurveyPrompt, onboardingOpGate } from "./onboarding.ts";
 import { PREAMBLE } from "./preamble.ts";
 import { SnapshotStore } from "./snapshots.ts";
 import { composeUtterance } from "./steering.ts";
-import type { Storage, StoredProject } from "./storage.ts";
+import type { AuditBody, Storage, StoredProject } from "./storage.ts";
 import { GraphStore } from "./store.ts";
 
 /** the frame that opens (or retargets) a room */
@@ -54,6 +54,12 @@ export interface ProjectRoomOptions {
   onProjectsChanged: () => void;
   /** where this project's graph, its revisions and its registry row live */
   storage: Storage;
+  /**
+   * The tenant this room belongs to: rooms are keyed `(tenant, projectKey)`, so
+   * the same project key on two tenants is two rooms with two graphs. It is the
+   * storage path segment and the audit's subject, never something a frame says.
+   */
+  tenant: string;
 }
 
 /**
@@ -91,6 +97,7 @@ export class ProjectRoom {
   readonly #projects: () => ProjectSummary[];
   readonly #onProjectsChanged: () => void;
   readonly #storage: Storage;
+  readonly #tenant: string;
   /** assigned by retarget() or restore(), which always run before anything else reaches the room */
   #project!: AgentProject;
   #store!: GraphStore;
@@ -126,10 +133,16 @@ export class ProjectRoom {
     this.#projects = opts.projects;
     this.#onProjectsChanged = opts.onProjectsChanged;
     this.#storage = opts.storage;
+    this.#tenant = opts.tenant;
   }
 
   get agentConnected(): boolean {
     return this.#agentConnected;
+  }
+
+  /** the tenant whose project list, default room and storage tree this room is in */
+  get tenant(): string {
+    return this.#tenant;
   }
 
   /** the room's agent arrived on `end`; a link it has moved off has no say here */
@@ -172,7 +185,7 @@ export class ProjectRoom {
 
     const project = attach.project;
     this.#project = project;
-    const dir = this.#storage.dirFor(project);
+    const dir = this.#storage.dirFor(project, this.#tenant);
     this.#store = new GraphStore(dir);
     this.#snapshots = new SnapshotStore(dir);
     await this.#store.load();
@@ -215,7 +228,7 @@ export class ProjectRoom {
   async restore(row: StoredProject): Promise<void> {
     const project = row.project;
     this.#project = project;
-    const dir = this.#storage.dirFor(project);
+    const dir = this.#storage.dirFor(project, this.#tenant);
     this.#store = new GraphStore(dir);
     this.#snapshots = new SnapshotStore(dir);
     await this.#store.load();
@@ -245,6 +258,7 @@ export class ProjectRoom {
     return this.#storage
       .saveProject({
         project: this.#project,
+        tenant: this.#tenant,
         session: {
           sessionId: this.#session.sessionId,
           sessionName: this.#session.sessionName,
@@ -331,6 +345,10 @@ export class ProjectRoom {
       case "pty_input":
       case "pty_resize":
       case "pty_close":
+        // A pty over the network is a remote shell, so an agent that did not
+        // allow one is not asked for it: the browser hides the pane on the same
+        // capability, and a client that ignores that gets silence, not a shell.
+        if (this.#session.backend.capabilities.terminal === "none") return;
         // the terminal is its own channel: never queued behind agent delivery
         this.#link.send(msg);
         return;
@@ -365,10 +383,12 @@ export class ProjectRoom {
       case "onboard":
         void this.#onboard(msg.focus);
         return;
-      case "utterance":
+      case "utterance": {
         this.#broadcast({ type: "transcript", role: "user", text: msg.text });
-        this.#deliver(composeUtterance(this.#store, msg.text, msg.referent));
+        const id = this.#deliver(composeUtterance(this.#store, msg.text, msg.referent));
+        this.#audit({ kind: "deliver", id, referent: msg.referent, text: msg.text });
         return;
+      }
     }
   }
 
@@ -423,17 +443,23 @@ export class ProjectRoom {
 
     this.#fileIndex = buildFileIndex(files);
     this.#onboarding = true;
-    this.#deliver(composeSurveyPrompt(this.#store.doc, focus));
+    const id = this.#deliver(composeSurveyPrompt(this.#store.doc, focus));
+    // the survey text is the server's, not the user's: the focus is all the
+    // audit needs to explain why a harness suddenly mapped a repo
+    this.#audit({ kind: "onboard", id, focus: focus ?? null });
   }
 
   /**
    * Send a composed prompt to the agent and remember it until the receipt
    * arrives: an agent that dropped in between hears it again on re-attach.
+   * Returns the delivery's id, which is what a receipt and an audit line
+   * are correlated by.
    */
-  #deliver(body: string): void {
+  #deliver(body: string): string {
     const id = `req-${++this.#requestSeq}`;
     this.#undelivered.set(id, body);
     this.#link.send({ type: "deliver", id, body });
+    return id;
   }
 
   // -------------------------------------------------------------------------
@@ -467,6 +493,7 @@ export class ProjectRoom {
         return;
       case "delivered":
         this.#undelivered.delete(msg.id);
+        this.#audit({ kind: "delivered", id: msg.id, mode: msg.mode, queued: msg.queued });
         // only the agent knows whether the harness was mid-turn when it landed
         if (msg.queued) {
           this.#broadcast({
@@ -672,6 +699,21 @@ export class ProjectRoom {
       this.#broadcast({ type: "revisions", revisions: await snapshots.list() });
     });
     return persisted;
+  }
+
+  /**
+   * One line per steering delivery and receipt, stamped with who and where.
+   * An on-prem operator answers "what was said to this harness, and did it
+   * land" from the room's own storage; the write never blocks the delivery and
+   * never fails it (see `Storage.appendAudit`).
+   */
+  #audit(body: AuditBody): void {
+    void this.#storage.appendAudit(this.#project, this.#tenant, {
+      at: new Date().toISOString(),
+      tenant: this.#tenant,
+      projectId: this.#project.key,
+      ...body,
+    });
   }
 
   #error(message: string): void {

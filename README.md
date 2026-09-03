@@ -95,14 +95,26 @@ pnpm server -- --port 4400                                   # browsers on /ws, 
 pnpm agent -- --server ws://<server-host>:4400 --cwd <repo>  # reconnects, re-attaches; --link-port 4401 for MCP/hooks
 ```
 
-The canvas turns read-only ("agent offline") while a project's agent is away and resumes
-when it re-attaches. See `PLAN.md` for the deployment roadmap and `CONTRACTS.md` for the wire.
+On-prem (anything but loopback needs tokens):
+
+```bash
+pnpm server -- --host 0.0.0.0 --port 4400 --token-file tokens.json --data-dir /var/lib/shape
+#   tokens.json: [{ "token": "<16+ chars>", "tenant": "acme" }, …]
+pnpm login -- ws://<server-host>:4400 <token>                # stores it in ~/.shape/servers.json (0600)
+pnpm agent -- --server ws://<server-host>:4400 --cwd <repo> [--allow-terminal]
+```
+
+Browsers open `http://<web-host>:5173/?server=<server-host>:4400&token=<token>` once; the
+client keeps both in localStorage and strips them from the address bar. The canvas turns
+read-only ("agent offline") while a project's agent is away and resumes when it re-attaches.
+See `PLAN.md` for the deployment roadmap and `CONTRACTS.md` for the wire.
 
 Smoke tests:
 
 ```bash
 pnpm --filter @shape/bridge smoke   # protocol checks against a fake omp child (local mode)
 pnpm smoke:remote                   # server + agent on separate ports, detach/re-attach, select_project
+pnpm smoke:auth                     # tokens, tenants, bind guard, terminal gating, login, audit
 pnpm smoke:shared                   # validation + revision-diff checks
 ```
 

@@ -84,7 +84,6 @@ export interface AgentProject {
 export type AgentToServerMsg =
   | {
       type: "attach";
-      token?: string;
       project: AgentProject;
       session: AgentSession;
       /** reality at attach time (null when extraction found nothing / is unavailable) */

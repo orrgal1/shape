@@ -6,12 +6,14 @@
  * those never hold server credentials.
  *
  * Run: node src/agent-cli.ts --server ws://host:port
- *        [--cwd <dir>] [--backend <id>] [--omp "<cmd ...>"] [--link-port <n>]
+ *        [--token <t>] [--allow-terminal] [--cwd <dir>] [--backend <id>]
+ *        [--omp "<cmd ...>"] [--link-port <n>]
  */
 
 import { resolve } from "node:path";
 import { AGENT_WS_PATH, LINK_WS_PATH } from "../../shared/src/index.ts";
 import { AgentRuntime } from "./agent/runtime.ts";
+import { serverOrigin, tokenForServer } from "./servers.ts";
 import { connectAgentEnd } from "./transport.ts";
 import { SocketServer } from "./wsserver.ts";
 
@@ -28,6 +30,13 @@ interface Cli {
   backend?: string;
   /** `--omp "<cmd ...>"`: replaces the omp adapter's command */
   ompCommand?: string[];
+  /** `--token <t>`: beats `SHAPE_TOKEN` and the saved credentials */
+  token?: string;
+  /**
+   * `--allow-terminal`: off by default. A remote agent's terminal pane is a
+   * shell on this machine, so the operator has to ask for it.
+   */
+  allowTerminal: boolean;
 }
 
 /**
@@ -52,7 +61,7 @@ function agentUrl(raw: string): string {
 
 function parseArgv(argv: string[]): Cli {
   let server: string | null = null;
-  const cli: Cli = { server: "", cwd: process.cwd(), linkPort: LINK_PORT };
+  const cli: Cli = { server: "", cwd: process.cwd(), linkPort: LINK_PORT, allowTerminal: false };
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -78,6 +87,11 @@ function parseArgv(argv: string[]): Cli {
         .split(/\s+/)
         .filter((token) => token.length > 0);
       i++;
+    } else if (arg === "--token" && next !== undefined) {
+      cli.token = next.trim();
+      i++;
+    } else if (arg === "--allow-terminal") {
+      cli.allowTerminal = true;
     } else {
       throw new Error(`unknown argument ${arg}`);
     }
@@ -92,15 +106,31 @@ function parseArgv(argv: string[]): Cli {
 // server that is merely not up yet is NOT one of those — the link retries.
 try {
   const cli = parseArgv(process.argv.slice(2));
+  // `--token`, then `SHAPE_TOKEN`, then what `shape login` saved for this
+  // server. None of the three is fine: an unauthenticated server ignores it.
+  const envToken = process.env.SHAPE_TOKEN?.trim();
+  const token =
+    cli.token ??
+    (envToken !== undefined && envToken.length > 0 ? envToken : await tokenForServer(serverOrigin(cli.server)));
   const sockets = new SocketServer({ port: cli.linkPort });
   // the end owns the reconnect loop and says `waiting for Shape server` itself
-  // when the first connect fails; the runtime is the only listener it needs
-  const link = connectAgentEnd(cli.server);
+  // when the first connect fails; the runtime is its only frame listener
+  const link = connectAgentEnd(cli.server, {
+    ...(token === null ? {} : { token }),
+    // The runtime owns `onClose`, so a refused token is reported here. It is
+    // fatal whenever it lands — no retry makes a wrong token right — and the
+    // delay lets the runtime's teardown dispose the harness first.
+    onRefused: (reason) => {
+      console.error(`[bridge] startup failed: ${reason}`);
+      setTimeout(() => process.exit(1), 50);
+    },
+  });
 
   const agent = new AgentRuntime({
     cwd: cli.cwd,
     ...(cli.backend === undefined ? {} : { backend: cli.backend }),
     ...(cli.ompCommand === undefined ? {} : { ompCommand: cli.ompCommand }),
+    allowTerminal: cli.allowTerminal,
     sockets,
     link,
     // the harness is this process's reason to exist: the room has already been
@@ -129,9 +159,9 @@ try {
   // hook that finds nobody listening exits silently.
   await sockets.listen();
   await agent.start();
-  // a stop while we waited settles the same gate: we were never attached, and
-  // the process is already on its way out
-  if (!stopping) {
+  // a stop or a refused token settles the same gate: we were never attached,
+  // and the process is already on its way out
+  if (!stopping && !link.closed) {
     console.error(
       `[bridge] agent attached to ${cli.server} (target ${cli.cwd}, link at ${sockets.url(LINK_WS_PATH)})`,
     );

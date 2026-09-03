@@ -202,14 +202,23 @@ Original scope: multiple agents per server, project picker in the client replaci
 recents pop-up when remote, `lastSeen`/`agentConnected` per project, room GC, `FsStorage`
 under a data dir, browser can watch a room whose agent is gone (history/diff only).
 
-### Phase 3 — Auth for on-prem
+### Phase 3 — Auth for on-prem — DONE 2026-09-03
 
-Bearer tokens (`shape server --token-file`, `shape login`), tenant = token, non-loopback bind
-refuses to start without auth, `pty_*` gating, structured audit log of steering deliveries
-per room.
+Landed: `server/auth.ts` (token file, `Authorization: Bearer` / `?token=` at upgrade, 401
+before any socket exists), tenant-keyed rooms/lists/default room/storage
+(`<data-dir>/tenants/<tenant>/projects/<id>/`), bind guard (`refusing to listen on <host>
+without --token-file`), `shape agent --allow-terminal` (off by default: `terminal: "none"`
+advertised, `pty_*` ignored by the agent AND dropped by the server), `audit.jsonl` per room
+with deliver/delivered/onboard lines, `shape login <url> <token>` → `~/.shape/servers.json`
+(0600) consulted after `--token` and `SHAPE_TOKEN`, 401 is final for the agent. The web
+client reads `?token=`/`?server=` once into localStorage. `pnpm smoke:auth` (21 checks) is the
+acceptance: tokenless agent and browser refused, tenant A cannot see or select tenant B's
+project, terminal absent unless allowed, login round trip, audit and layout on disk.
 
-Acceptance: unauthenticated agent/browser rejected at upgrade; token A cannot see token B's
-projects; terminal pane absent unless the agent allowed it.
+Original scope: bearer tokens (`shape server --token-file`, `shape login`), tenant = token,
+non-loopback bind refuses to start without auth, `pty_*` gating, structured audit log of
+steering deliveries per room. Acceptance: unauthenticated agent/browser rejected at upgrade;
+token A cannot see token B's projects; terminal pane absent unless the agent allowed it.
 
 ### Phase 4 — SaaS
 

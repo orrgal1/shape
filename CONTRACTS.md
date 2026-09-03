@@ -457,13 +457,40 @@ bridge broadcasts `delta` `{ delta }`; an unknown rev answers with the usual `er
 
 ## Storage (server, 2026-09-03)
 
-`packages/bridge/src/server/storage.ts` decides where a room's `graph.json` and
-`revisions/` live: `Storage { dirFor(project), listProjects(), saveProject(row) }`.
-- `projectDirStorage()` — local mode (`pnpm bridge`): `<cwd>/.shape/`, no registry.
+`packages/bridge/src/server/storage.ts` decides where a room's `graph.json`, `revisions/`
+and `audit.jsonl` live: `Storage { dirFor(project, tenant), listProjects(), saveProject(row),
+appendAudit(project, tenant, entry) }`.
+- `projectDirStorage()` — local mode (`pnpm bridge`): `<cwd>/.shape/`, no registry, no audit.
 - `dataDirStorage(root)` — `shape server --data-dir` (default `~/.shape/server`, `SHAPE_HOME`
-  honored): `<root>/projects/<projectId>/` per room and `<root>/projects.json`, an atomically
-  written array of `StoredProject { project: AgentProject, session, worktrees, lastSeen }`
-  rows upserted after every attach and detach. At startup the server restores each row as an
-  agentless room (`[bridge] restored N project(s) from <root>`), so a browser is greeted
-  read-only immediately and agents re-bind on reconnect. A corrupt registry is skipped with
-  `[bridge] ignoring unparseable <path>`, never fatal.
+  honored): `<root>/tenants/<tenant>/projects/<projectId>/` per room and `<root>/projects.json`,
+  an atomically written array of `StoredProject { tenant, project: AgentProject, session,
+  worktrees, lastSeen }` rows upserted after every attach and detach (a pre-tenant row reads
+  as `local`). At startup the server restores each row as an agentless room (`[bridge]
+  restored N project(s) from <root>`), so a browser is greeted read-only immediately and
+  agents re-bind on reconnect. A corrupt registry is skipped with `[bridge] ignoring
+  unparseable <path>`, never fatal. Audit lines `{ at, tenant, projectId, kind: "deliver" |
+  "delivered" | "onboard", … }` are appended per steering delivery, receipt and survey;
+  a failed append is logged once as `[bridge] audit write failed: <message>`.
+
+## Auth and tenancy (server, 2026-09-03)
+
+Authentication happens at the WebSocket upgrade, never inside a frame (`attach` carries no
+token). `packages/bridge/src/server/auth.ts`:
+- `shape server --token-file <path>` loads a JSON array of `{ token (≥ 16 chars), tenant
+  (^[a-z0-9][a-z0-9-]*$) }`; malformed → startup failure `token file <path>: <reason>`.
+- Agents send `Authorization: Bearer <token>` on the `/agent` upgrade; browsers send
+  `?token=<token>` on the `/ws` URL (the web client persists `?token=`/`?server=` page params
+  in localStorage and strips them from the address bar). Either form is accepted on either
+  path. Missing/unknown token on an authenticated server → HTTP 401, no socket.
+- Without a token file the server is unauthenticated: every connection is tenant `local`,
+  and `--host` outside loopback is refused: `refusing to listen on <host> without --token-file`.
+- One token ⇒ one tenant. Rooms are keyed `(tenant, projectKey)`; `projects`, the default
+  room, `select_project` and storage are all tenant-scoped, so the same project key under two
+  tenants is two rooms and a cross-tenant `select_project` is `unknown project <id>`.
+- The agent resolves its token as `--token`, then `SHAPE_TOKEN`, then
+  `~/.shape/servers.json[<ws://host:port>]` written by `shape login <server-url> <token>`
+  (mode 0600, `[bridge] saved token for <origin> in <path>`). A 401 is final: the agent does
+  not retry and exits with `Shape server refused the token (401)`.
+- Terminal gating: `shape agent --allow-terminal` is off by default; a gated agent advertises
+  `capabilities.terminal: "none"` and ignores `pty_*`, and the server drops `pty_*` for any
+  room advertising `"none"`. Local mode keeps the terminal on.

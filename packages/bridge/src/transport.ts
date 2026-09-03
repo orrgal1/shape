@@ -182,11 +182,29 @@ export function socketServerEnd(socket: WebSocket): ServerEnd {
   return new SocketServerEnd(socket);
 }
 
+/**
+ * The one refusal a retry cannot fix: a wrong token stays wrong, so the end
+ * gives up instead of reconnecting forever against a server that keeps saying
+ * no. The agent CLI prints this and exits.
+ */
+export const TOKEN_REFUSED = "Shape server refused the token (401)";
+
 export interface ConnectAgentEndOptions {
   /** first retry delay; doubles per failed attempt (default 500 ms) */
   minBackoffMs?: number;
   /** ceiling for the doubling (default 8 s) */
   maxBackoffMs?: number;
+  /**
+   * Sent as `Authorization: Bearer <token>` on the upgrade. Omitted against an
+   * unauthenticated server, which ignores it anyway.
+   */
+  token?: string;
+  /**
+   * The server refused the token; the end is closed for good. `onClose` fires
+   * too — this exists because the runtime owns that listener, and the process
+   * that built the link is the one that decides whether to exit.
+   */
+  onRefused?: (reason: string) => void;
 }
 
 /**
@@ -198,6 +216,8 @@ class SocketAgentEnd implements AgentEnd {
   readonly #url: string;
   readonly #minBackoffMs: number;
   readonly #maxBackoffMs: number;
+  readonly #token: string | undefined;
+  readonly #onRefused: ((reason: string) => void) | undefined;
   #socket: WebSocket | null = null;
   #onMessage: ((msg: ServerToAgentMsg) => void) | null = null;
   #onClose: ((reason: string) => void) | null = null;
@@ -226,6 +246,8 @@ class SocketAgentEnd implements AgentEnd {
     this.#url = url;
     this.#minBackoffMs = opts?.minBackoffMs ?? 500;
     this.#maxBackoffMs = opts?.maxBackoffMs ?? 8000;
+    this.#token = opts?.token;
+    this.#onRefused = opts?.onRefused;
     this.#backoffMs = this.#minBackoffMs;
     this.#connect();
   }
@@ -280,7 +302,12 @@ class SocketAgentEnd implements AgentEnd {
 
   #connect(): void {
     if (this.#closed) return;
-    const socket = new WebSocket(this.#url);
+    // an agent can set headers where a browser cannot, so the token travels in
+    // `Authorization` and never in the URL (logs, `ps`, referrers)
+    const socket = new WebSocket(
+      this.#url,
+      this.#token === undefined ? {} : { headers: { Authorization: `Bearer ${this.#token}` } },
+    );
     this.#socket = socket;
     // a failed connect arrives as `error` THEN `close`: one gap per socket
     let dropped = false;
@@ -329,6 +356,19 @@ class SocketAgentEnd implements AgentEnd {
       drop(reason.length === 0 ? "server closed the link" : reason.toString());
     });
     socket.on("error", (err) => drop(err.message));
+    // the upgrade was answered with HTTP instead of a socket. 401 is the one
+    // answer a retry cannot improve on: give up so the operator sees why.
+    socket.on("unexpected-response", (_request, response) => {
+      const status = response.statusCode ?? 0;
+      response.destroy();
+      if (status !== 401) {
+        drop(`server answered HTTP ${status} to the upgrade`);
+        return;
+      }
+      dropped = true; // the abort below arrives as `error`; it is not a gap
+      this.close(TOKEN_REFUSED);
+      this.#onRefused?.(TOKEN_REFUSED);
+    });
   }
 
   #schedule(): void {

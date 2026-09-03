@@ -4,20 +4,38 @@
  * side) on the same port; remote mode gives each process its own instance.
  *
  * Owns nothing but sockets: every mount gets raw connections and does its own
- * validation and bookkeeping.
+ * validation and bookkeeping. The one exception is identity — a mount may hand
+ * in an `authorize` hook, and a connection it refuses never becomes a socket
+ * at all (401 at the upgrade). Everything below the mount therefore knows the
+ * tenant of every connection it is given, and no frame carries a token.
  */
 
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
+import { LOCAL_TENANT } from "./server/auth.ts";
 
-export type ConnectionHandler = (socket: WebSocket, request: IncomingMessage) => void;
+export type ConnectionHandler = (socket: WebSocket, request: IncomingMessage, tenant: string) => void;
+
+export interface MountOptions {
+  /**
+   * The tenant this connection speaks for, or null to refuse it. Absent ⇒ the
+   * mount is unauthenticated and every connection is `LOCAL_TENANT`.
+   */
+  authorize?: (request: IncomingMessage) => string | null;
+}
+
+interface Mount {
+  wss: WebSocketServer;
+  handler: ConnectionHandler;
+  authorize: ((request: IncomingMessage) => string | null) | null;
+}
 
 export class SocketServer {
   readonly #http: Server;
   readonly #host: string;
   readonly #port: number;
-  readonly #mounts = new Map<string, { wss: WebSocketServer; handler: ConnectionHandler }>();
+  readonly #mounts = new Map<string, Mount>();
 
   constructor(opts: { port: number; host?: string }) {
     this.#host = opts.host ?? "127.0.0.1";
@@ -35,14 +53,23 @@ export class SocketServer {
         socket.destroy();
         return;
       }
-      mount.wss.handleUpgrade(request, socket, head, (ws) => mount.handler(ws, request));
+      const tenant = mount.authorize === null ? LOCAL_TENANT : mount.authorize(request);
+      if (tenant === null) {
+        // no socket, so no room to leak and nothing to close later: a client
+        // that guessed wrong learns it from the HTTP status
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      mount.wss.handleUpgrade(request, socket, head, (ws) => mount.handler(ws, request, tenant));
     });
   }
 
   /** `path` must start with "/"; mounting the same path twice is a programming error */
-  mount(path: string, handler: ConnectionHandler): void {
+  mount(path: string, handler: ConnectionHandler, opts?: MountOptions): void {
     if (this.#mounts.has(path)) throw new Error(`socket path ${path} already mounted`);
-    this.#mounts.set(path, { wss: new WebSocketServer({ noServer: true }), handler });
+    const wss = new WebSocketServer({ noServer: true });
+    this.#mounts.set(path, { wss, handler, authorize: opts?.authorize ?? null });
   }
 
   listen(): Promise<void> {

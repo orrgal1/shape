@@ -4,13 +4,47 @@ import { isMockMode, mockSend } from "./mock.ts";
 import { isRecord, parseServerMsg } from "./parse.ts";
 import { useApp } from "./store.ts";
 
-const BRIDGE_URL = `ws://127.0.0.1:${BRIDGE_PORT}${BRIDGE_WS_PATH}`;
+/** the on-prem deployment hands these to the page once; they outlive the URL */
+const TOKEN_KEY = "shape.token";
+const SERVER_KEY = "shape.server";
+const DEFAULT_SERVER = `127.0.0.1:${BRIDGE_PORT}`;
 const BACKOFF_MIN_MS = 500;
 const BACKOFF_MAX_MS = 8000;
 
 let socket: WebSocket | null = null;
 let retries = 0;
 let retryTimer: number | null = null;
+
+/**
+ * A remote deployment opens the canvas with `?server=host:port&token=…`. Both
+ * are captured once at startup — before the app decides whether it is in mock
+ * mode, so any entry path swallows the credentials — and kept in localStorage
+ * so a reload, or a bookmark that lost the query, still reaches the same
+ * server. Both are stripped from the visible URL so a link copied out of the
+ * address bar carries no token.
+ */
+function captureUrlCredentials(): void {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token");
+  const server = params.get("server");
+  if (token === null && server === null) return;
+  if (token !== null) window.localStorage.setItem(TOKEN_KEY, token);
+  if (server !== null) window.localStorage.setItem(SERVER_KEY, server);
+  params.delete("token");
+  params.delete("server");
+  const query = params.toString();
+  const rest = query === "" ? "" : `?${query}`;
+  window.history.replaceState(null, "", `${window.location.pathname}${rest}${window.location.hash}`);
+}
+
+captureUrlCredentials();
+
+function bridgeUrl(): string {
+  const server = window.localStorage.getItem(SERVER_KEY) || DEFAULT_SERVER;
+  const token = window.localStorage.getItem(TOKEN_KEY) || "";
+  const auth = token === "" ? "" : `?token=${encodeURIComponent(token)}`;
+  return `ws://${server}${BRIDGE_WS_PATH}${auth}`;
+}
 
 /**
  * Terminal frames are their own wire: they carry no graph, arrive in bursts
@@ -37,7 +71,7 @@ function open(): void {
   // first attempt reads as "connecting"; every later one means we lost it
   setConn(retries === 0 ? "connecting" : "lost");
 
-  const ws = new WebSocket(BRIDGE_URL);
+  const ws = new WebSocket(bridgeUrl());
   socket = ws;
 
   ws.addEventListener("open", () => {
