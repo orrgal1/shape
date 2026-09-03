@@ -11,7 +11,7 @@
  */
 
 import { spawn, type IPty } from "@lydell/node-pty";
-import type { PtyClientMsg, PtyServerMsg } from "../../shared/src/pty.ts";
+import type { PtyClientMsg, PtyServerMsg } from "../../../shared/src/pty.ts";
 import type { TerminalSource } from "./backend/types.ts";
 
 const FALLBACK_SHELL = "/bin/zsh";

@@ -7,7 +7,7 @@
  * the steer-vs-prompt decision.
  */
 
-import type { AgentState, BackendCapabilities } from "../../../shared/src/index.ts";
+import type { AgentState, BackendCapabilities } from "../../../../shared/src/index.ts";
 
 /** one tool invocation, already projected into canvas terms */
 export interface BackendToolCall {

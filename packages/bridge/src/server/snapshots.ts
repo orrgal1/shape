@@ -10,8 +10,8 @@
 
 import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { snapshotGraph } from "../../shared/src/delta.ts";
-import type { GraphDoc, GraphSnapshot, RevisionInfo } from "../../shared/src/index.ts";
+import { snapshotGraph } from "../../../shared/src/delta.ts";
+import type { GraphDoc, GraphSnapshot, RevisionInfo } from "../../../shared/src/index.ts";
 
 /** how many newest revisions survive a prune */
 const RETENTION = 50;

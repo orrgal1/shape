@@ -1,10 +1,10 @@
 /**
- * Reality layer extraction + drift computation.
+ * Reality layer extraction: the bridge's own read of the target repo, produced
+ * on the agent side because it is the half that sits on the user's disk.
  *
- * The reality layer is the bridge's own read of the target repo: workspace
- * packages become nodes, cross-package import specifiers become edges. Drift
- * compares that against the agent-authored intent layer. Both are derived —
- * the agent never writes either.
+ * Workspace packages become nodes, cross-package import specifiers become
+ * edges. The result is derived — the agent never writes it — and the server
+ * compares it against the intent layer (`server/drift.ts`).
  *
  * v1 scope (per CONTRACTS.md): pnpm/npm workspaces, TS sources, regex import
  * scan. Zero dependencies beyond node builtins.
@@ -14,15 +14,8 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { execFile, spawnSync } from "node:child_process";
 import path from "node:path";
 
-import type {
-  DriftMap,
-  GraphDoc,
-  IntentNode,
-  Phase,
-  RealityEdge,
-  RealityLayer,
-  RealityNode,
-} from "../../shared/src/index.ts";
+import { buildFileIndex, normalizeIndexPath, type FileIndex } from "../../../shared/src/fileindex.ts";
+import type { RealityEdge, RealityLayer, RealityNode } from "../../../shared/src/index.ts";
 
 // ---------------------------------------------------------------------------
 // Scan limits / static tables
@@ -46,16 +39,6 @@ const MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024;
 const IMPORT_RE =
   /\bfrom\s*["']([^"'\n]+)["']|\brequire\s*\(\s*["']([^"'\n]+)["']|\bimport\s*\(?\s*["']([^"'\n]+)["']/g;
 
-/** Phases at which a declared dependency is expected to exist in code. */
-const REALIZED_PHASES: Record<Phase, boolean> = {
-  idea: false,
-  concept: false,
-  component: false,
-  building: true,
-  built: true,
-  failed: true,
-};
-
 interface WorkspacePkg {
   name: string;
   /** absolute dir */
@@ -67,14 +50,6 @@ interface WorkspacePkg {
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
-
-/** Trim `./` prefix and trailing slashes; normalize separators to posix. */
-function normalizeRel(p: string): string {
-  let out = (path.sep === "/" ? p : p.split(path.sep).join("/")).trim();
-  while (out.startsWith("./")) out = out.slice(2);
-  while (out.length > 1 && out.endsWith("/")) out = out.slice(0, -1);
-  return out;
-}
 
 function unquote(s: string): string {
   const t = s.trim();
@@ -128,51 +103,16 @@ async function gitHead(cwd: string): Promise<string | null> {
 // ---------------------------------------------------------------------------
 
 /**
- * What git will admit exists under the scanned directory: tracked files plus
- * untracked-but-not-ignored files. Everything ignored is absent by construction,
- * so a `node_modules`-only package dir left behind by a branch switch cannot be
- * mistaken for a part of the project. Each worktree has its own index, so a
- * worktree path indexes that branch's files with no extra work.
- *
- * Paths are posix, relative to the directory that was scanned.
+ * `git ls-files` with no pathspec is already scoped to the directory it runs in
+ * and prints paths relative to it, which is exactly the subtree we want. What
+ * git admits: tracked files plus untracked-but-not-ignored ones. Each worktree
+ * has its own index, so a worktree path indexes that branch's files for free.
  */
-export interface GitFileIndex {
-  /** every admitted file, for membership tests */
-  files: ReadonlySet<string>;
-  /** every ancestor directory of those files */
-  dirs: ReadonlySet<string>;
-  /** the same files, sorted — deterministic scan order */
-  sorted: readonly string[];
-}
-
 const LS_FILES_ARGS = ["ls-files", "-z", "--cached", "--others", "--exclude-standard"];
 
-/**
- * `git ls-files` with no pathspec is already scoped to the directory it runs in
- * and prints paths relative to it, which is exactly the subtree we want.
- */
-function buildGitFileIndex(stdout: string): GitFileIndex {
-  const files = new Set<string>();
-  const dirs = new Set<string>();
-  for (const raw of stdout.split("\0")) {
-    if (raw.length === 0) continue;
-    const rel = normalizeRel(raw);
-    if (rel.length === 0 || rel === "." || rel === ".." || rel.startsWith("../")) continue;
-    files.add(rel);
-    for (let slash = rel.lastIndexOf("/"); slash > 0; ) {
-      const dir = rel.slice(0, slash);
-      if (dirs.has(dir)) break;
-      dirs.add(dir);
-      slash = dir.lastIndexOf("/");
-    }
-  }
-  const sorted = [...files].sort();
-  return { files, dirs, sorted };
-}
-
 /** null = not a git repo (or git unavailable) -> callers fall back to the fs walk. */
-export async function gitFileIndex(cwd: string): Promise<GitFileIndex | null> {
-  const { promise, resolve } = Promise.withResolvers<GitFileIndex | null>();
+export async function gitFileIndex(cwd: string): Promise<FileIndex | null> {
+  const { promise, resolve } = Promise.withResolvers<FileIndex | null>();
   const opts = { cwd, timeout: GIT_TIMEOUT_MS, windowsHide: true } as const;
   execFile("git", ["rev-parse", "--show-toplevel"], opts, (topErr) => {
     if (topErr) {
@@ -184,7 +124,7 @@ export async function gitFileIndex(cwd: string): Promise<GitFileIndex | null> {
       LS_FILES_ARGS,
       { ...opts, maxBuffer: MAX_GIT_OUTPUT_BYTES },
       (err, stdout) => {
-        resolve(err ? null : buildGitFileIndex(stdout));
+        resolve(err ? null : buildFileIndex(stdout.split("\0")));
       },
     );
   });
@@ -195,7 +135,7 @@ export async function gitFileIndex(cwd: string): Promise<GitFileIndex | null> {
  * Blocking twin of {@link gitFileIndex}, for the synchronous op gate. Two short
  * git reads on the survey turn's first op; the gate has no async seam to use.
  */
-export function gitFileIndexSync(cwd: string): GitFileIndex | null {
+export function gitFileIndexSync(cwd: string): FileIndex | null {
   const opts = {
     cwd,
     timeout: GIT_TIMEOUT_MS,
@@ -209,19 +149,7 @@ export function gitFileIndexSync(cwd: string): GitFileIndex | null {
   if (listed.error !== undefined || listed.status !== 0 || typeof listed.stdout !== "string") {
     return null;
   }
-  return buildGitFileIndex(listed.stdout);
-}
-
-/**
- * Does git admit this path? A directory counts when it contains at least one
- * admitted file. `rel` is interpreted relative to the indexed directory;
- * anything escaping that subtree is not part of the project.
- */
-export function gitIndexHas(index: GitFileIndex, rel: string): boolean {
-  const clean = normalizeRel(rel);
-  if (clean.length === 0 || clean === ".") return index.files.size > 0;
-  if (clean === ".." || clean.startsWith("../") || path.isAbsolute(clean)) return false;
-  return index.files.has(clean) || index.dirs.has(clean);
+  return buildFileIndex(listed.stdout.split("\0"));
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +206,7 @@ async function workspacePatterns(root: string): Promise<string[]> {
 
 /** Absolute candidate dirs for one workspace pattern. */
 async function expandPattern(root: string, pattern: string): Promise<string[]> {
-  const clean = normalizeRel(pattern);
+  const clean = normalizeIndexPath(pattern);
   if (clean.length === 0 || clean.startsWith("!")) return [];
 
   const globbed = /\/\*\*?$/.test(clean);
@@ -309,9 +237,9 @@ async function expandPattern(root: string, pattern: string): Promise<string[]> {
 async function packageAt(
   root: string,
   dir: string,
-  index: GitFileIndex | null,
+  index: FileIndex | null,
 ): Promise<WorkspacePkg | null> {
-  const relRaw = normalizeRel(path.relative(root, dir));
+  const relRaw = normalizeIndexPath(path.relative(root, dir));
   const rel = relRaw.length > 0 ? relRaw : ".";
   if (index !== null && !index.files.has(rel === "." ? "package.json" : `${rel}/package.json`)) {
     return null;
@@ -325,7 +253,7 @@ async function packageAt(
 
 async function discoverPackages(
   root: string,
-  index: GitFileIndex | null,
+  index: FileIndex | null,
 ): Promise<WorkspacePkg[]> {
   const patterns = await workspacePatterns(root);
   const candidates: string[] = [];
@@ -393,17 +321,18 @@ async function collectSources(
 /**
  * The git-truth counterpart of {@link collectSources}: the package's own
  * admitted sources, skipping files owned by a nested workspace package.
+ * `sorted` is the index's file set in deterministic scan order.
  */
 function sourcesFromIndex(
   root: string,
-  index: GitFileIndex,
+  sorted: readonly string[],
   pkg: WorkspacePkg,
   foreignRels: readonly string[],
   budget: Budget,
 ): string[] {
   const prefix = pkg.rel === "." ? "" : `${pkg.rel}/`;
   const files: string[] = [];
-  for (const rel of index.sorted) {
+  for (const rel of sorted) {
     if (budget.left <= 0) break;
     if (!rel.startsWith(prefix)) continue;
     if (SOURCE_EXTS[path.posix.extname(rel)] !== true) continue;
@@ -461,6 +390,8 @@ export async function extractReality(cwd: string): Promise<RealityLayer> {
   const byName = [...pkgs].sort((a, b) => b.name.length - a.name.length);
   const byDir = [...pkgs].sort((a, b) => b.dir.length - a.dir.length);
 
+  // sorted once here: the scan below walks it per package
+  const sorted = index === null ? [] : [...index.files].sort();
   const edges: RealityEdge[] = [];
   const seenEdges = new Set<string>();
   const budget: Budget = { left: MAX_FILES };
@@ -474,7 +405,7 @@ export async function extractReality(cwd: string): Promise<RealityLayer> {
             new Set(foreignRels.map((rel) => path.resolve(root, rel))),
             budget,
           )
-        : sourcesFromIndex(root, index, pkg, foreignRels, budget);
+        : sourcesFromIndex(root, sorted, pkg, foreignRels, budget);
     for (const file of files) {
       const text = await readTextFile(file, MAX_FILE_BYTES);
       if (text === null) continue;
@@ -498,227 +429,4 @@ export async function extractReality(cwd: string): Promise<RealityLayer> {
     extractedAt: new Date().toISOString(),
     head: await gitHead(root),
   };
-}
-
-/**
- * Drift rule v2 — hierarchy-transparent, one note per unsatisfied edge.
- *
- * Mapping: each intent node maps to the set of reality packages its own
- * `codeRefs` cover (longest package dir wins per ref, so a nested package beats
- * its parent). A node *covers* package P if it or any descendant maps into P —
- * hierarchy is transparent, so `the service` covers whatever its child
- * `no door lock` points at.
- *
- * A. Undeclared dependency. A reality edge P->Q is satisfied when either
- *    - some intent node's own codeRefs straddle both P and Q (the dependency
- *      lives inside one bubble; there is nothing to draw), or
- *    - some intent edge of any kind runs from a node covering P to a node
- *      covering Q. Direction matters here: imports have a source and a target,
- *      so a P->Q import is not answered by a Q->P edge.
- *    An unsatisfied edge yields exactly ONE note, on the owner of P: the
- *    highest-altitude node covering P (ties: a node whose own refs map into P
- *    first, then document order). Descendants stay clean; the web bubbles drift
- *    up to visible ancestors anyway.
- *
- * B. Phantom dependency (unchanged in spirit, same evaluation). A declared
- *    `depends` edge whose ends are both `building`+ is contradicted only when no
- *    reality edge connects any package covered by the source to any package
- *    covered by the target. That test is direction-blind on purpose: a backwards
- *    declaration is already reported once by rule A, and reporting it twice
- *    would be noise. Ends that share a package are skipped — an intra-package
- *    dependency can never show up as a cross-package import.
- */
-export function computeDrift(
-  doc: Pick<GraphDoc, "nodes" | "edges">,
-  reality: RealityLayer,
-): DriftMap {
-  const drift: DriftMap = {};
-  const note = (nodeId: string, text: string): void => {
-    const list = drift[nodeId];
-    if (list === undefined) {
-      drift[nodeId] = [text];
-    } else if (!list.includes(text)) {
-      list.push(text);
-    }
-  };
-
-  // Longest dir first so a nested package wins over its parent; a root package
-  // (dir ".") swallows every path, so it is always the last resort.
-  const realityByDir = [...reality.nodes]
-    .map((n) => ({ node: n, dir: normalizeRel(n.dir) }))
-    .sort((a, b) => {
-      if ((a.dir === ".") !== (b.dir === ".")) return a.dir === "." ? 1 : -1;
-      return b.dir.length - a.dir.length;
-    });
-
-  const intentById = new Map<string, IntentNode>();
-  for (const node of doc.nodes) intentById.set(node.id, node);
-
-  /** intent node id -> packages its OWN codeRefs land in */
-  const ownPkgs = new Map<string, Set<string>>();
-  for (const node of doc.nodes) {
-    const refs = node.codeRefs;
-    if (refs === undefined || refs.length === 0) continue;
-    let pkgs: Set<string> | undefined;
-    for (const raw of refs) {
-      const ref = normalizeRel(raw);
-      if (ref.length === 0) continue;
-      for (const cand of realityByDir) {
-        if (cand.dir === "." || ref === cand.dir || ref.startsWith(cand.dir + "/")) {
-          if (pkgs === undefined) pkgs = new Set<string>();
-          pkgs.add(cand.node.id);
-          break;
-        }
-      }
-    }
-    if (pkgs !== undefined) ownPkgs.set(node.id, pkgs);
-  }
-
-  /** Depth in the parentId tree; unknown/cyclic parents stop the walk. */
-  const depthOf = new Map<string, number>();
-  const depth = (id: string): number => {
-    const memo = depthOf.get(id);
-    if (memo !== undefined) return memo;
-    let d = 0;
-    const seen = new Set<string>([id]);
-    let cur = intentById.get(id)?.parentId ?? null;
-    while (cur !== null && !seen.has(cur)) {
-      seen.add(cur);
-      d += 1;
-      cur = intentById.get(cur)?.parentId ?? null;
-    }
-    depthOf.set(id, d);
-    return d;
-  };
-
-  /** intent node id -> packages covered by it or any descendant */
-  const covers = new Map<string, Set<string>>();
-  const addCover = (id: string, pkg: string): void => {
-    const bucket = covers.get(id);
-    if (bucket === undefined) covers.set(id, new Set<string>([pkg]));
-    else bucket.add(pkg);
-  };
-  for (const [id, pkgs] of ownPkgs) {
-    for (const pkg of pkgs) {
-      addCover(id, pkg);
-      // Lift to every ancestor; the seen-set doubles as the cycle guard.
-      const seen = new Set<string>([id]);
-      let cur = intentById.get(id)?.parentId ?? null;
-      while (cur !== null && !seen.has(cur)) {
-        seen.add(cur);
-        addCover(cur, pkg);
-        cur = intentById.get(cur)?.parentId ?? null;
-      }
-    }
-  }
-
-  /** package -> node ids covering it, in document order */
-  const coveringNodes = new Map<string, string[]>();
-  for (const node of doc.nodes) {
-    const pkgs = covers.get(node.id);
-    if (pkgs === undefined) continue;
-    for (const pkg of pkgs) {
-      const bucket = coveringNodes.get(pkg);
-      if (bucket === undefined) coveringNodes.set(pkg, [node.id]);
-      else bucket.push(node.id);
-    }
-  }
-
-  /** The top-level bubble that owns a package, or null if nothing covers it. */
-  const ownerOf = (pkg: string): string | null => {
-    const candidates = coveringNodes.get(pkg);
-    if (candidates === undefined || candidates.length === 0) return null;
-    let best: string | null = null;
-    let bestDepth = Number.POSITIVE_INFINITY;
-    let bestOwn = false;
-    for (const id of candidates) {
-      const d = depth(id);
-      const own = ownPkgs.get(id)?.has(pkg) === true;
-      if (d < bestDepth || (d === bestDepth && own && !bestOwn)) {
-        best = id;
-        bestDepth = d;
-        bestOwn = own;
-      }
-    }
-    return best;
-  };
-
-  const realityLabel = new Map<string, string>();
-  for (const n of reality.nodes) realityLabel.set(n.id, n.label);
-
-  // A. undeclared dependency: code imports it, the canvas does not say so.
-  for (const edge of reality.edges) {
-    if (edge.source === edge.target) continue;
-    if (!coveringNodes.has(edge.source) || !coveringNodes.has(edge.target)) continue;
-
-    let satisfied = false;
-    for (const pkgs of ownPkgs.values()) {
-      if (pkgs.has(edge.source) && pkgs.has(edge.target)) {
-        satisfied = true;
-        break;
-      }
-    }
-    if (!satisfied) {
-      for (const e of doc.edges) {
-        if (
-          covers.get(e.source)?.has(edge.source) === true &&
-          covers.get(e.target)?.has(edge.target) === true
-        ) {
-          satisfied = true;
-          break;
-        }
-      }
-    }
-    if (satisfied) continue;
-
-    const owner = ownerOf(edge.source);
-    if (owner === null) continue;
-    const targetPkg = realityLabel.get(edge.target) ?? edge.target;
-    const targetOwner = ownerOf(edge.target);
-    const targetLabel = targetOwner === null ? null : intentById.get(targetOwner)?.label ?? null;
-    note(
-      owner,
-      targetLabel === null
-        ? `code imports ${targetPkg} but no edge is declared`
-        : `code imports ${targetPkg} (node "${targetLabel}") but no edge is declared`,
-    );
-  }
-
-  // B. phantom dependency: the canvas declares it, the code has no such import.
-  for (const edge of doc.edges) {
-    if (edge.kind !== "depends") continue;
-    const source = intentById.get(edge.source);
-    const target = intentById.get(edge.target);
-    if (source === undefined || target === undefined) continue;
-    if (!REALIZED_PHASES[source.phase] || !REALIZED_PHASES[target.phase]) continue;
-    const from = covers.get(edge.source);
-    const to = covers.get(edge.target);
-    if (from === undefined || to === undefined) continue;
-    // Same package on both ends can never show a cross-package import.
-    let shared = false;
-    for (const p of from) {
-      if (to.has(p)) {
-        shared = true;
-        break;
-      }
-    }
-    if (shared) continue;
-    let realized = false;
-    for (const re of reality.edges) {
-      if (
-        (from.has(re.source) && to.has(re.target)) ||
-        (from.has(re.target) && to.has(re.source))
-      ) {
-        realized = true;
-        break;
-      }
-    }
-    if (realized) continue;
-    note(
-      edge.source,
-      `declared dependency on "${target.label}" has no corresponding import in code`,
-    );
-  }
-
-  return drift;
 }

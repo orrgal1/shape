@@ -6,7 +6,7 @@
 
 import { RpcClient } from "../rpc.ts";
 import type { RpcFrame } from "../rpc.ts";
-import type { BackendCapabilities } from "../../../shared/src/index.ts";
+import type { BackendCapabilities } from "../../../../shared/src/index.ts";
 import type { Backend, BackendEvents, BackendState } from "./types.ts";
 
 const CAPABILITIES: BackendCapabilities = {

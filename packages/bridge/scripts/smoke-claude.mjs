@@ -46,13 +46,15 @@ const flagAt = (argv, flag) => argv.indexOf(flag);
 const REPO_ROOT = resolve(process.cwd(), "..", "..");
 const LINK_MCP = join(REPO_ROOT, "packages", "link", "src", "mcp.ts");
 const LINK_HOOK = join(REPO_ROOT, "packages", "link", "src", "hook.ts");
-const BRIDGE_URL = `ws://127.0.0.1:${String(PORT)}/ws`;
+// what the runtime hands a backend: its own loopback link endpoint, not the
+// browser hub — the MCP server and the hooks talk agent frames, not client ones
+const BRIDGE_URL = `ws://127.0.0.1:${String(PORT)}/link`;
 
 // ---------------------------------------------------------------------------
 // 1. the adapter in-process: modes, capabilities, argv
 // ---------------------------------------------------------------------------
 
-const { ClaudeBackend } = await import(new URL("../src/backend/claude.ts", import.meta.url));
+const { ClaudeBackend } = await import(new URL("../src/agent/backend/claude.ts", import.meta.url));
 
 {
   const tui = new ClaudeBackend({ command: ["claude"] });
@@ -158,7 +160,7 @@ const { ClaudeBackend } = await import(new URL("../src/backend/claude.ts", impor
 // ---------------------------------------------------------------------------
 
 {
-  const { PtyManager } = await import(new URL("../src/pty.ts", import.meta.url));
+  const { PtyManager } = await import(new URL("../src/agent/pty.ts", import.meta.url));
   const sent = [];
   const pty = new PtyManager({ cwd: process.cwd(), broadcast: (msg) => sent.push(msg) });
 
@@ -345,7 +347,7 @@ try {
   const spawnedMcp = JSON.parse(argv[argv.indexOf("--mcp-config") + 1]);
   check(
     "the spawned link points at THIS bridge's socket",
-    spawnedMcp.mcpServers.shape.env.SHAPE_BRIDGE_URL === `ws://127.0.0.1:${String(PORT)}/ws`,
+    spawnedMcp.mcpServers.shape.env.SHAPE_BRIDGE_URL === BRIDGE_URL,
     JSON.stringify(spawnedMcp.mcpServers.shape.env),
   );
 

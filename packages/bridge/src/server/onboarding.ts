@@ -1,163 +1,51 @@
 /**
- * Brownfield onboarding (onboarding.md): mechanics produce the skeleton, the
- * model produces the meaning, drift rendering verifies the result.
+ * Brownfield onboarding, server half (onboarding.md): the survey prompt the
+ * model answers, and the validation that holds it to what the project contains.
+ *
+ * Pure: the project is known through its `FileIndex`, never through the disk —
+ * the mechanics that read files live in `agent/onboarding-fs.ts`.
  */
 
-import { existsSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
-import { layerOf } from "../../shared/src/index.ts";
-import type { CanvasOp, GraphDoc, IntentNode, RealityLayer } from "../../shared/src/index.ts";
-import { gitFileIndexSync, gitIndexHas, type GitFileIndex } from "./reality.ts";
+import { fileIndexHas, type FileIndex } from "../../../shared/src/fileindex.ts";
+import { layerOf } from "../../../shared/src/index.ts";
+import type { GraphDoc, IntentNode } from "../../../shared/src/index.ts";
 import type { GateVeto, OpGate } from "./store.ts";
+
+/**
+ * A codeRef spelled the way the index spells paths: posix, root-relative, with
+ * `.` and `..` collapsed the way resolving it against the project root would.
+ * null = the ref names nothing inside the project (it is absolute, or it walks
+ * out of the root), which the gate treats like a path the index never saw.
+ */
+function refInsideProject(ref: string): string | null {
+  const clean = ref.replace(/\\/g, "/").trim();
+  if (clean.length === 0 || clean.startsWith("/") || /^[A-Za-z]:\//.test(clean)) return null;
+  const segments: string[] = [];
+  for (const seg of clean.split("/")) {
+    if (seg.length === 0 || seg === ".") continue;
+    if (seg !== "..") {
+      segments.push(seg);
+      continue;
+    }
+    if (segments.pop() === undefined) return null;
+  }
+  return segments.join("/");
+}
 
 /** Verbatim from understand.md — the bar a bubble must clear to exist. */
 const BOUNDARY_TEST =
   "can you state what it promises to the rest of the system in one sentence, and would deleting it break a named set of importers?";
 
-const SKIP_DIRS: Record<string, true> = {
-  ".git": true,
-  ".next": true,
-  ".venv": true,
-  ".shape": true,
-  __pycache__: true,
-  build: true,
-  coverage: true,
-  dist: true,
-  node_modules: true,
-  out: true,
-  target: true,
-  venv: true,
-};
-
-const SOURCE_EXTENSIONS: Record<string, true> = {
-  ".go": true,
-  ".js": true,
-  ".jsx": true,
-  ".mjs": true,
-  ".py": true,
-  ".rs": true,
-  ".ts": true,
-  ".tsx": true,
-};
-
-/** node-id slug: ^[a-z0-9][a-z0-9-]*$ */
-function slug(name: string): string {
-  const cleaned = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+/, "")
-    .replace(/-+$/, "");
-  return cleaned.length === 0 ? "pkg" : cleaned;
-}
-
-/**
- * Cheap bounded source scan — the `targetHasCode` fallback for repos the reality
- * extractor cannot describe (non-pnpm, non-TS).
- */
-export async function hasSourceCode(cwd: string): Promise<boolean> {
-  const queue: Array<{ dir: string; depth: number }> = [{ dir: cwd, depth: 0 }];
-  let visited = 0;
-  while (queue.length > 0 && visited < 200) {
-    const next = queue.shift();
-    if (next === undefined) break;
-    visited++;
-    let entries;
-    try {
-      entries = await readdir(next.dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        if (entry.name.startsWith(".") && SKIP_DIRS[entry.name] !== true) continue;
-        if (SKIP_DIRS[entry.name] === true) continue;
-        if (next.depth < 6) queue.push({ dir: join(next.dir, entry.name), depth: next.depth + 1 });
-        continue;
-      }
-      const dot = entry.name.lastIndexOf(".");
-      if (dot > 0 && SOURCE_EXTENSIONS[entry.name.slice(dot)] === true) return true;
-    }
-  }
-  return false;
-}
-
-async function packageDescription(cwd: string, dir: string): Promise<string | null> {
-  let text: string;
-  try {
-    text = await readFile(join(cwd, dir, "package.json"), "utf8");
-  } catch {
-    return null;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (parsed === null || typeof parsed !== "object" || !("description" in parsed)) return null;
-  const description = parsed.description;
-  if (typeof description !== "string") return null;
-  const oneLine = description.replace(/\s+/g, " ").trim();
-  if (oneLine.length === 0) return null;
-  return oneLine.length > 200 ? `${oneLine.slice(0, 197)}...` : oneLine;
-}
-
-/**
- * Stage 1: one `component` node per workspace package plus a `depends` edge per
- * cross-package reality edge. Ground truth before the model says a word.
- *
- * Deliberately FLAT: mechanics know packages, not domains. The survey turn owns
- * grouping (prompt rule 4 — 3-5 bubbles per layer), so this stays one bubble per
- * package however many there are.
- */
-export async function synthesizeSkeleton(cwd: string, reality: RealityLayer): Promise<CanvasOp[]> {
-  const idByRealityId: Record<string, string> = {};
-  const taken = new Set<string>();
-  const ops: CanvasOp[] = [];
-
-  for (const pkg of reality.nodes) {
-    const base = slug(pkg.label);
-    let id = base;
-    for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
-    taken.add(id);
-    idByRealityId[pkg.id] = id;
-
-    const shortName = pkg.label.slice(pkg.label.lastIndexOf("/") + 1);
-    const description = await packageDescription(cwd, pkg.dir);
-    ops.push({
-      op: "upsert_node",
-      node: {
-        id,
-        parentId: null,
-        label: shortName.length > 60 ? shortName.slice(0, 60) : shortName,
-        summary: description ?? `Workspace package at ${pkg.dir} — survey pending.`,
-        phase: "built",
-        codeRefs: [pkg.dir],
-      },
-    });
-  }
-
-  const seen = new Set<string>();
-  for (const edge of reality.edges) {
-    const source = idByRealityId[edge.source];
-    const target = idByRealityId[edge.target];
-    if (source === undefined || target === undefined || source === target) continue;
-    const id = `${source}--${target}`;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    ops.push({ op: "upsert_edge", edge: { id, source, target, kind: "depends" } });
-  }
-
-  return ops;
-}
-
 /**
  * Onboarding validation mode: for the duration of the survey turn, structure the
- * agent cannot point at is rejected — and "pointing at it" means git tracks it.
- * A gitignored leftover directory (a `packages/x/` holding only `node_modules`
- * after a branch switch) exists on disk but is not part of the project, so it
- * cannot back a bubble. Outside a git repo, existence on disk is all we have.
+ * agent cannot point at is rejected — and "pointing at it" means the project's
+ * file index admits it. A gitignored leftover directory (a `packages/x/` holding
+ * only `node_modules` after a branch switch) exists on disk but is not in the
+ * index, so it cannot back a bubble.
+ *
+ * The index arrives from the agent side (`agent/reality.ts`), already scoped to
+ * the target project: this half never touches a filesystem, so a remote project
+ * is validated exactly like a local one.
  *
  * Product bubbles own no code, so codeRefs cannot ground them: what makes a
  * capability real is the build bubbles it `realizes`. One that names none is
@@ -167,18 +55,10 @@ export async function synthesizeSkeleton(cwd: string, reality: RealityLayer): Pr
  * whole build layer, and shared validation already keeps it unique
  * (`op/second-root`), so it passes with an empty `realizes`.
  *
- * The index is read at most once per gate (i.e. once per survey turn), and the
- * gate is created per canvas call, so build bubbles admitted earlier in the SAME
- * batch already count as real for a product bubble later in it.
+ * The gate is created per canvas call, so build bubbles admitted earlier in the
+ * SAME batch already count as real for a product bubble later in it.
  */
-export function onboardingOpGate(cwd: string, doc: Pick<GraphDoc, "nodes">): OpGate {
-  let index: GitFileIndex | null | undefined;
-  const resolvesInProject = (ref: string): boolean => {
-    if (index === undefined) index = gitFileIndexSync(cwd);
-    if (index === null) return existsSync(resolve(cwd, ref));
-    return gitIndexHas(index, relative(cwd, resolve(cwd, ref)));
-  };
-
+export function onboardingOpGate(index: FileIndex, doc: Pick<GraphDoc, "nodes">): OpGate {
   const admittedBuildIds = new Set<string>();
   const existing = (id: unknown): IntentNode | undefined =>
     typeof id === "string" ? doc.nodes.find((n) => n.id === id) : undefined;
@@ -244,7 +124,8 @@ export function onboardingOpGate(cwd: string, doc: Pick<GraphDoc, "nodes">): OpG
       };
     }
     for (const [i, ref] of refs.entries()) {
-      if (!resolvesInProject(ref)) {
+      const rel = refInsideProject(ref);
+      if (rel === null || !fileIndexHas(index, rel)) {
         return {
           code: "onboarding/unknown-coderef",
           severity: "error",

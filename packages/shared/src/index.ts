@@ -6,10 +6,17 @@
  * TypeScript (no enums, no namespaces) and dependency-free.
  */
 
-import type { LinkClientMsg, LinkServerMsg } from "./link.ts";
 import type { PtyClientMsg, PtyServerMsg } from "./pty.ts";
 
-export type { AgentEvent, LinkClientMsg, LinkServerMsg } from "./link.ts";
+export type {
+  AgentEvent,
+  AgentProject,
+  AgentSession,
+  AgentToServerMsg,
+  LinkClientMsg,
+  LinkServerMsg,
+  ServerToAgentMsg,
+} from "./link.ts";
 export type { PtyClientMsg, PtyServerMsg } from "./pty.ts";
 
 // ---------------------------------------------------------------------------
@@ -729,7 +736,12 @@ export function applyOps(doc: GraphDoc, ops: CanvasOp[]): ApplyResult {
 // ---------------------------------------------------------------------------
 
 export const BRIDGE_PORT = 4400;
+/** browsers */
 export const BRIDGE_WS_PATH = "/ws";
+/** harness-side processes (MCP server, hooks) → the agent, loopback only */
+export const LINK_WS_PATH = "/link";
+/** agents → a Shape server (remote mode) */
+export const AGENT_WS_PATH = "/agent";
 
 /** one git worktree of the current target's repository */
 export interface WorktreeInfo {
@@ -840,8 +852,7 @@ export type ServerMsg =
   /** broadcast answer to `discover`, and re-broadcast whenever the bridge re-scans */
   | { type: "sessions"; sessions: DiscoveredSession[] }
   | { type: "error"; message: string }
-  | PtyServerMsg
-  | LinkServerMsg;
+  | PtyServerMsg;
 
 export type ClientMsg =
   | { type: "utterance"; referent: Referent | null; text: string }
@@ -854,5 +865,4 @@ export type ClientMsg =
   | { type: "discover" }
   /** retarget this bridge onto a discovered session (by pid), resuming it when it has an id */
   | { type: "adopt"; pid: number }
-  | PtyClientMsg
-  | LinkClientMsg;
+  | PtyClientMsg;

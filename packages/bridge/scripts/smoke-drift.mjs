@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { computeDrift } from "../src/reality.ts";
+import { computeDrift } from "../src/server/drift.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const results = [];

@@ -3,38 +3,62 @@
 Settled 2026-08-28. `packages/shared/src/index.ts` is the machine-readable form of this
 document; when they disagree, the TS file wins.
 
-## Topology
+## Topology (split 2026-09-03, PLAN.md Phase 0)
 
 ```
 browser (Vite dev :5173)
-   │  WebSocket  ws://127.0.0.1:4400/ws
+   │  WebSocket  ws://127.0.0.1:4400/ws            ServerMsg / ClientMsg
    ▼
-bridge (Node 26, packages/bridge)  — graph store, steering composer, reality extractor
-   │  JSONL over stdio (rpc.md protocol v1)
+SERVER half   packages/bridge/src/server/   ProjectRoom + ShapeServer
+   │  graph store, snapshots, steering composer, preamble, drift, activity, onboarding gate
+   │  agent link: AgentToServerMsg / ServerToAgentMsg (shared/src/link.ts)
+   │  local mode = memoryLinkPair() in one process; remote = WebSocket /agent (Phase 1)
    ▼
-omp --mode rpc   (spawned child, cwd = target project)
+AGENT half    packages/bridge/src/agent/    AgentRuntime
+   │  Backend adapter (spawn/adopt), reality extraction, worktrees, discover, pty, fs checks
+   │  loopback link  ws://127.0.0.1:4400/link     LinkClientMsg / LinkServerMsg
+   ▼                                               (MCP server, hooks — never the server)
+harness  (omp --mode rpc child | claude TUI/headless | …)   cwd = target project
 ```
 
-- Bridge spawns `omp --mode rpc` in the target project directory (`--cwd` flag, default
-  `process.cwd()`).
-- Bridge registers ONE host tool via `set_host_tools`: `canvas` (schema below). Tool calls
-  arrive as `host_tool_call` frames; bridge validates + applies to the graph store, answers
-  with `host_tool_result`, and broadcasts the new graph to browsers.
-- Bridge sends the graph-discipline preamble (packages/bridge/src/preamble.ts) prepended to
-  the FIRST user prompt of a session.
-- Steering: browser sends an utterance + optional referent; bridge composes an addressed
-  instruction and delivers it via `{type:"steer"}` when `get_state().isStreaming`, else
-  `{type:"prompt"}`.
+`packages/bridge/src/index.ts` is local mode: one `SocketServer` (`wsserver.ts`) mounting
+`/ws` for the server half and `/link` for the agent half, joined by an in-memory link.
+The two halves meet ONLY in `shared/src/link.ts` and `index.ts`; `server/` never imports
+`agent/`.
+
+- The agent spawns the harness in the target project directory (`--cwd`, default
+  `process.cwd()`) and hands it `bridgeUrl` = the loopback link URL.
+- The harness writes to the canvas through its adapter (`canvas` host tool via
+  `set_host_tools` for omp) or the loopback link; either way the agent forwards
+  `canvas_call { id, args }` to the server, which validates + applies to the graph store,
+  answers `canvas_result`, and broadcasts the new graph to browsers.
+- The server owns the graph-discipline preamble (`server/preamble.ts`) and hands it to the
+  agent in `attached`; the agent prepends it to the FIRST fresh prompt of a harness session.
+- Steering: browser sends an utterance + optional referent; the server composes the
+  addressed instruction (`server/steering.ts`) and sends `deliver { id, body }`; the AGENT
+  decides the mode — `steer` iff `capabilities.steerMidTurn && state().streaming`, else
+  `prompt` — and answers `delivered { id, mode, queued }`, from which the server writes the
+  "queued for the next turn" transcript line. Only the agent has live backend state; a
+  server-side state round trip per utterance would add a hop and still race the turn edge.
+- Attach: the agent sends `attach` (project key = sha256(hostname:realpath(cwd)), label,
+  cwd, backend info, targetHasCode, session, reality, worktrees, sessions, recents) AFTER
+  its backend started, so the first hello carries the harness session; loopback frames that
+  arrive earlier (a hook's SessionStart) queue until `attached`. A second `attach` on the
+  same link is a retarget (`switch_project` / `adopt` completed): the server persists the old
+  store, opens the new project's, and re-hellos every browser.
+- Filesystem facts the server needs are requests over the link, answered by id:
+  `list_worktrees`, `discover`, `file_index` (tracked files → the onboarding gate's
+  `FileIndex`, shared/src/fileindex.ts), `synthesize_skeleton`, `extract_reality`.
 - RPC client: minimal hand-rolled JSONL client per omp rpc.md, protocol v1 only (no v2
   negotiation, no rpc_chunk handling — our frames are small). Do NOT depend on
   @oh-my-pi packages.
-- The omp leg is ONE adapter behind the backend seam (§Backends): the bridge itself does
-  not know omp's frames.
+- The omp leg is ONE adapter behind the backend seam (§Backends): nothing above the
+  adapter knows omp's frames.
 
 ## Backends (seam, 2026-09-02)
 
 Shape drives a coding-agent CLI by configuration; `omp` is the first adapter, not the
-assumption. `packages/bridge/src/backend/types.ts` is the whole surface:
+assumption. `packages/bridge/src/agent/backend/types.ts` is the whole surface:
 
 ```ts
 interface Backend {
@@ -53,8 +77,9 @@ interface TerminalSource {
 }
 ```
 
-`bridgeUrl` is `ws://127.0.0.1:<port>/ws` of THIS bridge, so an adapter can point the link
-(§The link) at it — an MCP server for the canvas, a hook for events. `resumeSessionId` is
+`bridgeUrl` is `ws://127.0.0.1:<port>/link` — the AGENT's loopback link endpoint, never the
+server — so an adapter can point the link
+(§The loopback link) at it — an MCP server for the canvas, a hook for events. `resumeSessionId` is
 passed only when an `adopt` named a session to continue; `capabilities.resume` says whether
 the adapter can honor it. `terminal()` is the harness's own terminal surface: when it
 returns non-null, `PtyManager.attach(source)` makes the terminal pane show that TUI instead
@@ -225,8 +250,8 @@ Client → server (`ClientMsg`):
   bootstrap path for an adopted project.
 
 Terminal frames live in `packages/shared/src/pty.ts` (`PtyClientMsg` / `PtyServerMsg`) and
-are merged into `ClientMsg` / `ServerMsg`; the bridge answers them from `PtyManager`
-(`packages/bridge/src/pty.ts`) BEFORE any agent routing, so typing in the terminal never
+are merged into `ClientMsg` / `ServerMsg`; the server forwards them to the agent's `PtyManager`
+(`packages/bridge/src/agent/pty.ts`) BEFORE any agent routing, so typing in the terminal never
 queues behind a turn. One shared shell per bridge, retargeted on `switch_project`, so
 `pty_data` is broadcast to every attached client. `BackendCapabilities.terminal` says
 whether a pane is worth showing at all.
@@ -238,7 +263,7 @@ when `targetHasCode` and `nodes.length === 0`. It also carries
 re-derived on every `switch_project`.
 
 `DiscoveredSession` (shared/) is one row of the bridge's `discoverSessions()`
-(`packages/bridge/src/discover.ts`): `{ harness: "omp" | "claude" | "codex" | "opencode" |
+(`packages/bridge/src/agent/discover.ts`): `{ harness: "omp" | "claude" | "codex" | "opencode" |
 "cursor", pid, command, cwd, sessionId, sessionFile, startedAt, resumeCommand, attach:
 "socket" | "daemon" | "http" | "none", spawnedByShape }`. Rows with `spawnedByShape` are
 excluded from the wire: those are Shape's own harness children, and adopting one is a loop.
@@ -246,26 +271,36 @@ excluded from the wire: those are Shape's own harness children, and adopting one
 app-server daemon, opencode's HTTP port); adopting today always starts a fresh harness for
 that project and resumes the session by id rather than joining the running process.
 
-## The link (external process ↔ bridge, 2026-09-02)
+## The loopback link (harness-side process ↔ agent, 2026-09-02; moved to `/link` 2026-09-03)
 
-Anything that is not a browser speaks two extra frames on the same socket, defined in
-`packages/shared/src/link.ts` and merged into `ClientMsg` / `ServerMsg`:
+Anything that runs next to the harness and is not the harness itself speaks two frames
+over `ws://127.0.0.1:<port>/link`, served by the AGENT half (`packages/bridge/src/agent/link.ts`),
+defined in `packages/shared/src/link.ts` as `LinkClientMsg` / `LinkServerMsg`:
 
-- `canvas_call` — `{ id, args }` a host-tool round trip carried over the socket. The bridge
-  applies the ops and answers `canvas_result` `{ id, text, isError }` to THAT socket only
-  (a canvas result is nobody else's business; the `graph` broadcast is the public part).
-  This is how a harness that cannot host a tool for us still writes to the canvas — Shape
-  ships an MCP server (`packages/link/src/mcp.ts`, tool `canvas`) that is just a caller.
+- `canvas_call` — `{ id, args }` a host-tool round trip carried over the socket. The agent
+  forwards it to the server, which applies the ops; `canvas_result` `{ id, text, isError }`
+  comes back to THAT socket only (a canvas result is nobody else's business; the `graph`
+  broadcast is the public part). This is how a harness that cannot host a tool for us still
+  writes to the canvas — Shape ships an MCP server (`packages/link/src/mcp.ts`, tool
+  `canvas`) that is just a caller.
 - `agent_event` — `{ event: AgentEvent }` one already-projected harness event
   (`state` | `text` | `tool_start` | `tool_end` | `turn_end` | `session`). It feeds the SAME
-  `BackendEvents` object the active backend uses, so an adapter with no native event stream
+  `BackendEvents` sink the active backend uses, so an adapter with no native event stream
   (Claude Code's hooks, a transcript tail) lights up activity, transcript and agent state
-  through the bridge's normal path.
+  through the normal path.
 
-Both are routed in `packages/bridge/src/external.ts` (`isLinkMsg` → `ExternalIo.handle`),
-immediately after the terminal branch and before any agent routing. The link is trusted
-exactly as much as the browser: the socket is bound to 127.0.0.1 and every frame was
-validated in `ws.ts`.
+A frame the agent cannot parse is answered `error { message: "unparseable client message" }`
+on that socket. The loopback link stays local by design: harness-side processes never hold
+server credentials, and the endpoint is bound to 127.0.0.1. `SHAPE_BRIDGE_URL` overrides the
+default `ws://127.0.0.1:4400/link` for both link processes.
+
+## The agent link (agent ↔ server, 2026-09-03)
+
+`AgentToServerMsg` / `ServerToAgentMsg` in `packages/shared/src/link.ts` is the ONLY
+contract between `packages/bridge/src/agent/` and `packages/bridge/src/server/`; the doc
+comments there are normative. Carried by `packages/bridge/src/transport.ts` (`ServerEnd` /
+`AgentEnd`; `memoryLinkPair()` in local mode). Every frame after `attach` is scoped to its
+link; the server never trusts a project id inside a frame body.
 
 ## Worktrees (user decision 2026-08-28: toggle first, compare later)
 
@@ -354,7 +389,9 @@ tools, map the file path against intent nodes' `codeRefs` prefixes → those nod
 
 Interface (fixed): `extractReality(cwd: string): Promise<RealityLayer>` and
 `computeDrift(doc: Pick<GraphDoc,"nodes"|"edges">, reality: RealityLayer): DriftMap`
-in `packages/bridge/src/reality.ts`. Zero new dependencies.
+— `extractReality` in `packages/bridge/src/agent/reality.ts` (agent: needs the repo),
+`computeDrift` in `packages/bridge/src/server/drift.ts` (server: pure over the doc). Zero new
+dependencies.
 
 Trigger: on terminal `agent_end` (`isTerminal !== false`), if `git rev-parse HEAD` in the
 target cwd changed since last extraction (or first run with any commit). v1 scope: pnpm/TS
@@ -384,7 +421,7 @@ no mic/WebSpeech in v1.
 
 Every accepted change bumps `rev`; the bridge then persists a canonical snapshot of the
 intent layer at `<target>/.shape/revisions/<rev>.json` (`SnapshotStore` in
-packages/bridge/src/snapshots.ts). One file per rev, never rewritten; retention keeps the
+packages/bridge/src/server/snapshots.ts). One file per rev, never rewritten; retention keeps the
 newest 50 and prunes the rest. Snapshots hold nodes + edges only — reality and drift are
 re-derivable, so they stay out.
 

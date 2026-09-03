@@ -18,10 +18,10 @@
 
 import { readFile } from "node:fs/promises";
 import WebSocket from "ws";
-import { BRIDGE_PORT, BRIDGE_WS_PATH } from "../../shared/src/index.ts";
+import { BRIDGE_PORT, LINK_WS_PATH } from "../../shared/src/index.ts";
 import type { AgentEvent } from "../../shared/src/link.ts";
 
-const BRIDGE_URL = process.env.SHAPE_BRIDGE_URL ?? `ws://127.0.0.1:${BRIDGE_PORT}${BRIDGE_WS_PATH}`;
+const BRIDGE_URL = process.env.SHAPE_BRIDGE_URL ?? `ws://127.0.0.1:${BRIDGE_PORT}${LINK_WS_PATH}`;
 
 /** the harness is waiting on us: the whole run, connect included, fits in this */
 const HOOK_BUDGET_MS = 2000;

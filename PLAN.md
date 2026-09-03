@@ -95,7 +95,7 @@ Server → agent:
 - `abort`.
 - `switch { path, backend?, resumeSessionId? }` — today's `switch_project`/`adopt` body; the agent re-targets, then sends a fresh `attach` (a switch is a new room from the server's view).
 - `discover`, `extract_reality`, `list_worktrees` — requests.
-- `check_paths { id, paths }`, `synthesize_skeleton { id }` — onboarding requests (fs lives with the agent; the gate stays server-side and consults `check_paths`).
+- `file_index { id }`, `synthesize_skeleton { id }` — onboarding requests (fs lives with the agent). The agent answers `file_index` with every tracked file (or a bounded walk for a non-git target); the server builds a `FileIndex` (shared/src/fileindex.ts) from it ONCE per onboarding and the gate stays synchronous inside `applyCanvasCall`. (Replaces the per-call `check_paths` round trip first drafted here.)
 - `pty_open | pty_input | pty_resize | pty_close` — as today.
 
 Transport: WebSocket at `/agent` (distinct path from the browser's `/ws`), JSON frames,
@@ -136,7 +136,15 @@ Reality and drift are never stored (re-derivable), same as today.
 
 Each phase ships working software; the local experience never regresses.
 
-### Phase 0 — In-process split (no wire change)
+### Phase 0 — In-process split (no wire change) — DONE 2026-09-03
+
+Landed as directories inside `packages/bridge` (`src/server/`, `src/agent/`, joined only by
+`shared/src/link.ts` + `src/transport.ts` + `src/index.ts`), not as separate packages: both
+halves share `ws`, and the only dependency worth isolating (`node-pty`, agent-only) matters
+at SaaS packaging time, not before. The loopback link moved from `/ws` to `/link`
+(`LINK_WS_PATH`); local mode serves both paths on one port via `src/wsserver.ts`. The
+preamble travels once in `attached`, not per `deliver`. All smokes pass unchanged in what
+they assert (only endpoints and import paths moved).
 
 Refactor `Bridge` into `ProjectRoom` (server side: store, snapshots, composer, preamble
 decision, drift, activity, onboarding orchestration, browser hub) and `AgentRuntime` (agent
@@ -207,10 +215,8 @@ auto-update channel. Designed but not scheduled; nothing in Phases 0–3 blocks 
 - **Reconnect semantics.** An agent reconnecting mid-turn must not double-deliver; `deliver`
   ids are idempotent on the agent (dedupe last N ids) and the server re-sends only
   unacknowledged deliveries.
-- **Onboarding round trips.** The path gate today is synchronous inside `applyCanvasCall`;
-  with a remote agent it becomes async. Plan: gate runs after `applyOps` on a shadow doc,
-  `check_paths` resolves, then commit or reject — one extra hop per onboarding canvas call
-  only, never on normal steering.
+- **Onboarding round trips.** Resolved in Phase 0: the file index is fetched once when
+  onboarding arms, so the gate stays synchronous; no per-call hop.
 - **Clock/ordering.** `agent_event` and `canvas_call` share one socket, so per-agent order is
   preserved; cross-room order is irrelevant.
 - **Latency on steer.** Browser→server→agent→harness adds one hop over today; well under the

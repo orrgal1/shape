@@ -5,7 +5,7 @@
 
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
-import { applyOps, emptyGraph } from "../../shared/src/index.ts";
+import { applyOps, emptyGraph } from "../../../shared/src/index.ts";
 import type {
   CanvasOp,
   DriftMap,
@@ -14,7 +14,7 @@ import type {
   IntentNode,
   OpRejection,
   RealityLayer,
-} from "../../shared/src/index.ts";
+} from "../../../shared/src/index.ts";
 
 /** receipt a gate supplies for a vetoed op; subject.path is op-relative
  *  (e.g. "/node/codeRefs/0") — the store absolutizes it to /ops/<i>/... */

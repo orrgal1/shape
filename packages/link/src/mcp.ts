@@ -21,13 +21,13 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import WebSocket from "ws";
 import {
   BRIDGE_PORT,
-  BRIDGE_WS_PATH,
+  LINK_WS_PATH,
   CANVAS_TOOL_DESCRIPTION,
   CANVAS_TOOL_SCHEMA,
 } from "../../shared/src/index.ts";
 import type { LinkServerMsg } from "../../shared/src/link.ts";
 
-const BRIDGE_URL = process.env.SHAPE_BRIDGE_URL ?? `ws://127.0.0.1:${BRIDGE_PORT}${BRIDGE_WS_PATH}`;
+const BRIDGE_URL = process.env.SHAPE_BRIDGE_URL ?? `ws://127.0.0.1:${BRIDGE_PORT}${LINK_WS_PATH}`;
 
 /** the bridge answers a canvas call in milliseconds; this is only a deadlock guard */
 const CALL_TIMEOUT_MS = 20_000;

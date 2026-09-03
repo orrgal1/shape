@@ -12,21 +12,11 @@
  *   transcript lines and agent state for free, through the bridge's normal path.
  *
  * The link is trusted exactly as much as the browser is: the socket is bound to
- * 127.0.0.1 and every frame was already validated in `ws.ts`.
+ * 127.0.0.1 and every frame was already validated in `agent/linkparse.ts`.
  */
 
-import type { LinkClientMsg, LinkServerMsg } from "../../shared/src/link.ts";
+import type { LinkClientMsg, LinkServerMsg } from "../../../shared/src/link.ts";
 import type { BackendEvents } from "./backend/types.ts";
-
-const LINK_MSG_TYPES: Record<string, true> = { canvas_call: true, agent_event: true };
-
-/**
- * Link frames are routed before the graph protocol looks at a message, so this
- * is a `type`-only check — the payload was validated in `parseClientMsg`.
- */
-export function isLinkMsg(msg: { type: string }): msg is LinkClientMsg {
-  return LINK_MSG_TYPES[msg.type] === true;
-}
 
 export interface ExternalIoOptions {
   /** apply canvas ops and answer with what the agent should see */

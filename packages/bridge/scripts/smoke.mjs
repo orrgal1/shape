@@ -45,6 +45,17 @@ function ompFrames(path) {
     .map((line) => JSON.parse(line));
 }
 
+/** every file under `dir`, root-relative posix — the non-git fallback for a FileIndex */
+function walkFiles(dir, prefix = "") {
+  const out = [];
+  for (const entry of readdirSync(join(dir, prefix), { withFileTypes: true })) {
+    if (entry.name === ".git" || entry.name === "node_modules") continue;
+    const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) out.push(...walkFiles(dir, rel));
+    else if (entry.isFile()) out.push(rel);
+  }
+  return out;
+}
 
 /**
  * A committed pnpm workspace in the target dir: gives the bridge a real git HEAD
@@ -95,7 +106,7 @@ let socket = null;
 // In-process (node strips types, same as the bridge child): the index
 // interleaving lives entirely in GraphStore, no wire round-trip needed.
 {
-  const { GraphStore } = await import(new URL("../src/store.ts", import.meta.url));
+  const { GraphStore } = await import(new URL("../src/server/store.ts", import.meta.url));
   const store = new GraphStore(join(tmpdir(), `vh-smoke-store-${process.pid}`));
   const mkNode = (id, parentId = null) => ({
     op: "upsert_node",
@@ -167,9 +178,15 @@ let socket = null;
 // In-process for the same reason as the block above: the gate is a pure
 // function of the doc, and the composer is a pure function of the store.
 {
-  const { GraphStore } = await import(new URL("../src/store.ts", import.meta.url));
-  const { onboardingOpGate } = await import(new URL("../src/onboarding.ts", import.meta.url));
-  const { composeUtterance } = await import(new URL("../src/steering.ts", import.meta.url));
+  const { GraphStore } = await import(new URL("../src/server/store.ts", import.meta.url));
+  const { onboardingOpGate } = await import(new URL("../src/server/onboarding.ts", import.meta.url));
+  const { composeUtterance } = await import(new URL("../src/server/steering.ts", import.meta.url));
+  const { gitFileIndexSync } = await import(new URL("../src/agent/reality.ts", import.meta.url));
+  const { buildFileIndex } = await import(new URL("../../shared/src/fileindex.ts", import.meta.url));
+
+  // the gate now takes the project's file index, not a cwd: the fixture is a
+  // committed workspace, so this is the same index the bridge itself would build
+  const targetIndex = gitFileIndexSync(target) ?? buildFileIndex(walkFiles(target));
 
   const store = new GraphStore(join(tmpdir(), `vh-smoke-product-${process.pid}`));
   // the build layer a survey would already have on the canvas
@@ -190,7 +207,7 @@ let socket = null;
   // neither codeRefs nor realizes.
   const rootCall = store.applyCanvasCall(
     { ops: [product("bill-splitter", "Bill Splitter", null)] },
-    onboardingOpGate(target, store.doc),
+    onboardingOpGate(targetIndex, store.doc),
   );
   check(
     "survey accepts the product root with no realizes and no codeRefs",
@@ -206,7 +223,7 @@ let socket = null;
         { op: "upsert_node", node: { id: "ghost-part", parentId: null, label: "Ghost", summary: "A part nobody wrote." , phase: "built" } },
       ],
     },
-    onboardingOpGate(target, store.doc),
+    onboardingOpGate(targetIndex, store.doc),
   );
   const productReceipts = JSON.parse(outcome.text.slice(outcome.text.indexOf("\n") + 1)).rejections;
   const unrealized = productReceipts.find((r) => r.code === "onboarding/unrealized-product");
@@ -234,7 +251,7 @@ let socket = null;
   // receipt names the root to hang it under
   const second = store.applyCanvasCall(
     { ops: [product("plan-a-trip", "Plan a trip", null, ["money-rules"])] },
-    onboardingOpGate(target, store.doc),
+    onboardingOpGate(targetIndex, store.doc),
   );
   const secondRoot = JSON.parse(second.text.slice(second.text.indexOf("\n") + 1)).rejections
     .find((r) => r.code === "op/second-root");
@@ -252,7 +269,7 @@ let socket = null;
     {
       ops: [{ op: "upsert_node", node: { id: "split-a-bill", parentId: "bill-splitter", label: "Split a bill", summary: "Split a bill — the promise a person gets.", phase: "component", status: "reading the routes" } }],
     },
-    onboardingOpGate(target, store.doc),
+    onboardingOpGate(targetIndex, store.doc),
   );
   check(
     "re-upserting a capability without layer keeps it a capability, not a codeRefs debt",
@@ -946,8 +963,9 @@ try {
   // --- the link: canvas over MCP + external agent events --------------------
   // The worktree is the live target and its canvas is empty, so the link can
   // add bubbles here without disturbing anything asserted above. A second
-  // socket stands in for an external process (MCP server, harness hook).
-  const linkUrl = `ws://127.0.0.1:${PORT}/ws`;
+  // socket stands in for an external process (MCP server, harness hook), which
+  // reaches the agent runtime's own endpoint at /link, not the browser hub.
+  const linkUrl = `ws://127.0.0.1:${PORT}/link`;
   const linkPkg = join(process.cwd(), "..", "link");
   const linkFrames = [];
   const linkSocket = new WebSocket(linkUrl);
@@ -1042,7 +1060,8 @@ try {
       event: { kind: "session", sessionId: "link-session-1", model: { provider: "anthropic", id: "claude-x" } },
     }),
   );
-  const sessionProbe = new WebSocket(linkUrl);
+  // a fresh BROWSER, not a link client: only the hub greets a socket with hello
+  const sessionProbe = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
   const probeFrames = [];
   sessionProbe.on("message", (data) => probeFrames.push(JSON.parse(data.toString())));
   const probeHello = await waitFor("hello for the session probe", () =>

@@ -7,7 +7,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import type { WorktreeInfo } from "../../shared/src/index.ts";
+import type { WorktreeInfo } from "../../../shared/src/index.ts";
 
 const EXCLUDE_LINE = ".shape/";
 

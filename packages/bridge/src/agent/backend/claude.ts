@@ -23,7 +23,7 @@ import { spawn as spawnChild, type ChildProcess } from "node:child_process";
 import { spawn as spawnPty, type IPty } from "@lydell/node-pty";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { BackendCapabilities } from "../../../shared/src/index.ts";
+import type { BackendCapabilities } from "../../../../shared/src/index.ts";
 import type { Backend, BackendEvents, BackendState, TerminalSource } from "./types.ts";
 
 export type ClaudeMode = "headless" | "tui";
@@ -84,9 +84,10 @@ const DEFAULT_ROWS = 32;
 /**
  * The link's entry points, by path rather than by import: the bridge must run
  * against a checkout where packages/link is present but not built, wired, or
- * importable from here. `<repo>/packages/bridge/src/backend/claude.ts` -> repo.
+ * importable from here.
+ * `<repo>/packages/bridge/src/agent/backend/claude.ts` -> repo.
  */
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "..");
 const LINK_MCP = join(REPO_ROOT, "packages", "link", "src", "mcp.ts");
 const LINK_HOOK = join(REPO_ROOT, "packages", "link", "src", "hook.ts");
 

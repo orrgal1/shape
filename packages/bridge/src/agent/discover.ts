@@ -11,7 +11,7 @@
  * `discoverSessions()` never rejects.
  *
  * Not wired into the bridge; see `discover-cli.ts` for the standalone probe
- * (`node packages/bridge/src/discover-cli.ts`).
+ * (`node packages/bridge/src/agent/discover-cli.ts`).
  */
 
 import { execFile } from "node:child_process";
@@ -19,9 +19,9 @@ import { closeSync, openSync, readFileSync, readSync, readdirSync, readlinkSync,
 import { homedir, platform } from "node:os";
 import { basename, join } from "node:path";
 
-import type { DiscoveredSession, Harness } from "../../shared/src/index.ts";
+import type { DiscoveredSession, Harness } from "../../../shared/src/index.ts";
 
-export type { DiscoveredSession, Harness } from "../../shared/src/index.ts";
+export type { DiscoveredSession, Harness } from "../../../shared/src/index.ts";
 
 const EXEC_TIMEOUT_MS = 3_000;
 /** Bytes read from the head of a session log to sniff its metadata line. */

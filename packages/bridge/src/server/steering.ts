@@ -3,8 +3,8 @@
  * plus an utterance become one addressed instruction for the running session.
  */
 
-import { layerOf, productRootOf, realizersOf, servesOf } from "../../shared/src/index.ts";
-import type { Referent } from "../../shared/src/index.ts";
+import { layerOf, productRootOf, realizersOf, servesOf } from "../../../shared/src/index.ts";
+import type { Referent } from "../../../shared/src/index.ts";
 import type { GraphStore } from "./store.ts";
 
 const REMINDER = "Apply the change and keep the canvas current via the canvas tool.";
