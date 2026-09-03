@@ -194,6 +194,25 @@ button {
   white-space: nowrap;
 }
 
+/* which coding-agent CLI the bridge is driving; the one fact a user must
+   never have to guess, so it gets a key word, not just a bare tag */
+.pill-harness {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+.pill-harness .pill-key {
+  color: var(--text-faint);
+  letter-spacing: 0.12em;
+}
+.pill-harness .pill-harness-name {
+  font-weight: 600;
+}
+.pill-harness .pill-harness-model {
+  color: var(--text-dim);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .dot {
   width: 6px;
   height: 6px;
@@ -2141,6 +2160,21 @@ kbd {
   margin: 0;
   font-size: var(--t-sm);
   line-height: 1.55;
+  color: var(--text-faint);
+}
+
+.tl-harness {
+  margin: 0;
+  font-size: var(--t-sm);
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+.tl-harness strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.tl-harness-caps {
+  display: block;
   color: var(--text-faint);
 }
 

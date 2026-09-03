@@ -415,17 +415,14 @@ function Header() {
           {CONN_LABEL[conn]}
         </span>
       )}
-      {model === undefined || model === null ? null : (
-        <span className="pill" title={`${model.provider}/${model.id}`}>
-          {model.id}
-        </span>
-      )}
       {backend === undefined ? null : (
         <span
-          className="pill pill-backend"
-          title={`harness: ${backend.label} (${backend.id}) — events: ${backend.capabilities.events}, terminal: ${backend.capabilities.terminal}`}
+          className="pill pill-harness"
+          title={`Shape is driving ${backend.label} (${backend.id}) — steer mid-turn: ${backend.capabilities.steerMidTurn ? "yes" : "queued"}, events: ${backend.capabilities.events}, terminal: ${backend.capabilities.terminal}${model ? ` — model ${model.provider}/${model.id}` : ""}`}
         >
-          {backend.label}
+          <span className="pill-key">harness</span>
+          <span className="pill-harness-name">{backend.label}</span>
+          {model === undefined || model === null ? null : <span className="pill-harness-model">· {model.id}</span>}
         </span>
       )}
       <span className="brand-meta">

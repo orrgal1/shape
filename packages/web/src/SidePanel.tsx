@@ -55,9 +55,24 @@ function Lines({ lines, empty }: { lines: { seq: number; role: string; text: str
 
 function ProjectView({ tldr, agent }: { tldr: ProjectTldr; agent: AgentState }) {
   const setFocus = useApp((state) => state.setFocus);
+  const session = useApp((state) => state.session);
+  const backend = session?.backend;
 
   return (
     <>
+      {backend === undefined ? null : (
+        <section className="tl-block">
+          <h2 className="tl-title">harness</h2>
+          <p className="tl-harness">
+            <strong>{backend.label}</strong>
+            {session?.model ? <> · {session.model.id}</> : null}
+            <span className="tl-harness-caps">
+              {backend.capabilities.steerMidTurn ? "steers mid-turn" : "steering queues for the next turn"} ·{" "}
+              {backend.capabilities.terminal === "tui" ? "its own terminal is in the Terminal pane" : "shell in the Terminal pane"}
+            </span>
+          </p>
+        </section>
+      )}
       <section className="tl-block">
         <h2 className="tl-title">now</h2>
         {tldr.working.length === 0 ? (
