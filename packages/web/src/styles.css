@@ -3117,7 +3117,7 @@ kbd {
 
    The capability card. It shares its geometry with a component card on purpose
    — the layout code lays out boxes and must not learn about layers — so the
-   distinction is carried by hue, a sigil and a ribbon down the leading edge.
+   distinction is carried by hue and a sigil.
    The phase dot keeps its phase colour: a capability has a lifecycle too, and
    the legend has to stay true in both views.
    ========================================================================== */
@@ -3129,20 +3129,6 @@ kbd {
 
 .bubble[data-layer="product"]::before {
   background: linear-gradient(180deg, color-mix(in oklab, var(--capability) 14%, transparent), transparent 62%);
-}
-
-/* the ribbon: reads as "this card is a promise" from across the canvas, at a
-   scale where no words survive */
-.bubble[data-layer="product"]::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 12%;
-  bottom: 12%;
-  width: 3px;
-  border-radius: var(--r-pill);
-  background: color-mix(in oklab, var(--capability) 72%, transparent);
-  pointer-events: none;
 }
 
 .bubble[data-layer="product"]:hover {
