@@ -26,6 +26,8 @@ export interface BubbleData extends Record<string, unknown> {
   /** direct children, i.e. what drilling in reveals */
   childCount: number;
   descendantCount: number;
+  /** alone on its layer: the card is wide and says its whole promise */
+  solo: boolean;
   /**
    * Which layer the bubble is drawn in. A capability card and a component card
    * share their geometry and differ in what they are allowed to say: a

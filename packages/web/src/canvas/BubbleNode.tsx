@@ -32,6 +32,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
     isSelected,
     isMore,
     childCount,
+    solo,
     layer,
     realizerCount,
     serveCount,
@@ -92,6 +93,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
       data-phase={node.phase}
       data-layer={layer}
       data-root={isRoot}
+      data-solo={solo}
       // in a comparison what moved is the whole story; a second loud claim
       // about the build side would answer a question nobody asked
       data-unrealized={unrealized && !comparing}

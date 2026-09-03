@@ -100,6 +100,7 @@ export function buildCanvas({
         isMore: entry.isMore,
         childCount: entry.childCount,
         descendantCount: entry.descendantCount,
+        solo: layer.nodes.length === 1,
         // the fold is not a bubble in either layer, so it carries neither
         // layer's extra vocabulary
         layer: entry.isMore ? "build" : layerOf(entry.node),

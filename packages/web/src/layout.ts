@@ -21,6 +21,9 @@ export const STRIP_ID = "strip:reality";
 
 const NODE_W = 236;
 const NODE_H = 98;
+/** a bubble alone on its layer is the whole picture: give it room to say everything */
+export const SOLO_W = 420;
+export const SOLO_H = 132;
 const GHOST_W = 178;
 const GHOST_H = 54;
 const STRIP_GAP = 150;
@@ -226,6 +229,10 @@ function spreadLayout(layer: Layer, aspect: number): BoxMap {
   const n = ids.length;
   const boxes: BoxMap = {};
   if (n === 0) return boxes;
+  if (n === 1 && ids[0] !== undefined) {
+    boxes[ids[0]] = { x: -SOLO_W / 2, y: -SOLO_H / 2, w: SOLO_W, h: SOLO_H };
+    return boxes;
+  }
 
   // half the distance two cards must be apart to sit side by side, or stacked
   const halfX = (NODE_W + SPREAD_GAP) / 2;

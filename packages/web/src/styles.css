@@ -790,6 +790,17 @@ button {
   overflow: hidden;
 }
 
+/* alone on its layer the card is the whole picture, so nothing is clipped:
+   the full promise, at reading size, in a card the layout made wide for it */
+.bubble[data-solo="true"] .bubble-summary {
+  -webkit-line-clamp: unset;
+  font-size: var(--t-md);
+  line-height: 1.5;
+}
+.bubble[data-solo="true"] .bubble-label {
+  font-size: var(--t-xl);
+}
+
 /* the volatile "now" line, shown in place of the promise while work is inside */
 .bubble-status {
   color: color-mix(in oklab, var(--accent) 30%, var(--text));

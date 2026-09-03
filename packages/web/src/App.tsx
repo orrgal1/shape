@@ -460,6 +460,12 @@ function Header() {
 
   const model = session?.model;
   const backend = session?.backend;
+  // the tab says which project this is, or that it is only the sample
+  const cwd = session?.cwd;
+  useEffect(() => {
+    const project = conn === "mock" ? "sample" : cwd === undefined ? null : (cwd.split("/").filter(Boolean).pop() ?? null);
+    document.title = project === null ? "Shape" : `${project} · Shape`;
+  }, [conn, cwd]);
   return (
     <header className="header">
       <div className="brand">

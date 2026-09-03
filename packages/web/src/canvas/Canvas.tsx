@@ -30,6 +30,8 @@ const FIT_PADDING = { top: "76px", right: "44px", bottom: "124px", left: "44px" 
 /** zoom bounds shared by the pane and the framing maths */
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 1.1;
+/** one bubble on the layer may fill the page rather than sit small in the middle */
+const SOLO_MAX_ZOOM = 1.8;
 
 /** the steering bar owns the bottom of the stage; overlays sit above it */
 const MINIMAP_LIFT = 92;
@@ -136,7 +138,7 @@ export function Canvas() {
     scope,
     padding: FIT_PADDING,
     minZoom: MIN_ZOOM,
-    maxZoom: MAX_ZOOM,
+    maxZoom: layer.nodes.length === 1 ? SOLO_MAX_ZOOM : MAX_ZOOM,
   });
 
   const { nodes, edges } = useMemo(
