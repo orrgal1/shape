@@ -28,6 +28,9 @@ type Padding = Parameters<typeof getViewportForBounds>[5];
 export const MOTION_MS = 380;
 /** a layer swap dissolves the outgoing layer before the new one arrives */
 export const SWAP_OUT_MS = 150;
+/** a bubble under the lens fills this much of the pane's shorter dimension, at most this zoom */
+const LENS_FILL = 0.62;
+const LENS_MAX_ZOOM = 2.2;
 
 /** exponential ease-out; the same family as --ease in the stylesheet */
 const ease = (t: number): number => 1 - Math.pow(1 - t, 3);
@@ -45,6 +48,14 @@ export interface MotionState {
   swap: SwapPhase;
   /** wired to React Flow's move handlers: a user's viewport wins while they drag */
   setInteracting: (interacting: boolean) => void;
+  /**
+   * Centre and enlarge one bubble, or, for the bubble already under the lens,
+   * put the viewport back exactly where it was. Automatic framing is held off
+   * while the lens is on; a layer change lifts it.
+   */
+  toggleZoom: (id: string) => void;
+  /** the bubble under the lens, if any */
+  zoomed: string | null;
 }
 
 
@@ -96,6 +107,9 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
   const interacting = useRef(false);
   /** viewport we owe once the user lets go */
   const owed = useRef<Viewport | null>(null);
+  /** the bubble under the lens and the viewport to give back when it lifts */
+  const lens = useRef<{ id: string; previous: Viewport } | null>(null);
+  const [zoomed, setZoomed] = useState<string | null>(null);
 
   const setInteracting = useCallback((value: boolean) => {
     interacting.current = value;
@@ -104,6 +118,37 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
     owed.current = null;
     void setViewport(target, { duration: MOTION_MS });
   }, [setViewport]);
+
+  const toggleZoom = useCallback(
+    (id: string) => {
+      const held = lens.current;
+      if (held !== null && held.id === id) {
+        lens.current = null;
+        setZoomed(null);
+        interacting.current = false;
+        // content moved on underneath the lens: the fresh framing wins over a
+        // viewport that was framing something else
+        const back = owed.current ?? held.previous;
+        owed.current = null;
+        void setViewport(back, { duration: MOTION_MS });
+        return;
+      }
+      const box = current.current[id];
+      if (box === undefined || width === 0 || height === 0) return;
+      // the first lens remembers where the user was; hopping lens to lens
+      // keeps that first place, so the way back is always to before any lens
+      const previous = held?.previous ?? getViewport();
+      const zoom = Math.min(LENS_MAX_ZOOM, (width * LENS_FILL) / box.w, (height * LENS_FILL) / box.h);
+      lens.current = { id, previous };
+      setZoomed(id);
+      interacting.current = true;
+      void setViewport(
+        { x: width / 2 - (box.x + box.w / 2) * zoom, y: height / 2 - (box.y + box.h / 2) * zoom, zoom },
+        { duration: MOTION_MS },
+      );
+    },
+    [width, height, setViewport, getViewport],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -118,6 +163,13 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
 
         const focusChanged = lastFocus.current !== undefined && lastFocus.current !== (input.layer.focus?.id ?? null);
         lastFocus.current = input.layer.focus?.id ?? null;
+        // a different layer is a different picture: the lens lifts with nothing to give back to
+        if (lens.current !== null && (focusChanged || !layerIds.includes(lens.current.id))) {
+          lens.current = null;
+          setZoomed(null);
+          interacting.current = false;
+          owed.current = null;
+        }
 
         // bubbles that were on screen a moment ago and are not in the new layer
         const survivors = new Set(layerIds);
@@ -263,5 +315,5 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
     [],
   );
 
-  return { boxes, entering, leaving, swap, setInteracting };
+  return { boxes, entering, leaving, swap, setInteracting, toggleZoom, zoomed };
 }

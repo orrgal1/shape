@@ -65,7 +65,6 @@ export function Canvas() {
   const hover = useApp((state) => state.hover);
   const select = useApp((state) => state.select);
   const setHover = useApp((state) => state.setHover);
-  const setFocus = useApp((state) => state.setFocus);
 
   /**
    * A comparison runs through this very pipeline: one flat synthetic document
@@ -133,7 +132,7 @@ export function Canvas() {
    * content change — drill, up, a bubble the agent added, activity revealing an
    * ancestor, the reality toggle — recentres without a correction jump.
    */
-  const { boxes, entering, leaving, swap, setInteracting } = useMotion({
+  const { boxes, entering, leaving, swap, setInteracting, toggleZoom } = useMotion({
     input,
     scope,
     padding: FIT_PADDING,
@@ -164,7 +163,8 @@ export function Canvas() {
       nodesConnectable={false}
       elementsSelectable={false}
       panOnScroll
-      selectionOnDrag={false}
+      // the lens owns double-click; React Flow's own x2 zoom would fight it
+      zoomOnDoubleClick={false}
       minZoom={MIN_ZOOM}
       maxZoom={2.4}
       proOptions={{ hideAttribution: true }}
@@ -173,11 +173,13 @@ export function Canvas() {
         if (comparing || node.type !== "bubble") return;
         select({ kind: "node", id: node.id });
       }}
+      // double-click is the lens: centre and enlarge this bubble, and a second
+      // double-click on it gives the previous view back. Drilling in stays on
+      // the chip, so the gesture never changes what layer is on screen.
       onNodeDoubleClick={(_event, node) => {
         if (comparing || node.type !== "bubble") return;
-        const children = node.data.childCount;
-        if (typeof children !== "number" || children === 0) return;
-        setFocus(node.id);
+        select({ kind: "node", id: node.id });
+        toggleZoom(node.id);
       }}
       // Hover is what un-hides a stroke's words: over a bubble, its own
       // relations say what they are; over a stroke, that one does. Nothing here
