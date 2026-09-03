@@ -5,8 +5,12 @@
  */
 import {
   EDGE_KINDS,
+  LAYERS,
   MODEL_ROLES,
+  NODE_KINDS,
   PHASES,
+  type Layer,
+  type NodeKind,
   type AgentState,
   type BackendInfo,
   type DiscoveredSession,
@@ -120,6 +124,19 @@ function asIntentNode(value: unknown): IntentNode | null {
     const codeRefs = asStrArray(value.codeRefs);
     if (codeRefs === null) return null;
     node.codeRefs = codeRefs;
+  }
+  // unknown kinds are tolerated (older/newer bridges), the bubble just goes plain
+  for (const kind of NODE_KINDS) if (kind === value.kind) node.kind = kind as NodeKind;
+  if (value.layer !== undefined) {
+    let layer: Layer | null = null;
+    for (const known of LAYERS) if (known === value.layer) layer = known;
+    if (layer === null) return null;
+    node.layer = layer;
+  }
+  if (value.realizes !== undefined) {
+    const realizes = asStrArray(value.realizes);
+    if (realizes === null) return null;
+    node.realizes = realizes;
   }
   return node;
 }

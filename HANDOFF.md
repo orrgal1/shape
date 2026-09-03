@@ -186,3 +186,30 @@ Next: Codex + opencode adapters (both "full" per research; app-server / HTTP), l
 (Codex daemon, opencode `--port`), spawn-mode UX (open the harness TUI from the canvas when
 no session is running), Cursor (partial). Open question for the user: whether omp's own
 interactive TUI can be driven (hub injection) so omp gets a tui mode like Claude.
+
+## 2026-09-03: declutter, harness pill, product layer, product root
+
+- **Layer cap + quiet edges** (user: "big spaghetti"): `LAYER_CAP = 5` per layer, extras fold
+  into a drillable "N more parts" bubble (`__more__:` ids); 1–5 nodes get fixed geometry
+  (line/triangle/diamond/pentagon); edge labels only on hover/selection. Survey + preamble
+  demand 3–5 bubbles per layer with named parent groups. Playground root: 9/18 → 5/11.
+- **Harness pill**: header `HARNESS omp · <model>` + a Harness section in the side panel.
+- **Product layer**: `IntentNode.layer` (absent = build) and `realizes` (product → build
+  ids, the only cross-layer link); validation `op/cross-layer-parent|edge`,
+  `op/bad-realizes`, `op/node-realized`, `op/second-root`; helpers `layerOf`,
+  `realizersOf`, `servesOf` (ancestor rule), `productRootOf`. PRODUCT | BUILD toggle with
+  per-view focus; "built by N" drills into a synthetic `__realizes__:<id>` layer of exactly
+  the realizers; "serves" chips back; activity/drift roll up through realizes; unrealized
+  capabilities glow. **The graph starts from one bubble**: the product root (single
+  top-level product node) is the product view's focus card; capabilities are its children.
+- **Survey**: build grouping pass → product pass (root first, then 3–5 capabilities each
+  with realizes from real user-facing surfaces). Onboarding gate: product nodes need
+  realizes instead of codeRefs; the root needs neither. Composer: `Realized by:` /
+  `Serves:` / `the product`.
+- Verified by a real re-map of shape-playground (omp/Opus): root "Ledgerly", 5
+  capabilities each realized by 4–5 build bubbles, build layer grouped into Money rules ·
+  Ways in · Remembering · Reminders and chores (41 bubbles, 0 drift). Bug found on that run:
+  web `parse.ts` dropped `kind`/`layer`/`realizes` on the live WS path (fixtures bypass it) —
+  fixed; verify web changes once against the live bridge, not only `?mock=`.
+- Smokes: bridge 126, shared 87, claude 42, adopt 17, drift 23. Fixtures `?mock=1` and
+  `?mock=playground` carry a product root + capabilities.
