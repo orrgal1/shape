@@ -79,6 +79,23 @@ export function KindSigil({ kind }: { kind: NodeKind }): ReactElement {
 }
 
 /**
+ * The product layer's one symbol. A capability is not a kind of component —
+ * every bubble in that layer is the same kind of thing, something the project
+ * promises a person — so the whole layer shares a single sigil: a flag planted,
+ * which is what a capability is.
+ */
+export function CapabilitySigil(): ReactElement {
+  return (
+    <span className="kind-sigil" data-kind="capability" title="capability">
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M4 14V2.6" />
+        <path className="sigil-fill" d="M4 3h7.6l-1.8 2.6L11.6 8H4Z" />
+      </svg>
+    </span>
+  );
+}
+
+/**
  * Guesses in priority order, most specific reading first: a "cache API" is an
  * api, and "auth service" is security before it is a service. Word boundaries
  * only, so "dbus" is not a database and "capi" is not an api.

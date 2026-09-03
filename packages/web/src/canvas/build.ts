@@ -1,4 +1,4 @@
-import type { RealityLayer, Referent } from "../../../shared/src/index.ts";
+import { layerOf, type RealityLayer, type Referent } from "../../../shared/src/index.ts";
 import type { DeltaMarks, DeltaStatus } from "../deltaView.ts";
 import type { Layer, LayerNode } from "../layer.ts";
 import { STRIP_ID, type Box, type BoxMap } from "../layout.ts";
@@ -100,6 +100,12 @@ export function buildCanvas({
         isMore: entry.isMore,
         childCount: entry.childCount,
         descendantCount: entry.descendantCount,
+        // the fold is not a bubble in either layer, so it carries neither
+        // layer's extra vocabulary
+        layer: entry.isMore ? "build" : layerOf(entry.node),
+        realizerCount: entry.realizerCount,
+        serveCount: entry.serveCount,
+        unrealized: entry.unrealized,
         motion,
         deltaStatus: marks === null ? null : (marks.nodes[entry.node.id] ?? "same"),
         deltaNotes: marks === null ? NO_NOTES : (marks.nodeNotes[entry.node.id] ?? NO_NOTES),

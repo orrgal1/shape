@@ -33,6 +33,11 @@
 
   --drift: #ff8a3d;
 
+  /* --- product layer: one hue for "something the project promises a person",
+     and one for the capability nothing on the build side answers yet --- */
+  --capability: #3fd0c9;
+  --unrealized: #e46ad0;
+
   /* --- relation strokes --- */
   --edge-depends: #7f8ea6;
   --edge-relates: #5d6879;
@@ -148,14 +153,35 @@ button {
   z-index: 6;
   top: var(--s4);
   left: var(--s4);
+  /* bounded by the stage, so nothing in it can slide under the rail */
+  right: var(--s4);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  row-gap: var(--s2);
+  pointer-events: none;
+}
+
+/**
+ * The header's second line: how big the layer is, and where in it you are.
+ * It always breaks onto its own row — the row above is a fixed set of controls
+ * that grew by one switch when the layers arrived, and a trail squeezed into
+ * what was left of it was a trail nobody could read.
+ */
+.header-line {
+  flex-basis: 100%;
   display: flex;
   align-items: center;
   gap: var(--s3);
-  pointer-events: none;
+  min-width: 0;
 }
 
 .header > * {
   pointer-events: auto;
+  /* a control that squeezed would clip its own words mid-letter; the row wraps
+     instead, and only the fixture badge is allowed to trade away its tail */
+  flex: none;
 }
 
 .brand {
@@ -509,7 +535,13 @@ button {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  /* Fixture chrome must not be what pushes the header past the stage: the row
+     now carries two switches, so the badge keeps its loud fill and gives up the
+     tail of its sentence, which its own tooltip still says in full. */
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 210px;
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--phase-idea) 22%, transparent);
 }
 
@@ -1526,7 +1558,9 @@ button {
 .stage-tools {
   position: absolute;
   z-index: 6;
-  top: var(--s4);
+  /* below the header's first row: that row is a full set of controls now, and
+     the status pills on its right end reach this far across */
+  top: calc(var(--s4) + 34px);
   right: var(--s4);
   display: flex;
   flex-direction: column;
@@ -2566,7 +2600,8 @@ kbd {
   display: flex;
   align-items: stretch;
   gap: var(--s3);
-  margin: 56px var(--s4) var(--s2);
+  /* clears the two-row header above it */
+  margin: 82px var(--s4) var(--s2);
   max-width: 520px;
   padding: var(--s3) var(--s4) var(--s3) var(--s2);
   border: 1px solid color-mix(in oklab, var(--accent) 30%, var(--line-strong));
@@ -3064,4 +3099,148 @@ kbd {
 
 .term-veil-action:hover {
   color: var(--text);
+}
+
+/* ==========================================================================
+   PRODUCT LAYER
+
+   The capability card. It shares its geometry with a component card on purpose
+   — the layout code lays out boxes and must not learn about layers — so the
+   distinction is carried by hue, a sigil and a ribbon down the leading edge.
+   The phase dot keeps its phase colour: a capability has a lifecycle too, and
+   the legend has to stay true in both views.
+   ========================================================================== */
+
+.bubble[data-layer="product"] {
+  border-color: color-mix(in oklab, var(--capability) 34%, var(--line-strong));
+  background: color-mix(in oklab, var(--capability) 5%, var(--surface));
+}
+
+.bubble[data-layer="product"]::before {
+  background: linear-gradient(180deg, color-mix(in oklab, var(--capability) 14%, transparent), transparent 62%);
+}
+
+/* the ribbon: reads as "this card is a promise" from across the canvas, at a
+   scale where no words survive */
+.bubble[data-layer="product"]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 12%;
+  bottom: 12%;
+  width: 3px;
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--capability) 72%, transparent);
+  pointer-events: none;
+}
+
+.bubble[data-layer="product"]:hover {
+  border-color: color-mix(in oklab, var(--capability) 58%, var(--line-strong));
+}
+
+.bubble[data-layer="product"] .bubble-label {
+  color: var(--text);
+}
+
+.kind-sigil[data-kind="capability"] {
+  color: color-mix(in oklab, var(--capability) 72%, var(--text));
+}
+
+/* A capability past `concept` with nothing realizing it: the project claims to
+   have built something no part of it answers for. Its own hue, because it is
+   neither a lifecycle stage nor drift — drift is code disagreeing with a
+   bubble, this is a bubble no code was ever pointed at. */
+.bubble[data-unrealized="true"] {
+  border-style: dashed;
+  border-color: color-mix(in oklab, var(--unrealized) 62%, var(--line-strong));
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--unrealized) 34%, transparent),
+    0 0 22px color-mix(in oklab, var(--unrealized) 26%, transparent);
+}
+
+.bubble[data-unrealized="true"]::after {
+  background: color-mix(in oklab, var(--unrealized) 78%, transparent);
+}
+
+.bubble[data-unrealized="true"] .kind-sigil[data-kind="capability"] {
+  color: color-mix(in oklab, var(--unrealized) 76%, var(--text));
+}
+
+/* the cross-layer door, in the foot rather than under the card: the drill chip
+   already owns the bottom edge, and these two go in different directions */
+.built-by {
+  margin-left: auto;
+  height: 17px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in oklab, var(--capability) 42%, var(--line-strong));
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--capability) 12%, var(--surface-3));
+  color: color-mix(in oklab, var(--capability) 55%, var(--text));
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.built-by:hover {
+  background: color-mix(in oklab, var(--capability) 26%, var(--surface-3));
+  border-color: color-mix(in oklab, var(--capability) 78%, var(--line-strong));
+  color: var(--text);
+}
+
+/* the same link read from the build side, where it is a fact rather than a
+   door: the panel is where its capabilities are named and followed */
+.badge-serves {
+  border-color: color-mix(in oklab, var(--capability) 34%, var(--line-strong));
+  color: color-mix(in oklab, var(--capability) 55%, var(--text-dim));
+}
+
+/* the "built by" layer: not a bubble of its own, so its card says which
+   capability it is answering for */
+.focus-card[data-realizes="true"] {
+  border-color: color-mix(in oklab, var(--capability) 32%, var(--line-strong));
+  background: color-mix(in oklab, var(--capability) 6%, var(--surface-2));
+}
+
+/* --- side panel: the cross-layer chips and the unrealized note --- */
+
+.node-chip-cross {
+  border-style: dashed;
+}
+
+.node-chip-arrow {
+  color: color-mix(in oklab, var(--accent) 60%, var(--text-faint));
+  font-size: var(--t-sm);
+}
+
+.tl-subject-layer {
+  padding: 1px 6px;
+  border: 1px solid color-mix(in oklab, var(--capability) 40%, var(--line-strong));
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--capability) 12%, transparent);
+  color: color-mix(in oklab, var(--capability) 60%, var(--text));
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+}
+
+.tl-title-unrealized {
+  color: color-mix(in oklab, var(--unrealized) 70%, var(--text));
+}
+
+.tl-unrealized {
+  margin: 0;
+  padding: var(--s2) var(--s3);
+  border-left: 2px solid color-mix(in oklab, var(--unrealized) 60%, transparent);
+  background: color-mix(in oklab, var(--unrealized) 8%, transparent);
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--text-dim);
 }

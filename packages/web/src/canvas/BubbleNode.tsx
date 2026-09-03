@@ -1,6 +1,6 @@
 import { Handle, Position, useStore, type NodeProps } from "@xyflow/react";
 import { useApp } from "../store.ts";
-import { KindSigil, resolveKind } from "./kind.tsx";
+import { CapabilitySigil, KindSigil, resolveKind } from "./kind.tsx";
 import type { BubbleNodeType } from "./types.ts";
 
 /** semantic-zoom tiers: what a bubble is worth saying at this scale */
@@ -20,6 +20,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
     return "full";
   });
   const setFocus = useApp((state) => state.setFocus);
+  const drillRealizers = useApp((state) => state.drillRealizers);
 
   const {
     node,
@@ -31,6 +32,10 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
     isSelected,
     isMore,
     childCount,
+    layer,
+    realizerCount,
+    serveCount,
+    unrealized,
     motion,
     deltaStatus,
     deltaNotes,
@@ -38,10 +43,14 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
   const liveInside = activeInside.length > 0;
   const hasDrift = drift.length > 0;
   const detail = tier === "full";
-  const codeRef = node.codeRefs?.[0];
+  const product = layer === "product";
+  // a capability points at code only through the build bubbles that realize it,
+  // so a path on the card would be claiming something it does not own
+  const codeRef = product ? undefined : node.codeRefs?.[0];
   const role = node.modelRole;
-  // the fold is not a part, so it carries no component symbol of its own
-  const kind = isMore ? null : resolveKind(node);
+  // the fold is not a part, so it carries no component symbol of its own; a
+  // capability is not a part either, and says what it is with one sigil for all
+  const kind = isMore || product ? null : resolveKind(node);
 
   // what the bubble says about "now": its own status, or the status of whatever
   // hidden descendant the agent is actually inside
@@ -65,7 +74,9 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
   /** in a comparison the mark is the first thing said out loud, phase second */
   const spoken = comparing
     ? `${deltaWord ?? "unchanged"}: ${node.label}, ${node.phase} — ${node.summary}`
-    : `${node.phase} ${node.label}: ${node.summary}`;
+    : `${product ? "capability" : node.phase} ${node.label}: ${node.summary}${
+        unrealized ? " — nothing on the build side makes this real yet" : ""
+      }`;
 
   return (
     <div
@@ -76,6 +87,10 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
       // the promise is always reachable, even where the card has no room for it
       title={tip}
       data-phase={node.phase}
+      data-layer={layer}
+      // in a comparison what moved is the whole story; a second loud claim
+      // about the build side would answer a question nobody asked
+      data-unrealized={unrealized && !comparing}
       data-kind={kind ?? undefined}
       data-more={isMore}
       data-selected={isSelected}
@@ -91,7 +106,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
 
       <div className="bubble-head">
         <span className="phase-dot" />
-        {kind !== null ? <KindSigil kind={kind} /> : null}
+        {product ? <CapabilitySigil /> : kind !== null ? <KindSigil kind={kind} /> : null}
         <span className="bubble-label">{node.label}</span>
         {deltaWord === undefined ? null : <span className="badge badge-delta">{deltaWord}</span>}
         {detail && (hasDrift || driftInside > 0) ? (
@@ -138,6 +153,30 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
         {detail && failedInside > 0 ? <span className="badge badge-failed">{failedInside} failed inside</span> : null}
         {detail && role !== undefined ? <span className="badge badge-role">{role}</span> : null}
         {detail && codeRef !== undefined ? <span className="bubble-refs">{codeRef}</span> : null}
+        {/* the cross-layer door: the one link between what the project promises
+            and what builds it, so it is a button on the card rather than a
+            number in a panel. Hidden at zero, which is what `unrealized` is. */}
+        {product && realizerCount > 0 && tier !== "min" && !comparing ? (
+          <button
+            type="button"
+            className="built-by nodrag nopan"
+            title={`show the ${realizerCount} build ${realizerCount === 1 ? "bubble" : "bubbles"} that make “${node.label}” real`}
+            onClick={(event) => {
+              event.stopPropagation();
+              drillRealizers(node.id);
+            }}
+          >
+            built by {realizerCount}
+          </button>
+        ) : null}
+        {!product && detail && serveCount > 0 && !comparing ? (
+          <span
+            className="badge badge-serves"
+            title={`part of ${serveCount} ${serveCount === 1 ? "capability" : "capabilities"} on the product layer`}
+          >
+            serves {serveCount}
+          </span>
+        ) : null}
       </div>
 
       {/* drill affordance: the only way in, alongside double-click. Single click

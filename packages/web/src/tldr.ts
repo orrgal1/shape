@@ -3,7 +3,17 @@
  * holds. No new wire messages: the panel is a reading of the graph plus the
  * transcript stream, not another channel.
  */
-import { PHASES, type GraphDoc, type GraphEdge, type IntentNode, type Phase } from "../../shared/src/index.ts";
+import {
+  PHASES,
+  layerOf,
+  realizersOf,
+  servesOf,
+  type GraphDoc,
+  type GraphEdge,
+  type IntentNode,
+  type Layer,
+  type Phase,
+} from "../../shared/src/index.ts";
 import type { TranscriptEntry } from "./store.ts";
 
 /** transcript lines shown per subject before older ones are dropped */
@@ -54,10 +64,21 @@ export interface RelationLink {
 
 export interface NodeTldr {
   node: IntentNode;
+  /** which layer it lives in, since the two say different things about a bubble */
+  layer: Layer;
   working: boolean;
   parent: NeighbourLink | null;
   children: NeighbourLink[];
   relations: RelationLink[];
+  /**
+   * The cross-layer link, read from whichever end is selected: for a capability,
+   * the build bubbles that make it real; for a build bubble, the capabilities it
+   * (or one of its ancestors) serves. Only one of the two is ever populated.
+   */
+  realizers: NeighbourLink[];
+  serves: NeighbourLink[];
+  /** a capability past `concept` with nothing realizing it */
+  unrealized: boolean;
   drift: readonly string[];
   lines: TranscriptEntry[];
 }
@@ -187,12 +208,37 @@ export function nodeTldr(
     });
   }
 
+  // The cross-layer link is read from the selected end only: a capability lists
+  // what makes it real, a build bubble lists what it is part of. Both lists come
+  // from the same `realizes` field — there is no second relation to keep in step.
+  const layer = layerOf(node);
+  const realizers: NeighbourLink[] = [];
+  const serves: NeighbourLink[] = [];
+  if (layer === "product") {
+    for (const id of realizersOf(doc, nodeId)) {
+      const built = byId.get(id);
+      if (built !== undefined) realizers.push(link(built));
+    }
+  } else {
+    for (const id of servesOf(doc, nodeId)) {
+      const capability = byId.get(id);
+      if (capability !== undefined) serves.push(link(capability));
+    }
+  }
+
   return {
     node,
+    layer,
     working: activity.has(nodeId),
     parent: parentNode === undefined ? null : link(parentNode),
     children,
     relations,
+    realizers,
+    serves,
+    unrealized:
+      layer === "product" &&
+      realizers.length === 0 &&
+      (node.phase === "component" || node.phase === "building" || node.phase === "built"),
     drift: doc.drift[nodeId] ?? [],
     lines: linesAbout(node, transcript),
   };

@@ -195,6 +195,70 @@
         "apps/worker/src/jobs/snapshot.ts",
         "apps/worker/src/main.ts"
       ]
+    },
+    {
+      "id": "cap-split-bill",
+      "parentId": null,
+      "label": "Split a bill",
+      "summary": "Say who paid and for whom, and have everyone's share worked out the same way every time.",
+      "phase": "built",
+      "layer": "product",
+      "realizes": [
+        "domain-splits",
+        "ledgerly-api",
+        "ledgerly-web"
+      ]
+    },
+    {
+      "id": "cap-who-owes",
+      "parentId": null,
+      "label": "See who owes whom",
+      "summary": "One honest list of what each person is up or down after everything logged so far.",
+      "phase": "built",
+      "layer": "product",
+      "realizes": [
+        "domain-settlement",
+        "ledgerly-web"
+      ]
+    },
+    {
+      "id": "cap-settle-up",
+      "parentId": null,
+      "label": "Settle up",
+      "summary": "Get the shortest set of payments that clears the group, and record them once they happen.",
+      "phase": "built",
+      "layer": "product",
+      "realizes": [
+        "domain-settlement",
+        "ledgerly-api",
+        "ledgerly-store"
+      ]
+    },
+    {
+      "id": "cap-get-nudged",
+      "parentId": null,
+      "label": "Get a nudge to pay",
+      "summary": "A reminder that arrives only while you still owe something, and stops once you have paid.",
+      "phase": "building",
+      "status": "Nudges go out on wake-up rather than on a nightly schedule.",
+      "layer": "product",
+      "realizes": [
+        "ledgerly-notify",
+        "ledgerly-queue",
+        "ledgerly-worker"
+      ]
+    },
+    {
+      "id": "cap-run-group",
+      "parentId": null,
+      "label": "Run a group",
+      "summary": "Start a shared pot for a trip or a flat, add the people in it, and keep it going.",
+      "phase": "built",
+      "layer": "product",
+      "realizes": [
+        "ledgerly-api",
+        "ledgerly-cli"
+      ]
     }
   ],
   "edges": [
@@ -323,6 +387,27 @@
       "target": "ledgerly-store",
       "kind": "dataflow",
       "label": "reads and writes the same records"
+    },
+    {
+      "id": "cap-run-group--cap-split-bill",
+      "source": "cap-run-group",
+      "target": "cap-split-bill",
+      "kind": "relates",
+      "label": "a group is what a bill gets split inside"
+    },
+    {
+      "id": "cap-split-bill--cap-who-owes",
+      "source": "cap-split-bill",
+      "target": "cap-who-owes",
+      "kind": "dataflow",
+      "label": "every split changes who owes whom"
+    },
+    {
+      "id": "cap-who-owes--cap-settle-up",
+      "source": "cap-who-owes",
+      "target": "cap-settle-up",
+      "kind": "dataflow",
+      "label": "the balances the payments have to clear"
     }
   ],
   "reality": {

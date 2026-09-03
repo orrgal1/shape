@@ -3,6 +3,7 @@
  * plus an utterance become one addressed instruction for the running session.
  */
 
+import { layerOf, realizersOf, servesOf } from "../../shared/src/index.ts";
 import type { Referent } from "../../shared/src/index.ts";
 import type { GraphStore } from "./store.ts";
 
@@ -24,6 +25,30 @@ function neighborsOfNode(store: GraphStore, id: string): string[] {
   return out;
 }
 
+/** `id "Label"` — the agent needs the id to act and the user's words to understand. */
+function nameOf(store: GraphStore, id: string): string {
+  const node = store.node(id);
+  return node === undefined ? id : `${id} "${node.label}"`;
+}
+
+/**
+ * The one cross-layer line: a capability names the parts that make it real, a
+ * part names the capabilities it serves. Kept out of `Neighbors` on purpose —
+ * neighbors are same-layer relations, this is the bridge between the layers.
+ */
+function layerLines(store: GraphStore, id: string): string[] {
+  if (layerOf(store.node(id) ?? {}) === "product") {
+    const realizers = realizersOf(store.doc, id);
+    return [
+      realizers.length > 0
+        ? `Realized by: ${realizers.map((r) => nameOf(store, r)).join(", ")}`
+        : "Realized by: nothing yet — no part on the build side makes this capability real, so building it is the work.",
+    ];
+  }
+  const serves = servesOf(store.doc, id);
+  return serves.length > 0 ? [`Serves: ${serves.map((s) => nameOf(store, s)).join(", ")}`] : [];
+}
+
 /**
  * Renders the `<canvas-steering>` block when a referent resolves, otherwise the
  * raw utterance plus the one-line canvas reminder.
@@ -37,7 +62,8 @@ export function composeUtterance(store: GraphStore, text: string, referent: Refe
       const neighbors = neighborsOfNode(store, node.id);
       return [
         "<canvas-steering>",
-        `Referent: component "${node.label}" (id: ${node.id}) — "${node.summary}" (phase: ${node.phase})`,
+        `Referent: ${layerOf(node) === "product" ? "product capability" : "component"} "${node.label}" (id: ${node.id}) — "${node.summary}" (phase: ${node.phase})`,
+        ...layerLines(store, node.id),
         `Neighbors: ${neighbors.length > 0 ? neighbors.join(", ") : "none"}`,
         said,
         REMINDER,

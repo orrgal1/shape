@@ -6,7 +6,8 @@
 import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import type { CanvasOp, GraphDoc, RealityLayer } from "../../shared/src/index.ts";
+import { layerOf } from "../../shared/src/index.ts";
+import type { CanvasOp, GraphDoc, IntentNode, RealityLayer } from "../../shared/src/index.ts";
 import { gitFileIndexSync, gitIndexHas, type GitFileIndex } from "./reality.ts";
 import type { GateVeto, OpGate } from "./store.ts";
 
@@ -158,9 +159,16 @@ export async function synthesizeSkeleton(cwd: string, reality: RealityLayer): Pr
  * after a branch switch) exists on disk but is not part of the project, so it
  * cannot back a bubble. Outside a git repo, existence on disk is all we have.
  *
- * The index is read at most once per gate (i.e. once per survey turn).
+ * Product bubbles own no code, so codeRefs cannot ground them: what makes a
+ * capability real is the build bubbles it `realizes`. One that names none is
+ * vetoed the same way (`onboarding/unrealized-product`) — during a survey a
+ * capability nobody built is exactly the narration this mode exists to stop.
+ *
+ * The index is read at most once per gate (i.e. once per survey turn), and the
+ * gate is created per canvas call, so build bubbles admitted earlier in the SAME
+ * batch already count as real for a product bubble later in it.
  */
-export function onboardingOpGate(cwd: string): OpGate {
+export function onboardingOpGate(cwd: string, doc: Pick<GraphDoc, "nodes">): OpGate {
   let index: GitFileIndex | null | undefined;
   const resolvesInProject = (ref: string): boolean => {
     if (index === undefined) index = gitFileIndexSync(cwd);
@@ -168,16 +176,52 @@ export function onboardingOpGate(cwd: string): OpGate {
     return gitIndexHas(index, relative(cwd, resolve(cwd, ref)));
   };
 
+  const admittedBuildIds = new Set<string>();
+  const existing = (id: unknown): IntentNode | undefined =>
+    typeof id === "string" ? doc.nodes.find((n) => n.id === id) : undefined;
+  const isBuildNode = (id: string): boolean => {
+    if (admittedBuildIds.has(id)) return true;
+    const prior = existing(id);
+    return prior !== undefined && layerOf(prior) === "build";
+  };
+
   return (op): GateVeto | null => {
     if (op?.op !== "upsert_node") return null;
     const node = op.node;
     if (node === null || typeof node !== "object") return null;
-    const refs = Array.isArray(node.codeRefs) ? node.codeRefs.filter((r) => typeof r === "string" && r.trim().length > 0) : [];
     const subject = {
       path: "/node/codeRefs",
       ...(typeof node.id === "string" ? { id: node.id } : {}),
       ...(typeof node.label === "string" ? { label: node.label } : {}),
     };
+
+    // a layer sticks: an upsert that omits `layer` (or `realizes`) leaves the
+    // bubble where shared validation leaves it, so the gate reads the same way
+    const prior = existing(node.id);
+    const layer = node.layer === "product" || node.layer === "build" ? node.layer : prior ? layerOf(prior) : "build";
+
+    if (layer === "product") {
+      const claimed = Array.isArray(node.realizes) ? node.realizes : (prior?.realizes ?? []);
+      const realizes = claimed.filter((r) => typeof r === "string" && r.trim().length > 0);
+      const grounded = realizes.filter((id) => isBuildNode(id));
+      if (grounded.length === 0) {
+        return {
+          code: "onboarding/unrealized-product",
+          severity: "error",
+          message: `onboarding survey: product bubble "${String(node.id)}" must name at least one build bubble in \`realizes\` that already exists on the canvas — during a survey a capability nothing on the build side delivers is a claim you cannot point at`,
+          subject: { ...subject, path: "/node/realizes" },
+          evidence: { realizes, ...(realizes.length > 0 ? { unknown: realizes.filter((id) => !isBuildNode(id)) } : {}) },
+          supportedFixes: [
+            "set realizes to the ids of the build bubbles that make this capability real",
+            "drop the product bubble if nothing in this project delivers it yet",
+          ],
+        };
+      }
+      // product bubbles are exempt from codeRefs-must-exist: `realizes` grounds them
+      return null;
+    }
+
+    const refs = Array.isArray(node.codeRefs) ? node.codeRefs.filter((r) => typeof r === "string" && r.trim().length > 0) : [];
     if (refs.length === 0) {
       return {
         code: "onboarding/no-coderefs",
@@ -206,6 +250,7 @@ export function onboardingOpGate(cwd: string): OpGate {
         };
       }
     }
+    if (typeof node.id === "string") admittedBuildIds.add(node.id);
     return null;
   };
 }
@@ -224,6 +269,8 @@ export function composeSurveyPrompt(doc: GraphDoc, focus: string | undefined): s
     "seeded MECHANICALLY: one bubble per workspace package, real codeRefs, phase \"built\". None of",
     "it is your invention, and none of the placeholder summaries are trustworthy yet. This turn you",
     "make every bubble's promise true by reading code — and give the flat pile a readable shape.",
+    "Everything the mechanics seeded is the BUILD layer: the parts this project is made of. Rule 9",
+    "adds the second layer, PRODUCT: what the project does for the people who use it.",
     "",
     "Rules for this survey turn:",
     "",
@@ -255,10 +302,22 @@ export function composeSurveyPrompt(doc: GraphDoc, focus: string | undefined): s
     "   with plain-language labels; never add an edge to mean \"contains\".",
     "7. Validation is armed for this turn: every upsert_node MUST carry codeRefs that resolve to",
     "   paths that exist in this project. Ops without them are rejected with a reason. A parent",
-    "   group bubble points at the paths of the parts it holds, so it satisfies this too.",
+    "   group bubble points at the paths of the parts it holds, so it satisfies this too. The one",
+    "   exception is a product bubble from rule 9: it owns no code, so `realizes` grounds it",
+    "   instead of codeRefs.",
     "8. Only what git tracks counts as real: a directory git ignores — typically a leftover folder",
     "   holding nothing but installed dependencies after a branch switch — is not part of this",
     "   project, so never survey it and never point codeRefs at it.",
+    "9. Then the product pass. Once the build layer is grouped and true, add 3-5 product bubbles",
+    '   with `layer: "product"` — one per capability this project gives a person, each stated as a',
+    '   promise to that person: "split a bill with friends", "see who owes what". Derive them from',
+    "   the surfaces a user actually touches — screens and routes, commands, the published entry",
+    "   points — and confirm every one against the code. A README may name capabilities the code",
+    "   never grew, so a product bubble exists only if you can point at the build bubbles that",
+    "   deliver it. Every product bubble MUST set `realizes` to the ids of those build bubbles:",
+    "   that is the only link between the two layers, and this turn a product bubble without one",
+    "   is rejected. Product bubbles need no codeRefs, are never a child of a build bubble, and",
+    "   never share an edge with one — the layers only meet through `realizes`.",
     "",
     skeleton.length > 0 ? `Mechanical skeleton (${doc.nodes.length} bubble(s)) — package names and placeholder summaries below are machine-generated and deliberately technical; replace every one of them with a plain-English promise:` : "No workspace packages were detected — build the skeleton yourself from what you read, under the same codeRefs and plain-English rules.",
     ...skeleton,

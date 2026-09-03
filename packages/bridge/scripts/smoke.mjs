@@ -163,6 +163,101 @@ let socket = null;
   );
 }
 
+// --- product layer: onboarding gate + steering composer --------------------
+// In-process for the same reason as the block above: the gate is a pure
+// function of the doc, and the composer is a pure function of the store.
+{
+  const { GraphStore } = await import(new URL("../src/store.ts", import.meta.url));
+  const { onboardingOpGate } = await import(new URL("../src/onboarding.ts", import.meta.url));
+  const { composeUtterance } = await import(new URL("../src/steering.ts", import.meta.url));
+
+  const store = new GraphStore(join(tmpdir(), `vh-smoke-product-${process.pid}`));
+  // the build layer a survey would already have on the canvas
+  store.applyCanvasCall({
+    ops: [
+      {
+        op: "upsert_node",
+        node: { id: "money-rules", parentId: null, label: "Money rules", summary: "Works out who owes what after every expense.", phase: "built", codeRefs: ["packages/auth"] },
+      },
+    ],
+  });
+  const product = (id, label, realizes) => ({
+    op: "upsert_node",
+    node: { id, parentId: null, label, summary: `${label} — the promise a person gets.`, phase: "component", layer: "product", ...(realizes === undefined ? {} : { realizes }) },
+  });
+  // `target` is a committed workspace, so the codeRefs half of the gate is live
+  const outcome = store.applyCanvasCall(
+    {
+      ops: [
+        product("see-who-owes", "See who owes what"),
+        product("split-a-bill", "Split a bill", ["money-rules"]),
+        { op: "upsert_node", node: { id: "ghost-part", parentId: null, label: "Ghost", summary: "A part nobody wrote." , phase: "built" } },
+      ],
+    },
+    onboardingOpGate(target, store.doc),
+  );
+  const productReceipts = JSON.parse(outcome.text.slice(outcome.text.indexOf("\n") + 1)).rejections;
+  const unrealized = productReceipts.find((r) => r.code === "onboarding/unrealized-product");
+  check(
+    "survey vetoes a product bubble that nothing on the build side realizes",
+    unrealized?.index === 0 && unrealized.subject.path === "/ops/0/node/realizes" &&
+      unrealized.subject.id === "see-who-owes" && unrealized.severity === "error" &&
+      unrealized.supportedFixes.length >= 1 && store.node("see-who-owes") === undefined,
+    JSON.stringify(unrealized),
+  );
+  check(
+    "survey accepts a product bubble with a real realizes and no codeRefs at all",
+    outcome.text.startsWith("applied 1 op(s);") &&
+      store.node("split-a-bill")?.codeRefs === undefined &&
+      store.node("split-a-bill")?.realizes?.join(",") === "money-rules",
+    outcome.text.split("\n")[0],
+  );
+  check(
+    "the codeRefs bar still holds for build bubbles in the same call",
+    productReceipts.some((r) => r.index === 2 && r.code === "onboarding/no-coderefs"),
+    JSON.stringify(productReceipts.map((r) => `${r.index}:${r.code}`)),
+  );
+  // a status refresh omits layer and realizes; the bubble must stay a grounded
+  // capability rather than becoming a build bubble that owes codeRefs
+  const refresh = store.applyCanvasCall(
+    {
+      ops: [{ op: "upsert_node", node: { id: "split-a-bill", parentId: null, label: "Split a bill", summary: "Split a bill — the promise a person gets.", phase: "component", status: "reading the routes" } }],
+    },
+    onboardingOpGate(target, store.doc),
+  );
+  check(
+    "re-upserting a product bubble without layer keeps it a capability, not a codeRefs debt",
+    refresh.text.startsWith("applied 1 op(s);") && store.node("split-a-bill")?.layer === "product" &&
+      store.node("split-a-bill")?.status === "reading the routes",
+    refresh.text.split("\n")[0],
+  );
+
+  const capability = composeUtterance(store, "make this the first thing people see", { kind: "node", id: "split-a-bill" });
+  check(
+    "product referent composes Realized by with the build bubble's label",
+    capability.includes('Referent: product capability "Split a bill" (id: split-a-bill)') &&
+      capability.includes('Realized by: money-rules "Money rules"') &&
+      capability.includes("make this the first thing people see"),
+    capability.split("\n").slice(1, 3).join(" | "),
+  );
+  const part = composeUtterance(store, "speed this up", { kind: "node", id: "money-rules" });
+  check(
+    "build referent composes Serves with the capability it is under",
+    part.includes('Referent: component "Money rules" (id: money-rules)') &&
+      part.includes('Serves: split-a-bill "Split a bill"'),
+    part.split("\n").slice(1, 3).join(" | "),
+  );
+  // legal AFTER onboarding: this is how the user says "I want this next"
+  store.applyCanvasCall({ ops: [product("see-who-owes", "See who owes what")] });
+  const promise = composeUtterance(store, "build this next", { kind: "node", id: "see-who-owes" });
+  check(
+    "product referent nothing realizes composes the unrealized line",
+    promise.includes("Realized by: nothing yet — no part on the build side makes this capability real") &&
+      /Realized by: .*\nNeighbors: /.test(promise),
+    promise.split("\n")[2],
+  );
+}
+
 // --- backend seam: config precedence + unknown-id startup error ------------
 // Two extra bridge processes: one whose harness command comes only from
 // ~/.shape/config.json (no --omp flag), one whose project config names a
@@ -368,6 +463,23 @@ try {
     survey.message.includes("3-5 top-level bubbles") &&
       survey.message.includes("The skeleton is flat on purpose; your first job is to group it") &&
       survey.message.includes("introduce named parent bubbles"),
+  );
+  check(
+    "survey prompt states the product pass: 3-5 capabilities, layer product, realizes required",
+    survey.message.includes("9. Then the product pass.") &&
+      survey.message.includes("add 3-5 product bubbles") &&
+      survey.message.includes('with `layer: "product"`') &&
+      survey.message.includes("Every product bubble MUST set `realizes` to the ids of those build bubbles") &&
+      survey.message.includes("a product bubble without one") &&
+      survey.message.includes("Product bubbles need no codeRefs"),
+  );
+  check(
+    "preamble opens greenfield work in the product layer and names the one cross-layer link",
+    survey.message.includes("Two layers — PRODUCT and BUILD.") &&
+      survey.message.includes("Starting from nothing, start in the product layer.") &&
+      /turn the idea into 3\s+to 5 capability bubbles/.test(survey.message) &&
+      /The ONE link across them is\s+`realizes` on a capability/.test(survey.message) &&
+      survey.message.includes('Set `layer: "product"` on a capability bubble'),
   );
   check("survey prompt lists the mechanical skeleton", /- t-auth "auth" — "Workspace package at packages\/auth/.test(survey.message));
   check("survey prompt carries the user focus", survey.message.includes('User focus for this survey: "the auth path"'));

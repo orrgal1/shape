@@ -322,7 +322,7 @@ class Bridge {
   async #canvasCall(args: unknown): Promise<{ text: string; isError: boolean }> {
     const outcome = this.#store.applyCanvasCall(
       args,
-      this.#onboarding ? onboardingOpGate(this.#cwd) : null,
+      this.#onboarding ? onboardingOpGate(this.#cwd, this.#store.doc) : null,
     );
     this.#broadcast({ type: "transcript", role: "tool", text: outcome.transcript });
     if (outcome.changed) {

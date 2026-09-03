@@ -15,14 +15,18 @@
  *  - liveness bubbling: activity, drift and failure on anything hidden mark the
  *    visible bubble that stands for it, folded siblings included.
  */
-import type {
-  EdgeKind,
-  GraphDoc,
-  GraphEdge,
-  IntentNode,
-  NodeKind,
-  Phase,
-  RealityLayer,
+import {
+  layerOf,
+  realizersOf,
+  servesOf,
+  type EdgeKind,
+  type GraphDoc,
+  type GraphEdge,
+  type IntentNode,
+  type Layer as GraphLayer,
+  type NodeKind,
+  type Phase,
+  type RealityLayer,
 } from "../../shared/src/index.ts";
 
 /** guards against a malformed parent chain looping forever */
@@ -76,6 +80,36 @@ export function moreBaseOf(id: string): string | null {
   return parseMoreId(id)?.base ?? null;
 }
 
+/**
+ * The cross-layer drill: a product bubble's "built by" chip focuses one flat
+ * layer of the build bubbles that make that capability real. Like a fold this
+ * id is synthetic — the document has never heard of it — but unlike a fold it
+ * names a set the parent chain cannot describe, since realizers may sit at any
+ * depth and under different parents.
+ */
+const REALIZES_PREFIX = "__realizes__:";
+
+export function isRealizesId(id: string): boolean {
+  return id.startsWith(REALIZES_PREFIX);
+}
+
+export function realizesIdOf(productId: string): string {
+  return `${REALIZES_PREFIX}${productId}`;
+}
+
+/**
+ * The product bubble a focus is asking "built by what?" about — through a fold
+ * of that layer too, so a stored focus can always be checked against the
+ * document the same way a fold's base can.
+ */
+export function realizesProductOf(focus: string | null): string | null {
+  if (focus === null) return null;
+  const base = isMoreId(focus) ? moreBaseOf(focus) : focus;
+  if (base === null || !isRealizesId(base)) return null;
+  const id = base.slice(REALIZES_PREFIX.length);
+  return id.length === 0 ? null : id;
+}
+
 /** one level up from a focus: the parent bubble, or the fold this one nests in */
 export function focusParentOf(doc: GraphDoc, focus: string): string | null {
   const more = parseMoreId(focus);
@@ -89,6 +123,14 @@ export function focusParentOf(doc: GraphDoc, focus: string): string | null {
  * not read as quietly built.
  */
 const PHASE_ORDER: readonly Phase[] = ["idea", "concept", "component", "building", "built", "failed"];
+
+/**
+ * When a capability with nothing behind it is a problem rather than a plan. An
+ * idea or a concept is allowed to have no build side yet — that is what those
+ * phases mean. Claiming to be a component, under construction or finished
+ * while no build bubble answers for it is the claim the glow calls out.
+ */
+const UNREALIZED_PHASES: readonly Phase[] = ["component", "building", "built"];
 
 function mostAdvanced(nodes: readonly IntentNode[]): Phase {
   let best: Phase = "idea";
@@ -155,6 +197,20 @@ export interface LayerNode {
   driftInside: number;
   /** hidden descendants in the `failed` phase */
   failedInside: number;
+  /**
+   * Product bubbles only: how many build bubbles claim to make this capability
+   * real. Zero is what the "built by" chip is hidden for — and, past the idea
+   * stage, what `unrealized` is about.
+   */
+  realizerCount: number;
+  /** build bubbles only: how many capabilities this bubble (or an ancestor) serves */
+  serveCount: number;
+  /**
+   * A capability the build side does not answer: past `concept`, with nothing
+   * realizing it. The one thing a product layer can say that a build layer
+   * cannot, so it is drawn loudly rather than counted.
+   */
+  unrealized: boolean;
 }
 
 export interface LayerEdge {
@@ -202,8 +258,14 @@ export interface Layer {
   moreId: string | null;
   /** the bubbles the fold stands for, in document order */
   folded: string[];
-  /** bubbles in the whole document, for the header count */
+  /** bubbles in this layer of the document, for the header count */
   total: number;
+  /**
+   * The product bubble this layer was opened to answer for — set only while the
+   * focus is a `__realizes__:` drill, where the bubbles on screen are the build
+   * side of one capability rather than the children of anything.
+   */
+  product: IntentNode | null;
   /** relations dropped because an endpoint lives outside the focused subtree */
   offLayer: number;
 }
@@ -212,6 +274,12 @@ export interface LayerInput {
   doc: GraphDoc;
   focus: string | null;
   activity: ReadonlySet<string>;
+  /**
+   * Which layer of the document to draw: the two never mix, so this filters
+   * before anything else happens. Null draws both, which only a comparison
+   * asks for — it is a flat reading of what changed, wherever it changed.
+   */
+  layer: GraphLayer | null;
   /**
    * Whether a layer wider than the cap folds. On by default; the comparison
    * view turns it off, because a comparison is one flat layer of exactly what
@@ -226,22 +294,62 @@ function kindOf(edges: GraphEdge[]): EdgeKind {
   return edges.every((edge) => edge.kind === first.kind) ? first.kind : "relates";
 }
 
-export function selectLayer({ doc, focus, activity, fold = true }: LayerInput): Layer {
-  const byId = new Map<string, IntentNode>();
-  for (const node of doc.nodes) byId.set(node.id, node);
+export function selectLayer({ doc: whole, focus, activity, layer: view, fold = true }: LayerInput): Layer {
+  const wholeById = new Map<string, IntentNode>();
+  for (const node of whole.nodes) wholeById.set(node.id, node);
+
+  // The realizes drill is the one question asked across the layers: which build
+  // bubbles make this capability real. It is asked of the whole document and
+  // answered inside the build layer, so the product bubble is resolved before
+  // the document is narrowed to a layer.
+  const askedFor = realizesProductOf(focus);
+  const asked = askedFor === null ? undefined : wholeById.get(askedFor);
+  const product = asked !== undefined && layerOf(asked) === "product" ? asked : null;
+
+  // One layer at a time. Hierarchy and relations are same-layer by
+  // construction, so this single filter is what keeps the product view from
+  // ever drawing a build bubble, and the fold, the lifting and the rollups from
+  // ever counting one. A comparison passes null: it is a flat reading of what
+  // changed, in whichever layer it changed.
+  let doc = whole;
+  if (view !== null) {
+    const scoped = whole.nodes.filter((node) => layerOf(node) === view);
+    if (scoped.length !== whole.nodes.length) {
+      const kept = new Set(scoped.map((node) => node.id));
+      doc = {
+        ...whole,
+        nodes: scoped,
+        edges: whole.edges.filter((edge) => kept.has(edge.source) && kept.has(edge.target)),
+      };
+    }
+  }
+
+  let byId = wholeById;
+  if (doc !== whole) {
+    byId = new Map<string, IntentNode>();
+    for (const node of doc.nodes) byId.set(node.id, node);
+  }
 
   /** a parent the agent never created is treated as no parent at all */
   const parentOf = (node: IntentNode): string | null =>
     node.parentId !== null && byId.has(node.parentId) ? node.parentId : null;
 
-  // A focus is either a real bubble or one of the folds under it. A fold whose
-  // base bubble is gone addresses nothing, so it falls back to the root layer,
-  // the same way a deleted bubble does.
+  // A focus is either a real bubble, a realizes drill, or one of the folds under
+  // either. A focus whose base is gone addresses nothing, so it falls back to
+  // the root layer, the same way a deleted bubble does.
   const more = focus === null ? null : parseMoreId(focus);
   const baseId = more === null ? focus : more.base;
-  const focusNode = baseId === null ? null : (byId.get(baseId) ?? null);
+  const realizesBase = baseId !== null && isRealizesId(baseId);
+  const focusNode = baseId === null || realizesBase ? null : (byId.get(baseId) ?? null);
   const focusId = focusNode === null ? null : focusNode.id;
-  const wantedDepth = more === null || (more.base !== null && focusNode === null) ? 0 : more.depth;
+  /**
+   * The fold namespace of this layer. A realizes layer folds under its own
+   * synthetic id rather than under the root, so walking out of that fold lands
+   * back on the realizers instead of on the whole build layer.
+   */
+  const foldBase = realizesBase && product !== null ? baseId : focusId;
+  const baseAlive = realizesBase ? product !== null : baseId === null || focusNode !== null;
+  const wantedDepth = more === null || !baseAlive ? 0 : more.depth;
 
   const childCount: Record<string, number> = {};
   for (const node of doc.nodes) {
@@ -249,7 +357,14 @@ export function selectLayer({ doc, focus, activity, fold = true }: LayerInput): 
     if (parent !== null) childCount[parent] = (childCount[parent] ?? 0) + 1;
   }
 
-  const members = doc.nodes.filter((node) => parentOf(node) === focusId);
+  // A capability's realizers are a set, not a subtree: they may sit at any depth
+  // and under different parents, which is exactly why this layer is flat.
+  const members =
+    product === null
+      ? doc.nodes.filter((node) => parentOf(node) === focusId)
+      : realizersOf(whole, product.id)
+          .map((id) => byId.get(id))
+          .filter((node): node is IntentNode => node !== undefined);
 
   /**
    * Every node maps to the visible bubble that stands for it, or to nothing when
@@ -405,13 +520,13 @@ export function selectLayer({ doc, focus, activity, fold = true }: LayerInput): 
     depth += 1;
   }
 
-  const moreId = folded.length === 0 ? null : moreIdOf(focusId, depth + 1);
+  const moreId = folded.length === 0 ? null : moreIdOf(foldBase, depth + 1);
   const moreBubble: IntentNode | null =
     moreId === null
       ? null
       : {
           id: moreId,
-          parentId: focusId,
+          parentId: foldBase,
           label: `${folded.length} more parts`,
           summary: foldSummary(folded),
           phase: mostAdvanced(folded),
@@ -427,15 +542,33 @@ export function selectLayer({ doc, focus, activity, fold = true }: LayerInput): 
       cursor = byId.get(parent);
     }
   }
+  // The realizes layer has no bubble of its own — it is a question about one in
+  // the other layer — so it gets a crumb that says what is on screen. The
+  // breadcrumb names the capability itself in front of it.
+  if (product !== null) {
+    trail.push({
+      id: realizesIdOf(product.id),
+      parentId: null,
+      label: "built by",
+      summary: `the build bubbles that make “${product.label}” real`,
+      phase: product.phase,
+    });
+  }
   // one crumb per fold walked into; only the last one is ever the focus card,
   // so the intermediate crumbs need a label and a hue, nothing more
   const insidePhase = mostAdvanced(shown.length > 0 ? shown : folded);
+  const insideName =
+    product !== null
+      ? `what builds ${product.label}`
+      : focusNode === null
+        ? "the project"
+        : focusNode.label;
   for (let level = 1; level <= depth; level += 1) {
     trail.push({
-      id: moreIdOf(focusId, level),
-      parentId: level === 1 ? focusId : moreIdOf(focusId, level - 1),
+      id: moreIdOf(foldBase, level),
+      parentId: level === 1 ? foldBase : moreIdOf(foldBase, level - 1),
       label: "more parts",
-      summary: `the parts folded out of ${focusNode === null ? "the project" : focusNode.label} to keep the layer readable`,
+      summary: `the parts folded out of ${insideName} to keep the layer readable`,
       phase: insidePhase,
     });
   }
@@ -469,17 +602,65 @@ export function selectLayer({ doc, focus, activity, fold = true }: LayerInput): 
     if (node.phase === "failed") failedInside[owner] = (failedInside[owner] ?? 0) + 1;
   }
 
-  const nodes: LayerNode[] = shown.map((node) => ({
-    node,
-    isMore: false,
-    childCount: childCount[node.id] ?? 0,
-    descendantCount: descendantCount[node.id] ?? 0,
-    activeSelf: activity.has(node.id),
-    activeInside: activeInside[node.id] ?? [],
-    driftOwn: doc.drift[node.id] ?? NO_DRIFT,
-    driftInside: driftInside[node.id] ?? 0,
-    failedInside: failedInside[node.id] ?? 0,
-  }));
+  /**
+   * A capability has nothing under it in its own layer: what is "inside" it is
+   * the build work that makes it real. Activity, drift and failure therefore
+   * roll up across the realizes link — a capability reads as live while the
+   * agent is anywhere in the code that answers it — which is the whole reason
+   * the product layer can be trusted as a place to watch from.
+   */
+  const realizedSpan = (productId: string): string[] => {
+    const span: string[] = [];
+    const seen = new Set<string>();
+    const stack = realizersOf(whole, productId);
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (id === undefined || seen.has(id)) continue;
+      seen.add(id);
+      span.push(id);
+      for (const node of whole.nodes) {
+        if (node.parentId === id) stack.push(node.id);
+      }
+    }
+    return span;
+  };
+
+  const nodes: LayerNode[] = shown.map((node) => {
+    const isProduct = layerOf(node) === "product";
+    const realizers = isProduct ? realizersOf(whole, node.id) : [];
+    let activeIn = activeInside[node.id] ?? [];
+    let driftIn = driftInside[node.id] ?? 0;
+    let failedIn = failedInside[node.id] ?? 0;
+
+    if (realizers.length > 0) {
+      const live: InsideRef[] = [];
+      for (const id of realizedSpan(node.id)) {
+        const built = wholeById.get(id);
+        if (built === undefined) continue;
+        if (activity.has(id)) {
+          live.push({ id, label: built.label, status: built.status ?? null, phase: built.phase });
+        }
+        driftIn += whole.drift[id]?.length ?? 0;
+        if (built.phase === "failed") failedIn += 1;
+      }
+      if (live.length > 0) activeIn = [...activeIn, ...live];
+    }
+
+    return {
+      node,
+      isMore: false,
+      childCount: childCount[node.id] ?? 0,
+      descendantCount: descendantCount[node.id] ?? 0,
+      activeSelf: activity.has(node.id),
+      activeInside: activeIn,
+      driftOwn: doc.drift[node.id] ?? NO_DRIFT,
+      driftInside: driftIn,
+      failedInside: failedIn,
+      realizerCount: realizers.length,
+      serveCount: isProduct ? 0 : servesOf(whole, node.id).length,
+      unrealized: isProduct && realizers.length === 0 && UNREALIZED_PHASES.includes(node.phase),
+    };
+  });
   if (moreBubble !== null) {
     nodes.push({
       node: moreBubble,
@@ -493,6 +674,9 @@ export function selectLayer({ doc, focus, activity, fold = true }: LayerInput): 
       driftOwn: NO_DRIFT,
       driftInside: driftInside[moreBubble.id] ?? 0,
       failedInside: failedInside[moreBubble.id] ?? 0,
+      realizerCount: 0,
+      serveCount: 0,
+      unrealized: false,
     });
   }
 
@@ -512,6 +696,7 @@ export function selectLayer({ doc, focus, activity, fold = true }: LayerInput): 
     moreId,
     folded: folded.map((node) => node.id),
     total: doc.nodes.length,
+    product,
     offLayer: drawn.offLayer,
   };
 }

@@ -58,6 +58,25 @@ test("snapshotGraph is canonical: order-independent and undefined optionals drop
   assert.equal(canonicalJson(a), canonicalJson(b));
 });
 
+test("canonical form: build is the absent layer, product keeps its sorted realizes", () => {
+  const implicit = snapshotGraph({ rev: 1, nodes: [node("groups")], edges: [] }, AT);
+  const explicit = snapshotGraph({ rev: 1, nodes: [node("groups", { layer: "build" })], edges: [] }, AT);
+  assert.equal(canonicalJson(implicit), canonicalJson(explicit));
+  assert.equal(Object.hasOwn(implicit.nodes[0] ?? {}, "layer"), false);
+  assert.equal(Object.hasOwn(explicit.nodes[0] ?? {}, "layer"), false);
+
+  const product = snapshotGraph(
+    { rev: 1, nodes: [node("share-costs", { layer: "product", realizes: ["groups", "expenses"] })], edges: [] },
+    AT,
+  );
+  assert.equal(product.nodes[0]?.layer, "product");
+  assert.deepEqual(product.nodes[0]?.realizes, ["expenses", "groups"]);
+
+  // realizes is meaningless off the product layer, so canonical form drops it
+  const stray = snapshotGraph({ rev: 1, nodes: [node("groups", { realizes: ["share-costs"] })], edges: [] }, AT);
+  assert.equal(canonicalJson(stray), canonicalJson(implicit));
+});
+
 test("canonicalJson sorts object keys and preserves array order", () => {
   assert.equal(canonicalJson({ b: 1, a: [2, 1] }), '{"a":[2,1],"b":1}');
   assert.equal(canonicalJson({ a: undefined, b: null }), '{"b":null}');

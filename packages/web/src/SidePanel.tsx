@@ -39,6 +39,28 @@ function NodeChip({ target }: { target: NeighbourLink }) {
   );
 }
 
+/**
+ * A chip that leads to the other layer. Selecting it where it is would highlight
+ * a bubble this canvas is not drawing, so it switches the view on the way —
+ * following the one link between what a project promises and what builds it.
+ */
+function CrossChip({ target }: { target: NeighbourLink }) {
+  const revealNode = useApp((state) => state.revealNode);
+  return (
+    <button
+      type="button"
+      className="node-chip node-chip-cross"
+      data-phase={target.phase}
+      onClick={() => revealNode(target.id)}
+      title={`open ${target.id} in the layer it lives in`}
+    >
+      <span className="node-chip-dot" />
+      {target.label}
+      <span className="node-chip-arrow">›</span>
+    </button>
+  );
+}
+
 function Lines({ lines, empty }: { lines: { seq: number; role: string; text: string }[]; empty: string }) {
   if (lines.length === 0) return <p className="tl-empty">{empty}</p>;
   return (
@@ -150,6 +172,7 @@ function NodeView({ tldr }: { tldr: NodeTldr }) {
           <h2 className="tl-subject-label">{node.label}</h2>
           <span className="tl-subject-phase">{node.phase}</span>
           {tldr.working ? <span className="tl-live">live</span> : null}
+          {tldr.layer === "product" ? <span className="tl-subject-layer">capability</span> : null}
         </div>
         <p className="tl-promise">{node.summary}</p>
         {node.status === undefined ? null : (
@@ -172,6 +195,31 @@ function NodeView({ tldr }: { tldr: NodeTldr }) {
               <li key={note}>{note}</li>
             ))}
           </ul>
+        </section>
+      )}
+
+      {/* the one cross-layer reading: a capability says what makes it real, a
+          part says what it is for. An unrealized capability says the silence
+          out loud — it is the one thing a product layer can know that a build
+          layer cannot. */}
+      {tldr.unrealized ? (
+        <section className="tl-block">
+          <h2 className="tl-title tl-title-unrealized">unrealized</h2>
+          <p className="tl-unrealized">Nothing on the build side makes this real yet.</p>
+        </section>
+      ) : null}
+
+      {tldr.realizers.length === 0 && tldr.serves.length === 0 ? null : (
+        <section className="tl-block">
+          <h2 className="tl-title">{tldr.layer === "product" ? "built by" : "serves"}</h2>
+          <div className="tl-row">
+            <span className="tl-row-key">{tldr.layer === "product" ? "build side" : "capabilities"}</span>
+            <span className="tl-chips">
+              {(tldr.layer === "product" ? tldr.realizers : tldr.serves).map((target) => (
+                <CrossChip key={target.id} target={target} />
+              ))}
+            </span>
+          </div>
         </section>
       )}
 
@@ -292,11 +340,12 @@ export function SidePanel() {
   const selection = useApp((state) => state.selection);
   const select = useApp((state) => state.select);
   const focus = useApp((state) => state.focus);
+  const view = useApp((state) => state.view);
 
   // the panel annotates working bubbles with the on-screen bubble that stands
   // for them, so the same lift map the canvas uses is what it reads — fold
   // included, which is why it takes the layer's labels with it
-  const layer = useMemo(() => selectLayer({ doc, focus, activity }), [doc, focus, activity]);
+  const layer = useMemo(() => selectLayer({ doc, focus, activity, layer: view }), [doc, focus, activity, view]);
 
   const [collapsed, setCollapsed] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);

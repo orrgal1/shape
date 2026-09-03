@@ -1,5 +1,5 @@
 import type { Edge, Node } from "@xyflow/react";
-import type { EdgeKind, IntentNode, Phase } from "../../../shared/src/index.ts";
+import type { EdgeKind, IntentNode, Layer, Phase } from "../../../shared/src/index.ts";
 import type { DeltaStatus } from "../deltaView.ts";
 import type { InsideRef } from "../layer.ts";
 import type { EdgeGeom } from "./geometry.ts";
@@ -26,6 +26,18 @@ export interface BubbleData extends Record<string, unknown> {
   /** direct children, i.e. what drilling in reveals */
   childCount: number;
   descendantCount: number;
+  /**
+   * Which layer the bubble is drawn in. A capability card and a component card
+   * share their geometry and differ in what they are allowed to say: a
+   * capability has no code line, a component has no "built by".
+   */
+  layer: Layer;
+  /** product bubbles: build bubbles that make this capability real */
+  realizerCount: number;
+  /** build bubbles: capabilities this bubble (or an ancestor) serves */
+  serveCount: number;
+  /** a capability past `concept` that nothing on the build side answers */
+  unrealized: boolean;
   /** entry and exit animation state, driven by the motion choreography */
   motion: "enter" | "leave" | "none";
   /**

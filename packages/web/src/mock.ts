@@ -309,6 +309,47 @@ export function sampleGraph(): GraphDoc {
         phase: "idea",
         kind: "api",
       },
+      // --- the product layer: what the project promises a person, and which of
+      // the bubbles above make each promise real. One of them promises nothing
+      // yet on purpose (`share-notes`), which is what the unrealized glow and
+      // its side-panel note are drawn from.
+      {
+        id: "log-sighting",
+        parentId: null,
+        label: "Log a sighting",
+        summary: "Speak what you see and have a filed observation by the time you look up.",
+        phase: "building",
+        status: "Two-sentence notes still lose their second half.",
+        layer: "product",
+        realizes: ["capture"],
+      },
+      {
+        id: "notes-everywhere",
+        parentId: null,
+        label: "Keep notes on every device",
+        summary: "Write in the field with no signal and find it on the laptop that evening.",
+        phase: "component",
+        layer: "product",
+        realizes: ["notebook", "identity"],
+      },
+      {
+        id: "name-what-i-saw",
+        parentId: null,
+        label: "Name what I saw",
+        summary: "Turn a description into a species and a habitat you can search by.",
+        phase: "concept",
+        layer: "product",
+        realizes: ["taxonomy"],
+      },
+      {
+        id: "share-notes",
+        parentId: null,
+        label: "Hand notes to a herbarium",
+        summary: "Send a season of observations somewhere they will be kept and cited.",
+        phase: "component",
+        layer: "product",
+        realizes: [],
+      },
     ],
     edges: [
       { id: "capture--notebook", source: "capture", target: "notebook", kind: "dataflow", label: "observations" },
@@ -333,6 +374,29 @@ export function sampleGraph(): GraphDoc {
       { id: "taxonomy--export-kit", source: "taxonomy", target: "export-kit", kind: "dataflow", label: "tag sheets" },
       { id: "notebook--field-api", source: "notebook", target: "field-api", kind: "dataflow", label: "published notes" },
       { id: "field-api--identity", source: "field-api", target: "identity", kind: "depends", label: "access tokens" },
+      // product-layer relations: capabilities meeting each other, in the words a
+      // person would use about their own day
+      {
+        id: "log-sighting--notes-everywhere",
+        source: "log-sighting",
+        target: "notes-everywhere",
+        kind: "dataflow",
+        label: "the note it just filed",
+      },
+      {
+        id: "notes-everywhere--share-notes",
+        source: "notes-everywhere",
+        target: "share-notes",
+        kind: "dataflow",
+        label: "the season worth publishing",
+      },
+      {
+        id: "name-what-i-saw--log-sighting",
+        source: "name-what-i-saw",
+        target: "log-sighting",
+        kind: "relates",
+        label: "the same words for the same creature",
+      },
     ],
     reality: {
       nodes: [

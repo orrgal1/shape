@@ -1,13 +1,13 @@
 import { ReactFlowProvider } from "@xyflow/react";
 import { useEffect, useMemo, useState } from "react";
-import type { DiscoveredSession, Harness, WorktreeInfo } from "../../shared/src/index.ts";
+import { layerOf, type DiscoveredSession, type Harness, type WorktreeInfo } from "../../shared/src/index.ts";
 import { Compare } from "./Compare.tsx";
 import { SidePanel } from "./SidePanel.tsx";
 import { SteeringBar } from "./SteeringBar.tsx";
 import { TerminalPane } from "./Terminal.tsx";
 import { Canvas } from "./canvas/Canvas.tsx";
 import { useDismissable } from "./dismiss.ts";
-import { focusParentOf, selectLayer, selectReality } from "./layer.ts";
+import { focusParentOf, isRealizesId, selectLayer, selectReality } from "./layer.ts";
 import { isMockMode, startMock } from "./mock.ts";
 import { useApp, type ConnStatus } from "./store.ts";
 import { connectBridge, send } from "./ws.ts";
@@ -315,23 +315,42 @@ function VariationSwitcher() {
   );
 }
 
-/** project › ancestor › focus — the only way back up, besides Backspace */
+/**
+ * project › ancestor › focus — the only way back up, besides Backspace. The
+ * "built by" layer is the one trail that starts in the other view: it opens
+ * with the capability it is answering for, which is also the way back to it.
+ */
 function Breadcrumb() {
   const doc = useApp((state) => state.doc);
   const focus = useApp((state) => state.focus);
+  const view = useApp((state) => state.view);
   const activity = useApp((state) => state.activity);
   const setFocus = useApp((state) => state.setFocus);
+  const setView = useApp((state) => state.setView);
   // a comparison is flat and has no focus, so a trail would address nothing
   const comparing = useApp((state) => state.delta !== null);
 
-  const trail = useMemo(() => selectLayer({ doc, focus, activity }).trail, [doc, focus, activity]);
+  const layer = useMemo(() => selectLayer({ doc, focus, activity, layer: view }), [doc, focus, activity, view]);
+  const trail = layer.trail;
+  const product = layer.product;
   if (comparing || trail.length === 0) return null;
 
   return (
     <nav className="crumbs" aria-label="breadcrumb">
-      <button type="button" className="crumb" onClick={() => setFocus(null)}>
-        project
-      </button>
+      {product === null ? (
+        <button type="button" className="crumb" onClick={() => setFocus(null)}>
+          project
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="crumb"
+          title="back to the product layer"
+          onClick={() => setView("product")}
+        >
+          {product.label}
+        </button>
+      )}
       {trail.map((node, index) => (
         <span key={node.id} className="crumb-step">
           <span className="crumb-sep">›</span>
@@ -346,6 +365,48 @@ function Breadcrumb() {
         </span>
       ))}
     </nav>
+  );
+}
+
+/**
+ * Which reading of the project is on the canvas: what it promises a person, or
+ * the parts that build them. Sits left of the canvas/terminal switch because it
+ * changes what is being looked at, not where you look at it.
+ */
+function LayerSwitch() {
+  const view = useApp((state) => state.view);
+  const setView = useApp((state) => state.setView);
+  const hasProduct = useApp((state) => state.doc.nodes.some((node) => layerOf(node) === "product"));
+  // a comparison reads across both layers at once, so neither is "the" view
+  const comparing = useApp((state) => state.delta !== null);
+  if (comparing) return null;
+
+  return (
+    <div className="view-switch layer-switch" role="group" aria-label="product or build layer">
+      <button
+        type="button"
+        className="view-tab"
+        aria-pressed={view === "product"}
+        disabled={!hasProduct}
+        title={
+          hasProduct
+            ? "what the project promises a person"
+            : "no capability bubbles yet — ask the agent for the product layer"
+        }
+        onClick={() => setView("product")}
+      >
+        product
+      </button>
+      <button
+        type="button"
+        className="view-tab"
+        aria-pressed={view === "build"}
+        title="the parts that build it"
+        onClick={() => setView("build")}
+      >
+        build
+      </button>
+    </div>
   );
 }
 
@@ -388,6 +449,9 @@ function Header() {
   const conn = useApp((state) => state.conn);
   const session = useApp((state) => state.session);
   const doc = useApp((state) => state.doc);
+  // the count is about what is being read, not about the file: a build reader
+  // counting capabilities they cannot see would be counting someone else's layer
+  const shown = useApp((state) => state.doc.nodes.filter((node) => layerOf(node) === state.view).length);
   // this line always describes the project as it stands, which needs saying out
   // loud once the canvas is showing something other than that
   const comparing = useApp((state) => state.delta !== null);
@@ -401,6 +465,7 @@ function Header() {
         <ProjectSelector />
         <VariationSwitcher />
       </div>
+      <LayerSwitch />
       <ViewToggle />
       {conn === "mock" ? (
         // loud on purpose: the sample graph is fiction and has been mistaken for
@@ -425,10 +490,16 @@ function Header() {
           {model === undefined || model === null ? null : <span className="pill-harness-model">· {model.id}</span>}
         </span>
       )}
-      <span className="brand-meta">
-        {comparing ? "now · " : null}rev {doc.rev} · {doc.nodes.length} bubbles
-      </span>
-      <Breadcrumb />
+      {/* Second line, always: the layer switch made the first one wide enough to
+          run under the legend, and what a person reads while navigating — where
+          they are, and how big the layer is — must not be the thing that gets
+          overlapped. */}
+      <div className="header-line">
+        <span className="brand-meta">
+          {comparing ? "now · " : null}rev {doc.rev} · {shown} bubbles
+        </span>
+        <Breadcrumb />
+      </div>
     </header>
   );
 }
@@ -445,6 +516,9 @@ function StageTools() {
   const comparing = useApp((state) => state.delta !== null);
   // the canvas legend has nothing to say about a shell
   const terminalOpen = useApp((state) => state.terminalOpen);
+  // extracted code is the build layer's evidence; the product layer's bubbles
+  // point at capabilities, not at packages, so there is nothing to compare
+  const building = useApp((state) => state.view === "build");
 
   return (
     <div className="stage-tools">
@@ -453,17 +527,19 @@ function StageTools() {
           now; inside a comparison they would be answering a question nobody asked */}
       {hasNodes && !comparing && !terminalOpen ? (
         <>
-          <button
-            type="button"
-            className="toggle"
-            aria-pressed={showReality}
-            onClick={toggleReality}
-            title="show the code-derived reality layer"
-            disabled={realityCount === 0}
-          >
-            <span className="toggle-box" />
-            reality {realityCount === 0 ? "—" : realityCount}
-          </button>
+          {building ? (
+            <button
+              type="button"
+              className="toggle"
+              aria-pressed={showReality}
+              onClick={toggleReality}
+              title="show the code-derived reality layer"
+              disabled={realityCount === 0}
+            >
+              <span className="toggle-box" />
+              reality {realityCount === 0 ? "—" : realityCount}
+            </button>
+          ) : null}
 
           <div className="legend">
             {PHASE_LEGEND.map((phase) => (
@@ -563,24 +639,39 @@ function EmptyState() {
 function FocusCard() {
   const doc = useApp((state) => state.doc);
   const focus = useApp((state) => state.focus);
+  const view = useApp((state) => state.view);
   const activity = useApp((state) => state.activity);
   const select = useApp((state) => state.select);
   const setFocus = useApp((state) => state.setFocus);
+  const setView = useApp((state) => state.setView);
   // the canvas flattens a comparison, so there is no bubble to sit above it
   const comparing = useApp((state) => state.delta !== null);
 
-  const layer = useMemo(() => selectLayer({ doc, focus, activity }), [doc, focus, activity]);
+  const layer = useMemo(() => selectLayer({ doc, focus, activity, layer: view }), [doc, focus, activity, view]);
   const node = layer.focus;
   if (comparing || node === null) return null;
 
+  // the realizes layer was entered from the other view, so up is back to the
+  // capability rather than up a hierarchy this layer does not have
+  const product = layer.product;
+  const fromProduct = product !== null && isRealizesId(node.id);
   const parent = node.parentId;
   return (
-    <div className="focus-card" data-phase={node.phase}>
+    <div className="focus-card" data-phase={node.phase} data-realizes={fromProduct}>
       <button
         type="button"
         className="focus-up"
-        title={parent === null ? "back to the project layer" : "up one level"}
-        onClick={() => setFocus(parent)}
+        title={
+          fromProduct
+            ? `back to ${product.label} on the product layer`
+            : parent === null
+              ? "back to the project layer"
+              : "up one level"
+        }
+        onClick={() => {
+          if (fromProduct) setView("product");
+          else setFocus(parent);
+        }}
       >
         ‹
       </button>
@@ -630,10 +721,16 @@ export function App() {
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
         if (target.value.length > 0) return;
       }
-      const { focus, doc, delta, setFocus } = useApp.getState();
+      const { focus, doc, delta, view, setFocus, setView } = useApp.getState();
       // Backspace is drill-up: a comparison is flat and has nothing to drill into
       if (focus === null || delta !== null) return;
       event.preventDefault();
+      // Out of the "built by" layer is out of the layer entirely: it was entered
+      // from the product view, and that is where its capability lives.
+      if (isRealizesId(focus)) {
+        setView(view === "build" ? "product" : "build");
+        return;
+      }
       // one level up is the parent bubble, or the fold this fold nests in
       setFocus(focusParentOf(doc, focus));
     };

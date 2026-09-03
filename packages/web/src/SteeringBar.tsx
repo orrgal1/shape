@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { GraphEdge, IntentNode, Referent } from "../../shared/src/index.ts";
+import { layerOf, type GraphEdge, type IntentNode, type Referent } from "../../shared/src/index.ts";
 import { isMoreId } from "./layer.ts";
 import { useApp } from "./store.ts";
 import { send } from "./ws.ts";
@@ -32,11 +32,15 @@ function describe(
     };
   }
   if (referent.kind === "node") {
+    // A capability is as steerable as a part — it is a bubble in the document
+    // like any other. The word is there so an utterance about "this" is aimed
+    // knowingly at what the project promises rather than at what builds it.
+    const layer = node === undefined || layerOf(node) === "build" ? "" : "capability · ";
     return {
       kind: "node",
       id: referent.id,
       phase: node?.phase ?? null,
-      hint: node === undefined ? "unknown node" : `${node.phase} — ${node.summary}`,
+      hint: node === undefined ? "unknown node" : `${layer}${node.phase} — ${node.summary}`,
     };
   }
   return {

@@ -110,6 +110,20 @@ never emit a "contains" edge.
 
 See `GraphDoc`, `IntentNode`, `GraphEdge`, `RealityNode`, `RealityEdge` in shared/.
 
+**Product and build layers (user decision 2026-09-03).** The intent layer itself is split
+in two by `IntentNode.layer`: `"product"` bubbles are the capabilities a person gets,
+`"build"` bubbles are the parts that exist as code. `layer` is ABSENT on build nodes —
+absent means build, so every graph written before this decision is already a build graph,
+and the canonical snapshot omits `layer` unless it is `"product"` (`layerOf(node)` in
+shared/ is the only reader). Hierarchy and edges never cross layers, so each layer is a
+self-contained graph; the one link is `realizes` on a product node: the ids of the build
+nodes that make that capability real (≤ 20, existing build ids, no duplicates, sorted in
+canonical form). `realizersOf(doc, productId)` reads it forward; `servesOf(doc, buildId)`
+reads it back and inherits down the build hierarchy — a capability realized by a parent is
+realized by its children. An upsert that omits `layer` leaves an existing bubble on the
+layer it already had (only a brand-new bubble defaults to build), so a status refresh
+cannot teleport a bubble across layers.
+
 Node phase lifecycle: `idea → concept → component → building → built | failed`.
 Boundary test (enforced by bridge validation): every node MUST have a non-empty
 one-sentence `summary` — its promise. Reject ops that omit it.
@@ -139,7 +153,18 @@ with reason — the agent self-corrects from this.
 
 Validation (shared `applyOps`): slug ids `^[a-z0-9][a-z0-9-]*$` (edges also allow `--`),
 parent must exist, no parent cycles, edge endpoints must exist, labels ≤ 60 chars,
-summary required and ≤ 200 chars.
+summary required and ≤ 200 chars (the boundary test applies to both layers).
+Layer walls, with structured receipts in the same shape as the rest:
+- `op/cross-layer-parent` — `parentId` must be on the same layer as the node.
+- `op/cross-layer-edge` — both edge endpoints must be on the same layer.
+- `op/bad-realizes` — `realizes` only on product nodes; every id must exist and be a build
+  node; no duplicates; ≤ 20.
+- `op/node-realized` — a build node still named in some product node's `realizes` can
+  neither be removed nor flipped onto the product layer (fix: update that `realizes`
+  first). Product nodes may be removed freely.
+
+`codeRefs` are allowed on product nodes and validated no differently (the onboarding gate,
+not `applyOps`, is where product nodes stop being expected to own files).
 
 ## WebSocket protocol (bridge ↔ browser)
 
@@ -258,6 +283,19 @@ hidden until an endpoint bubble or the edge itself is selected or hovered; strok
 This cap is a SAFETY NET, not the structure: the agent is instructed to keep 3–5 bubbles per
 layer and to introduce named parent bubbles when there are more real parts (onboarding.md
 §Stage 2), and that grouping is the real structure. No wire changes; the fold is pure rendering.
+
+**Product view (client, user decision 2026-09-03):** the header carries a `PRODUCT | BUILD`
+toggle and the store keeps a `view: Layer` (default product when the doc has any product
+node). All of the above — one layer at a time, edge lifting, liveness bubbling, the 5-bubble
+cap — runs unchanged over the nodes of the current view only; focus and selection are kept
+per view. Drilling across is the `realizes` link: a product bubble shows a "built by N" chip
+that switches to the build view with focus `__realizes__:<productId>` (breadcrumb
+`<label> › built by`), a synthetic layer of exactly that capability's realizing build nodes,
+flat even when they sit at different depths; going back restores the product view with that
+bubble selected. The side panel of a build node lists its `servesOf` product bubbles, which
+jump the other way. Product bubbles roll up their realizers' activity/drift/failure, and a
+product node past `concept` with no realizers renders as **unrealized** — nothing on the
+build side makes it real yet. Client-only derivation; no wire changes.
 
 ## Steering composition (bridge)
 

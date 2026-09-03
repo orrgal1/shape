@@ -56,6 +56,7 @@ export function Canvas() {
   const liveActivity = useApp((state) => state.activity);
   const liveShowReality = useApp((state) => state.showReality);
   const liveFocus = useApp((state) => state.focus);
+  const layerView = useApp((state) => state.view);
   const delta = useApp((state) => state.delta);
   const deltaContext = useApp((state) => state.deltaContext);
   const selection = useApp((state) => state.selection);
@@ -85,14 +86,23 @@ export function Canvas() {
   const doc = view === null ? liveDoc : view.doc;
   const focus = view === null ? liveFocus : null;
   const activity = view === null ? liveActivity : NO_ACTIVITY;
-  const showReality = view === null ? liveShowReality : false;
+  // the reality column is extracted code, which is the build layer's story: a
+  // package strip under a row of capability cards would be answering a question
+  // the product layer never asks
+  const showReality = view === null && layerView === "build" ? liveShowReality : false;
   const marks = view === null ? null : view.marks;
 
   // one layer, capped at five bubbles and chosen before layout runs: elk and
   // the hand arrangements only ever see what is on screen, which is why the
-  // layouts stay small and legible however deep or wide the decomposition goes
+  // layouts stay small and legible however deep or wide the decomposition goes.
+  // A comparison is read across both layers at once — it is a flat reading of
+  // what changed, wherever it changed — so it passes no layer at all.
   const fold = view === null;
-  const layer = useMemo(() => selectLayer({ doc, focus, activity, fold }), [doc, focus, activity, fold]);
+  const scopeLayer = view === null ? layerView : null;
+  const layer = useMemo(
+    () => selectLayer({ doc, focus, activity, layer: scopeLayer, fold }),
+    [doc, focus, activity, scopeLayer, fold],
+  );
   // a package a bubble already claims is not news; ghosting it anyway is what
   // filled half the canvas on a nine-package project
   const reality = useMemo(() => selectReality(doc), [doc]);

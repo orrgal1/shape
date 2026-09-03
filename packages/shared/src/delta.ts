@@ -51,6 +51,10 @@ function canonicalNode(node: IntentNode): IntentNode {
   if (node.status !== undefined) out.status = node.status;
   if (node.modelRole !== undefined) out.modelRole = node.modelRole;
   if (node.codeRefs !== undefined) out.codeRefs = [...node.codeRefs].sort(codepointOrder);
+  // "build" is the default layer, so canonical form spells out only "product":
+  // a node written before layers existed must snapshot identically to one marked build.
+  if (node.layer === "product") out.layer = "product";
+  if (node.layer === "product" && node.realizes !== undefined) out.realizes = [...node.realizes].sort(codepointOrder);
   return out;
 }
 
@@ -67,7 +71,8 @@ function canonicalEdge(edge: GraphEdge): GraphEdge {
 
 /**
  * Deep canonical copy of a doc's intent layer: nodes and edges sorted by id,
- * stable key order per object, undefined optionals omitted, `codeRefs` sorted.
+ * stable key order per object, undefined optionals omitted, `codeRefs` and
+ * `realizes` sorted, and the default "build" layer left implicit.
  * `at` defaults to now.
  */
 export function snapshotGraph(doc: Pick<GraphDoc, "rev" | "nodes" | "edges">, at?: string): GraphSnapshot {
