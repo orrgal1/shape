@@ -20,6 +20,7 @@ import type {
   CanvasOp,
   ClientMsg,
   DiscoveredSession,
+  ProjectSummary,
   RealityLayer,
   ServerMsg,
   ServerToAgentMsg,
@@ -41,9 +42,15 @@ export type AttachMsg = Extract<AgentToServerMsg, { type: "attach" }>;
 export type AgentFrame = Exclude<AgentToServerMsg, { type: "attach" }>;
 
 export interface ProjectRoomOptions {
-  link: ServerEnd;
   /** reaches every browser watching this project */
   broadcast: (msg: ServerMsg) => void;
+  /**
+   * Every project the server hosts, for `hello`. A room knows nothing about
+   * its siblings; the server that owns them all answers this.
+   */
+  projects: () => ProjectSummary[];
+  /** this room lost its agent: every browser on the server owes a fresh list */
+  onProjectsChanged: () => void;
 }
 
 /**
@@ -60,8 +67,12 @@ const REQUEST_TIMEOUT_MS = 3_000;
  */
 const SWITCH_SETTLED_PREFIXES = ["switch_project", "adopt rejected", "no Shape adapter"];
 
+/** Refusal for everything that needs a harness while no agent is attached. */
+const AGENT_GONE = "no agent is attached to this project — start `shape agent` in it";
+
 interface PendingRequest {
   settle: (value: unknown) => void;
+  fail: (err: Error) => void;
   timer: NodeJS.Timeout;
 }
 
@@ -71,8 +82,11 @@ function errText(err: unknown): string {
 }
 
 export class ProjectRoom {
-  readonly #link: ServerEnd;
+  /** re-assigned by every attach: a reconnecting agent brings a new link to the same room */
+  #link!: ServerEnd;
   readonly #broadcast: (msg: ServerMsg) => void;
+  readonly #projects: () => ProjectSummary[];
+  readonly #onProjectsChanged: () => void;
   /** assigned by retarget(), which always runs before anything else reaches the room */
   #project!: AgentProject;
   #store!: GraphStore;
@@ -81,6 +95,16 @@ export class ProjectRoom {
   #loaded = false;
   #agent: AgentState = "idle";
   #activity = new Set<string>();
+  /** an agent link is bound to this room right now; false ⇒ the canvas is read-only */
+  #agentConnected = false;
+  /** ISO time of the last attach or detach */
+  #lastSeen = new Date().toISOString();
+  /**
+   * `deliver` frames that never got a `delivered` receipt. An agent that
+   * dropped mid-delivery hears them again when it re-attaches; its ids are
+   * idempotent, so a delivery the harness did see is not repeated to it.
+   */
+  readonly #undelivered = new Map<string, string>();
   /** last values the agent reported; a hello the agent does not answer uses these */
   #worktrees: WorktreeInfo[] = [];
   #sessions: DiscoveredSession[] = [];
@@ -94,18 +118,43 @@ export class ProjectRoom {
   #requestSeq = 0;
 
   constructor(opts: ProjectRoomOptions) {
-    this.#link = opts.link;
     this.#broadcast = opts.broadcast;
+    this.#projects = opts.projects;
+    this.#onProjectsChanged = opts.onProjectsChanged;
+  }
+
+  get agentConnected(): boolean {
+    return this.#agentConnected;
+  }
+
+  /** the room's agent arrived on `end`; a link it has moved off has no say here */
+  attachedTo(end: ServerEnd): boolean {
+    return this.#agentConnected && this.#link === end;
+  }
+
+  /** what a picker shows for this project */
+  summary(): ProjectSummary {
+    return {
+      projectId: this.#project.key,
+      label: this.#project.label,
+      cwd: this.#project.cwd,
+      harness: this.#project.backend.id,
+      agentConnected: this.#agentConnected,
+      lastSeen: this.#lastSeen,
+    };
   }
 
   /**
    * Open the project the agent attached to — and, on a second `attach`, move
    * the room onto the new one: the old graph is flushed first, then session,
-   * agent state and onboarding mode start over. The `attached` answer (whose
-   * preamble the agent prepends to a session's first prompt) goes out last, so
-   * nothing the agent sends next finds a half-loaded room.
+   * agent state and onboarding mode start over. `link` is the connection the
+   * attach arrived on: a reconnecting agent brings a fresh one to a room that
+   * kept its graph while it was away. The `attached` answer (whose preamble the
+   * agent prepends to a session's first prompt) goes out last, so nothing the
+   * agent sends next finds a half-loaded room — followed only by the
+   * deliveries that never got a receipt.
    */
-  async retarget(attach: AttachMsg): Promise<void> {
+  async retarget(attach: AttachMsg, link: ServerEnd): Promise<void> {
     if (this.#loaded) {
       await this.#store.persist();
       this.#agent = "idle";
@@ -139,9 +188,15 @@ export class ProjectRoom {
       targetHasCode: project.targetHasCode,
       worktrees: attach.worktrees,
       backend: project.backend,
+      agentConnected: true,
     };
     this.#loaded = true;
+    this.#agentConnected = true;
+    this.#lastSeen = new Date().toISOString();
+    this.#link = link;
     this.#link.send({ type: "attached", projectId: project.key, preamble: PREAMBLE });
+    // the agent dedupes by id, so a delivery the harness already saw is not repeated
+    for (const [id, body] of this.#undelivered) this.#link.send({ type: "deliver", id, body });
   }
 
   /**
@@ -165,16 +220,34 @@ export class ProjectRoom {
       session: this.#session,
       agent: this.#agent,
       recentProjects: this.#recents,
+      projects: this.#projects(),
+      projectId: this.#project.key,
       revisions: await this.#snapshots.list(),
       sessions,
     };
   }
 
-  /** The link dropped, or the agent detached: nothing is running any more. */
+  /**
+   * The link dropped, or the agent detached: nothing is running any more, the
+   * canvas goes read-only, and everything a browser was waiting on fails with a
+   * line it can show instead of hanging until the request timeout.
+   */
   agentGone(line: string): void {
     console.error(`[bridge] ${line}`);
+    // a `detached` frame already told us; the close that follows is not news
+    if (!this.#agentConnected) return;
+    this.#agentConnected = false;
+    this.#lastSeen = new Date().toISOString();
     this.#setAgent("idle");
     this.#setActivity([]);
+    this.#session = { ...this.#session, agentConnected: false };
+    this.#broadcast({ type: "session", session: this.#session });
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timer);
+      pending.fail(new Error(AGENT_GONE));
+    }
+    this.#pending.clear();
+    this.#onProjectsChanged();
   }
 
   // -------------------------------------------------------------------------
@@ -187,6 +260,12 @@ export class ProjectRoom {
    * every client stays in sync with the graph the agent is writing.
    */
   handleClient(msg: ClientMsg, reply: (msg: ServerMsg) => void): void {
+    if (!this.#agentConnected && msg.type !== "diff") {
+      // the terminal pane already shows the shell is gone; everything else owes
+      // the user a reason nothing happened. `diff` needs no harness at all.
+      if (!msg.type.startsWith("pty_")) this.#error(AGENT_GONE);
+      return;
+    }
     switch (msg.type) {
       case "pty_open":
       case "pty_input":
@@ -228,11 +307,7 @@ export class ProjectRoom {
         return;
       case "utterance":
         this.#broadcast({ type: "transcript", role: "user", text: msg.text });
-        this.#link.send({
-          type: "deliver",
-          id: `req-${++this.#requestSeq}`,
-          body: composeUtterance(this.#store, msg.text, msg.referent),
-        });
+        this.#deliver(composeUtterance(this.#store, msg.text, msg.referent));
         return;
     }
   }
@@ -288,11 +363,17 @@ export class ProjectRoom {
 
     this.#fileIndex = buildFileIndex(files);
     this.#onboarding = true;
-    this.#link.send({
-      type: "deliver",
-      id: `req-${++this.#requestSeq}`,
-      body: composeSurveyPrompt(this.#store.doc, focus),
-    });
+    this.#deliver(composeSurveyPrompt(this.#store.doc, focus));
+  }
+
+  /**
+   * Send a composed prompt to the agent and remember it until the receipt
+   * arrives: an agent that dropped in between hears it again on re-attach.
+   */
+  #deliver(body: string): void {
+    const id = `req-${++this.#requestSeq}`;
+    this.#undelivered.set(id, body);
+    this.#link.send({ type: "deliver", id, body });
   }
 
   // -------------------------------------------------------------------------
@@ -325,6 +406,7 @@ export class ProjectRoom {
         this.#recents = msg.paths;
         return;
       case "delivered":
+        this.#undelivered.delete(msg.id);
         // only the agent knows whether the harness was mid-turn when it landed
         if (msg.queued) {
           this.#broadcast({
@@ -403,7 +485,9 @@ export class ProjectRoom {
           return;
         }
         this.#session = { ...this.#session, sessionId, model };
-        void this.hello().then((hello) => this.#broadcast(hello));
+        // a session id arriving late is not worth a hello: the client would
+        // reset selection, focus and transcript over a field it never chose
+        this.#broadcast({ type: "session", session: this.#session });
         return;
       }
     }
@@ -473,9 +557,12 @@ export class ProjectRoom {
   /**
    * Ask the agent for something a browser is waiting on. The id correlates the
    * answer; an agent that goes quiet rejects the caller with a line it can show
-   * instead of leaving the request pending forever.
+   * instead of leaving the request pending forever. An agentless room fails at
+   * once: a hello for a project whose agent is gone must not sit out the
+   * timeout before falling back to what the last attach told us.
    */
   #request<T>(make: (id: string) => ServerToAgentMsg): Promise<T> {
+    if (!this.#agentConnected) return Promise.reject(new Error(AGENT_GONE));
     const id = `req-${++this.#requestSeq}`;
     const frame = make(id);
     const { promise, resolve: settle, reject } = Promise.withResolvers<unknown>();
@@ -483,7 +570,7 @@ export class ProjectRoom {
       this.#pending.delete(id);
       reject(new Error(`the agent did not answer ${frame.type} within ${REQUEST_TIMEOUT_MS} ms`));
     }, REQUEST_TIMEOUT_MS);
-    this.#pending.set(id, { settle, timer });
+    this.#pending.set(id, { settle, fail: reject, timer });
     this.#link.send(frame);
     return promise as Promise<T>;
   }

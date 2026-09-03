@@ -820,6 +820,23 @@ export interface SessionInfo {
   worktrees: WorktreeInfo[];
   /** the harness this session is running on, and what it can do */
   backend: BackendInfo;
+  /**
+   * an agent is attached to this project right now. False ⇒ the canvas is
+   * read-only: steering, onboarding and the terminal are refused with a reason.
+   */
+  agentConnected: boolean;
+}
+
+/** one project the server knows, for the picker */
+export interface ProjectSummary {
+  projectId: string;
+  label: string;
+  cwd: string;
+  /** backend id of the agent that last attached */
+  harness: string;
+  agentConnected: boolean;
+  /** ISO time of the last attach or detach */
+  lastSeen: string;
 }
 
 export type AgentState = "idle" | "streaming" | "compacting";
@@ -836,6 +853,10 @@ export type ServerMsg =
       session: SessionInfo;
       agent: AgentState;
       recentProjects: string[];
+      /** every project this server hosts; local mode has exactly one */
+      projects: ProjectSummary[];
+      /** the project this socket is joined to */
+      projectId: string;
       /** available snapshots, ascending by rev */
       revisions: RevisionInfo[];
       /** agent sessions running on this machine, newest first; Shape's own children excluded */
@@ -843,6 +864,10 @@ export type ServerMsg =
     }
   | { type: "graph"; graph: GraphDoc }
   | { type: "agent"; state: AgentState }
+  /** session facts changed without the graph changing (agent attached/detached, harness session id) — no client state reset */
+  | { type: "session"; session: SessionInfo }
+  /** broadcast whenever the project list changes (attach, detach) */
+  | { type: "projects"; projects: ProjectSummary[] }
   | { type: "activity"; nodeIds: string[] }
   | { type: "transcript"; role: "assistant" | "user" | "tool"; text: string }
   /** broadcast whenever a new snapshot is written; ascending by rev */
@@ -857,7 +882,10 @@ export type ServerMsg =
 export type ClientMsg =
   | { type: "utterance"; referent: Referent | null; text: string }
   | { type: "onboard"; focus?: string }
+  /** ask THIS project's agent to retarget onto `path` (local mode; the agent decides) */
   | { type: "switch_project"; path: string }
+  /** join another project this server hosts; answered with a fresh `hello` to this socket only */
+  | { type: "select_project"; projectId: string }
   /** compare two snapshots; `revA` = before, `revB` = after. Unknown rev → `error` frame */
   | { type: "diff"; revA: number; revB: number }
   | { type: "abort" }

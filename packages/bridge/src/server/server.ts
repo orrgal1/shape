@@ -1,15 +1,23 @@
 /**
- * The canvas server: browsers on `BRIDGE_WS_PATH`, agents over the link. An
- * agent's first `attach` opens the room it names; every later `attach` on the
- * same link is a retarget (it switched projects).
+ * The canvas server: browsers on `BRIDGE_WS_PATH`, agents on `AGENT_WS_PATH`
+ * and — in local mode — over an in-memory link handed to `attachAgent`. Both
+ * sources produce the same `ServerEnd`, so nothing below this line knows how a
+ * link is carried.
  *
- * Phase 0 hosts exactly one room, because local mode attaches exactly one
- * agent — but nothing here knows how that link is carried, so the same class
- * serves a socket-attached agent unchanged.
+ * One room per project key, kept after its agent leaves: the graph, the
+ * revisions and the transcript are the project's, not the agent's, and a
+ * browser watching an agentless room gets a read-only canvas rather than an
+ * empty one. An `attach` therefore either opens a room, re-binds an agentless
+ * one, or retargets the room this very link already holds.
  */
 
-import type { ServerMsg } from "../../../shared/src/index.ts";
-import type { ServerEnd } from "../transport.ts";
+import type { WebSocket } from "ws";
+import {
+  AGENT_WS_PATH,
+  type ProjectSummary,
+  type ServerMsg,
+} from "../../../shared/src/index.ts";
+import { socketServerEnd, type ServerEnd } from "../transport.ts";
 import type { SocketServer } from "../wsserver.ts";
 import { ProjectRoom, type AttachMsg } from "./room.ts";
 import { WsHub } from "./ws.ts";
@@ -20,58 +28,158 @@ export interface ShapeServerOptions {
 
 export class ShapeServer {
   readonly #hub: WsHub;
-  #link: ServerEnd | null = null;
-  #room: ProjectRoom | null = null;
+  readonly #rooms = new Map<string, ProjectRoom>();
+  /** the project key each open agent link is bound to */
+  readonly #links = new Map<ServerEnd, string>();
+  /** the room a new browser joins: the most recently attached project */
+  #defaultKey: string | null = null;
   /** attaches are serialized: a retarget must finish loading before the next starts */
   #attaching: Promise<void> = Promise.resolve();
 
   constructor(opts: ShapeServerOptions) {
     this.#hub = new WsHub({
       sockets: opts.sockets,
-      // a browser that beat the agent's first attach here has nothing to be
-      // told yet; it is greeted the moment the room opens
-      hello: () => this.#room?.hello() ?? null,
-      onMessage: (msg, reply) => this.#room?.handleClient(msg, reply),
+      defaultRoom: () => this.#defaultKey,
+      hello: async (key) => {
+        const room = this.#rooms.get(key);
+        return room === undefined ? null : room.hello();
+      },
+      onMessage: (msg, socket, reply) => {
+        if (msg.type === "select_project") {
+          void this.#select(socket, msg.projectId, reply);
+          return;
+        }
+        const key = this.#hub.roomOf(socket);
+        if (key === null) return;
+        this.#rooms.get(key)?.handleClient(msg, reply);
+      },
     });
+    opts.sockets.mount(AGENT_WS_PATH, (socket) => this.attachAgent(socketServerEnd(socket)));
   }
 
-  /** null until the agent's first `attach` was processed */
-  get room(): ProjectRoom | null {
-    return this.#room;
-  }
-
+  /**
+   * Take over one agent link. Local mode calls this with its in-memory end; a
+   * socket on `AGENT_WS_PATH` lands here too. The room a link belongs to is
+   * decided by the `attach` it sends, never by the order links arrive in.
+   */
   attachAgent(end: ServerEnd): void {
-    if (this.#link !== null) throw new Error("shape server: an agent is already attached");
-    this.#link = end;
-
     end.onMessage((msg) => {
       if (msg.type === "attach") {
-        this.#attaching = this.#attaching.then(() => this.#attach(end, msg));
+        this.#queue(() => this.#attach(end, msg));
         return;
       }
-      this.#room?.handleAgent(msg);
+      const room = this.#roomFor(end);
+      // a room takes its own frames straight, answers to its requests included
+      if (room !== undefined) {
+        room.handleAgent(msg);
+        return;
+      }
+      // no room yet: this frame overtook the attach that opens one (a
+      // reconnecting agent starts talking at once), so it waits for it
+      this.#queue(() => {
+        this.#roomFor(end)?.handleAgent(msg);
+      });
     });
 
+    // ordered behind any in-flight attach: the close of a link mid-attach must
+    // not report the room agentless before it is even bound
     end.onClose((reason) => {
-      const room = this.#room;
-      if (room === null) {
-        console.error(`[bridge] agent link closed: ${reason}`);
-        return;
-      }
-      room.agentGone(`agent link closed: ${reason}`);
+      this.#queue(() => this.#linkClosed(end, reason));
+    });
+  }
+
+  /**
+   * Agent work runs in arrival order — a retarget must finish loading before
+   * the next frame is handled. A failure is logged and dropped: it must not
+   * wedge the queue for every link that comes after it.
+   */
+  #queue(work: () => void | Promise<void>): void {
+    this.#attaching = this.#attaching.then(work).catch((err: unknown) => {
+      console.error(`[bridge] agent frame failed: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
 
   async #attach(end: ServerEnd, msg: AttachMsg): Promise<void> {
-    const existing = this.#room;
-    const room = existing ?? new ProjectRoom({ link: end, broadcast: (out: ServerMsg) => this.#hub.broadcast(out) });
-    await room.retarget(msg);
-    this.#room = room;
-    // a retarget is news to every browser; a first open is owed only to the
-    // ones that connected before there was a room — later sockets were greeted
-    // on connect and must not hear the same hello twice
+    if (end.closed) return;
+    const key = msg.project.key;
+    const existing = this.#rooms.get(key);
+    // a room whose agent is still there belongs to that agent alone
+    if (existing !== undefined && existing.agentConnected && !existing.attachedTo(end)) {
+      end.send({ type: "error", message: "project already has an attached agent" });
+      end.close("project already has an attached agent");
+      return;
+    }
+
+    const previous = this.#links.get(end);
+    const room =
+      existing ??
+      new ProjectRoom({
+        broadcast: (out: ServerMsg) => this.#hub.broadcastTo(key, out),
+        projects: () => this.#projects(),
+        onProjectsChanged: () => this.#broadcastProjects(),
+      });
+    // loaded before it is reachable: nothing may see a half-open room. The
+    // link is bound right after, because the hello below asks the agent
+    // questions whose answers must find their room.
+    await room.retarget(msg, end);
+    this.#rooms.set(key, room);
+    this.#links.set(end, key);
+    this.#defaultKey = key;
+
+    if (previous !== undefined && previous !== key) {
+      // the agent switched projects: its browsers asked for that, so they
+      // follow, and the project it left keeps its graph without an agent
+      this.#hub.move(previous, key);
+      this.#rooms.get(previous)?.agentGone(`agent switched to ${msg.project.cwd}`);
+    }
+
     const hello = await room.hello();
-    if (existing === null) this.#hub.greetPending(hello);
-    else this.#hub.broadcast(hello);
+    // a fresh room's browsers were greeted on connect (or are owed one below);
+    // only a retarget, a re-attach or a switch is news to sockets already joined
+    if (existing !== undefined || previous !== undefined) this.#hub.broadcastTo(key, hello);
+    // the sockets that beat the first attach are joined here and greeted once
+    this.#hub.greetPending(key, hello);
+    this.#broadcastProjects();
+  }
+
+  /** A browser asked to watch another project this server hosts. */
+  async #select(socket: WebSocket, projectId: string, reply: (msg: ServerMsg) => void): Promise<void> {
+    const room = this.#rooms.get(projectId);
+    if (room === undefined) {
+      reply({ type: "error", message: `unknown project ${projectId}` });
+      return;
+    }
+    this.#hub.join(socket, projectId);
+    reply(await room.hello());
+  }
+
+  #linkClosed(end: ServerEnd, reason: string): void {
+    const key = this.#links.get(end);
+    this.#links.delete(end);
+    const room = key === undefined ? undefined : this.#rooms.get(key);
+    // a link that never opened a room, or one the room has since replaced with
+    // a reconnect, takes nothing down with it
+    if (room === undefined || !room.attachedTo(end)) {
+      console.error(`[bridge] agent link closed: ${reason}`);
+      return;
+    }
+    room.agentGone(`agent link closed: ${reason}`);
+  }
+
+  #roomFor(end: ServerEnd): ProjectRoom | undefined {
+    const key = this.#links.get(end);
+    return key === undefined ? undefined : this.#rooms.get(key);
+  }
+
+  /** every project this server hosts, most recently seen first */
+  #projects(): ProjectSummary[] {
+    const summaries: ProjectSummary[] = [];
+    for (const room of this.#rooms.values()) summaries.push(room.summary());
+    summaries.sort((a, b) => (a.lastSeen < b.lastSeen ? 1 : a.lastSeen > b.lastSeen ? -1 : 0));
+    return summaries;
+  }
+
+  #broadcastProjects(): void {
+    this.#hub.broadcast({ type: "projects", projects: this.#projects() });
   }
 }

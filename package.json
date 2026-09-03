@@ -7,6 +7,9 @@
   "description": "Voice-driven, canvas-first frontend for the omp harness",
   "scripts": {
     "bridge": "pnpm --filter @shape/bridge start",
+    "server": "pnpm --filter @shape/bridge server",
+    "agent": "pnpm --filter @shape/bridge agent",
+    "smoke:remote": "pnpm --filter @shape/bridge smoke:remote",
     "web": "pnpm --filter @shape/web dev",
     "smoke:shared": "pnpm --filter @shape/shared smoke",
     "link:mcp": "node packages/link/src/mcp.ts"

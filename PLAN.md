@@ -155,7 +155,20 @@ implemented in-memory. Move the delivery rule and `#promptSent` into `AgentRunti
 Acceptance: existing smoke (`--omp` fake) and all bridge tests pass unchanged; `hello`,
 steering, onboarding, switch/adopt, pty, revisions behave identically; no new deps.
 
-### Phase 1 — Real transport, two binaries
+### Phase 1 — Real transport, two binaries — DONE 2026-09-03
+
+Landed: `src/linkframes.ts` (both directions validated field by field), `transport.ts`
+`socketServerEnd` / `connectAgentEnd` (backoff 500 ms → 8 s, `onDisconnect`/`onReconnect`),
+`shape server` = `pnpm server` (`src/server-cli.ts --port --host`), `shape agent` =
+`pnpm agent` (`src/agent-cli.ts --server --cwd --backend --omp --link-port`), rooms keyed by
+project key with browsers following a switching agent, `select_project`, `projects` /
+`session` frames, read-only canvas when agentless (exact refusal text in CONTRACTS),
+undelivered `deliver`s re-sent on re-attach and deduped by id on the agent, in-flight canvas
+calls failed with a reason when the link drops. `pnpm smoke:remote` (22 checks) is
+acceptance (b)+(c) on two ports; local smokes unchanged. The `--allow-terminal` flag is
+Phase 3 as planned.
+
+Original scope:
 
 - `packages/shared/src/link.ts` becomes Link v2 (frames above), validated in a shared
   `validateLinkFrame`.

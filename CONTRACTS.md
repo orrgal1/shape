@@ -213,8 +213,15 @@ not `applyOps`, is where product nodes stop being expected to own files).
 
 Server → client (`ServerMsg`):
 - `hello` — full `GraphDoc` + `SessionInfo` + `recentProjects: string[]` +
-  `sessions: DiscoveredSession[]` on connect AND after every successful `switch_project` /
-  `adopt` (retarget = fresh hello to all clients)
+  `sessions: DiscoveredSession[]` + `projects: ProjectSummary[]` (every project this server
+  hosts, newest `lastSeen` first) + `projectId` (the room this socket is joined to) on
+  connect AND after every successful `switch_project` / `adopt` (retarget = fresh hello to
+  the room's clients) AND when an agent re-attaches to an agentless room
+- `session` — `{ session: SessionInfo }` session facts changed without the graph changing:
+  the agent attached/detached (`agentConnected`), or the harness reported its session id
+  late. The client replaces `session` only — no selection/transcript reset.
+- `projects` — `{ projects }` broadcast to every socket whenever a room opens or an agent
+  attaches/detaches
 - `graph` — full `GraphDoc` after every change (graphs are small; no patch protocol in v1)
 - `agent` — `{ state: "idle" | "streaming" | "compacting" }`
 - `activity` — `{ nodeIds: string[] }` currently-working intent nodes (pulse rendering)
@@ -228,12 +235,16 @@ Client → server (`ClientMsg`):
 - `utterance` — `{ referent: { kind: "node" | "edge", id: string } | null, text: string }`
 - `onboard` — `{ focus?: string }` map an existing project (see onboarding.md); valid only
   while the intent layer is empty
-- `switch_project` — `{ path: string }` retarget the bridge: abort any running turn, dispose
-  the backend, re-point at `path` (per-project graph persists at
+- `switch_project` — `{ path: string }` ask THIS project's agent to retarget: abort any
+  running turn, dispose the backend, re-point at `path` (per-project graph persists at
   `<path>/.shape/graph.json`), re-extract reality, re-read config, start a fresh backend
-  and retarget the terminal, broadcast
-  `hello`. `~` expands; non-directory paths → `error` frame, current project untouched.
-  Recents persist in `~/.shape/recents.json` (most-recent first, deduped, cap 10).
+  and retarget the terminal, then `attach` again — a new project key opens a new room, and
+  the browsers joined to the old room FOLLOW the agent (the old room stays, agentless).
+  `~` expands; non-directory paths → `error` frame, current project untouched.
+  Recents persist in `~/.shape/recents.json` on the agent's machine (most-recent first,
+  deduped, cap 10).
+- `select_project` — `{ projectId }` join another room this server hosts; answered with that
+  room's `hello` to this socket only. Unknown id → `error` "unknown project <id>".
 - `abort`
 - `pty_open` / `pty_input` / `pty_resize` / `pty_close` — terminal input and geometry
 - `discover` — re-scan this machine for running agent sessions; answered with a `sessions`
@@ -248,6 +259,15 @@ Client → server (`ClientMsg`):
   "no Shape adapter for <harness> yet". A `.shape/graph.json` with nodes in that project
   loads as usual; otherwise the client shows its "Map this project" CTA — that is the
   bootstrap path for an adopted project.
+
+**Agentless rooms.** A room outlives its agent (link closed, agent switched away). While
+`session.agentConnected` is false the server refuses `utterance`, `onboard`,
+`switch_project`, `adopt`, `discover` and `abort` with `error`
+"no agent is attached to this project — start `shape agent` in it", drops `pty_*` silently,
+and still serves `diff`. A `deliver` the agent never receipted is re-sent when it re-attaches
+(the agent dedupes by id: one backend send, identical receipt). A second agent attaching to
+a key whose agent is still connected is refused with "project already has an attached
+agent" and its link closed.
 
 Terminal frames live in `packages/shared/src/pty.ts` (`PtyClientMsg` / `PtyServerMsg`) and
 are merged into `ClientMsg` / `ServerMsg`; the server forwards them to the agent's `PtyManager`

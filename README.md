@@ -82,16 +82,27 @@ Packages:
 
 ```bash
 pnpm install
-pnpm bridge -- --cwd <target-project>   # bridge, pointed at the project you want to see
+pnpm bridge -- --cwd <target-project>   # local mode: server + agent in one process
 pnpm web                                # canvas dev server
 ```
 
 Then open http://localhost:5173. Append `?mock=1` to render a fixture graph without a bridge.
 
+Split mode — the Shape server on one machine, an agent next to each harness/repo:
+
+```bash
+pnpm server -- --port 4400                                   # browsers on /ws, agents on /agent
+pnpm agent -- --server ws://<server-host>:4400 --cwd <repo>  # reconnects, re-attaches; --link-port 4401 for MCP/hooks
+```
+
+The canvas turns read-only ("agent offline") while a project's agent is away and resumes
+when it re-attaches. See `PLAN.md` for the deployment roadmap and `CONTRACTS.md` for the wire.
+
 Smoke tests:
 
 ```bash
-pnpm --filter @shape/bridge smoke   # protocol checks against a fake omp child
+pnpm --filter @shape/bridge smoke   # protocol checks against a fake omp child (local mode)
+pnpm smoke:remote                   # server + agent on separate ports, detach/re-attach, select_project
 pnpm smoke:shared                   # validation + revision-diff checks
 ```
 

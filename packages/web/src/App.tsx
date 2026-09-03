@@ -125,11 +125,18 @@ function ProjectSelector() {
   const session = useApp((state) => state.session);
   const recents = useApp((state) => state.recentProjects);
   const sessions = useApp((state) => state.sessions);
+  const projects = useApp((state) => state.projects);
+  const projectId = useApp((state) => state.projectId);
   const errors = useApp((state) => state.errors);
   const [open, setOpen] = useState(false);
   const [path, setPath] = useState("");
   const menuRef = useDismissable(open, setOpen);
   const cwd = session?.cwd ?? null;
+  // One room you are already standing in is the local case and needs no list;
+  // a second room on the server — or a socket joined to something the list does
+  // not name — is the only reason to offer a choice of projects.
+  const showProjects =
+    projects.length > 1 || (projects.length === 1 && !projects.some((entry) => entry.projectId === projectId));
 
   // a successful switch answers with a hello carrying the new cwd
   useEffect(() => {
@@ -160,6 +167,30 @@ function ProjectSelector() {
 
       {open ? (
         <div className="project-menu">
+          {showProjects ? (
+            <>
+              <p className="project-menu-title">Projects on this server</p>
+              <ul className="project-recents project-rooms">
+                {projects.map((entry) => (
+                  <li key={entry.projectId}>
+                    <button
+                      type="button"
+                      className="project-recent project-room"
+                      data-current={entry.projectId === projectId}
+                      onClick={() => send({ type: "select_project", projectId: entry.projectId })}
+                      title={`${entry.cwd} — ${entry.agentConnected ? "an agent is attached" : "no agent attached"}`}
+                    >
+                      <span className="dot project-room-dot" data-connected={entry.agentConnected} />
+                      <span className="project-recent-name">{entry.label}</span>
+                      <span className="project-recent-path mono">{entry.cwd}</span>
+                      <span className="session-harness">{entry.harness}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+
           <div className="project-menu-head">
             <p className="project-menu-title">running sessions</p>
             <button
@@ -498,6 +529,14 @@ function Header() {
           {model === undefined || model === null ? null : <span className="pill-harness-model">· {model.id}</span>}
         </span>
       )}
+      {/* the canvas is readable without an agent, but nothing on it can be
+          steered — said next to the harness it would be steering */}
+      {session === null || session.agentConnected ? null : (
+        <span className="pill pill-offline" title="No agent is attached to this project — the canvas is read-only">
+          <span className="dot" />
+          agent offline
+        </span>
+      )}
       {/* Second line, always: the layer switch made the first one wide enough to
           run under the legend, and what a person reads while navigating — where
           they are, and how big the layer is — must not be the thing that gets
@@ -584,6 +623,9 @@ function StageTools() {
 function EmptyState() {
   const conn = useApp((state) => state.conn);
   const targetHasCode = useApp((state) => state.session?.targetHasCode === true);
+  // onboarding is work only an agent can do; offering it with none attached
+  // would send a frame the server refuses
+  const offline = useApp((state) => state.session !== null && !state.session.agentConnected);
   const [focus, setFocus] = useState("");
 
   const onboard = (): void => {
@@ -604,7 +646,7 @@ function EmptyState() {
       </p>
 
       {/* second path: the target already has code, so it can be surveyed instead of imagined */}
-      {targetHasCode ? (
+      {targetHasCode && !offline ? (
         <div className="onboard">
           <div className="onboard-or">
             <span />

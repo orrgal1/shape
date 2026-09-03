@@ -15,6 +15,7 @@ import {
   type GraphDoc,
   type GraphEdge,
   type IntentNode,
+  type ProjectSummary,
   type RevisionInfo,
   type SessionInfo,
   type WorktreeInfo,
@@ -120,6 +121,7 @@ export function mockSession(targetHasCode: boolean): SessionInfo {
       label: "omp",
       capabilities: { steerMidTurn: true, hostTool: true, events: "native", resume: true, terminal: "shell" },
     },
+    agentConnected: true,
   };
 }
 
@@ -131,6 +133,26 @@ const MOCK_RECENTS: readonly string[] = [
 ];
 
 const MINUTE_MS = 60_000;
+
+/** what a real agent derives from machine + realpath(cwd); fixed here */
+const MOCK_PROJECT_ID = "mock-machine:/Users/you/code/vireo";
+
+/**
+ * The fixture server hosts exactly one project, and `hello` names that same id
+ * — which is what keeps the picker's project list correctly hidden.
+ */
+function mockProjects(): ProjectSummary[] {
+  return [
+    {
+      projectId: MOCK_PROJECT_ID,
+      label: "vireo",
+      cwd: "/Users/you/code/vireo",
+      harness: "omp",
+      agentConnected: true,
+      lastSeen: new Date(Date.now() - MINUTE_MS).toISOString(),
+    },
+  ];
+}
 
 /**
  * Three sessions the adopt list can offer: one omp with a resumable id, one
@@ -451,6 +473,8 @@ export function startMock(): () => void {
       session: mockSession(true),
       agent: "idle",
       recentProjects: [...MOCK_RECENTS],
+      projects: mockProjects(),
+      projectId: MOCK_PROJECT_ID,
       sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })),
       revisions: [],
     });
@@ -466,6 +490,8 @@ export function startMock(): () => void {
       session: mockSession(true),
       agent: "idle",
       recentProjects: [...MOCK_RECENTS],
+      projects: mockProjects(),
+      projectId: MOCK_PROJECT_ID,
       sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })),
       revisions: mockRevisions(7),
     });
@@ -480,6 +506,8 @@ export function startMock(): () => void {
     session: mockSession(false),
     agent: "streaming",
     recentProjects: [...MOCK_RECENTS],
+    projects: mockProjects(),
+    projectId: MOCK_PROJECT_ID,
     sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })),
     revisions: mockRevisions(41),
   });

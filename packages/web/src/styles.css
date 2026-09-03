@@ -239,6 +239,12 @@ button {
   letter-spacing: 0;
 }
 
+/* an attached agent is the default, so its absence is what gets said — grey,
+   because this is a fact about the project, not a failure to shout about */
+.pill-offline {
+  color: var(--text-faint);
+}
+
 .dot {
   width: 6px;
   height: 6px;
@@ -426,6 +432,22 @@ button {
 
 .project-recent[data-current="true"] .project-recent-name {
   color: var(--phase-built);
+}
+
+/* whether that project has an agent right now: a room you can steer versus one
+   you can only read. Centred on purpose — the row is baseline-aligned text and
+   a 6px dot on a text baseline reads as a bullet, not as a status light. */
+.project-room-dot {
+  align-self: center;
+  color: var(--text-faint);
+}
+
+.project-room-dot[data-connected="true"] {
+  color: var(--phase-built);
+}
+
+.project-rooms .project-room .session-harness {
+  margin-left: auto;
 }
 
 .project-open {
@@ -1560,6 +1582,17 @@ button {
 
 .steer[data-suspended="true"] .steer-input {
   cursor: default;
+}
+
+/* no agent is attached, so there is nothing to steer: the bar stays legible
+   (its hint is the instruction for getting one back) but plainly inert */
+.steer[data-offline="true"] .steer-input {
+  cursor: default;
+  color: var(--text-faint);
+}
+
+.steer[data-offline="true"] .steer-hint {
+  color: var(--text-dim);
 }
 
 /* ==========================================================================

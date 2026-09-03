@@ -7,6 +7,7 @@ import {
   type GraphDelta,
   type GraphDoc,
   type Layer,
+  type ProjectSummary,
   type Referent,
   type RevisionInfo,
   type ServerMsg,
@@ -94,6 +95,13 @@ export interface AppState {
   parked: Record<Layer, ViewPlace>;
   /** project paths offered by the bridge in `hello`, most recent first */
   recentProjects: string[];
+  /**
+   * Every project this server hosts, newest-seen first — the picker's list.
+   * One entry in local mode; more once several agents attach to one server.
+   */
+  projects: ProjectSummary[];
+  /** which of `projects` this socket is joined to; null until the first hello */
+  projectId: string | null;
   /**
    * Agent sessions running on this machine, newest first — the adopt list. The
    * bridge refreshes it on every hello and on demand (`discover`).
@@ -209,6 +217,8 @@ export const useApp = create<AppState>((set, get) => ({
   focus: null,
   parked: { product: NOWHERE, build: NOWHERE },
   recentProjects: [],
+  projects: [],
+  projectId: null,
   sessions: [],
   revisions: [],
   compare: null,
@@ -232,6 +242,8 @@ export const useApp = create<AppState>((set, get) => ({
           doc: msg.graph,
           session: msg.session,
           recentProjects: msg.recentProjects,
+          projects: msg.projects,
+          projectId: msg.projectId,
           sessions: msg.sessions,
           revisions: msg.revisions,
           agent: msg.agent,
@@ -294,6 +306,15 @@ export const useApp = create<AppState>((set, get) => ({
         return;
       case "sessions":
         set({ sessions: msg.sessions });
+        return;
+      case "session":
+        // Session facts only: an agent attaching, detaching or reporting its
+        // harness session id must not cost the reader their selection, their
+        // focus or the transcript — that is what `hello` is for.
+        set({ session: msg.session });
+        return;
+      case "projects":
+        set({ projects: msg.projects });
         return;
       case "delta": {
         // The answer is broadcast to every attached browser, so a client that

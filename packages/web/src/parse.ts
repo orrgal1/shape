@@ -24,6 +24,7 @@ import {
   type IntentNode,
   type ModelRole,
   type Phase,
+  type ProjectSummary,
   type RealityEdge,
   type RealityLayer,
   type RealityNode,
@@ -285,13 +286,36 @@ function asSessionInfo(value: unknown): SessionInfo | null {
   const backend = asBackendInfo(value.backend);
   if (sessionId === undefined || sessionName === undefined || cwd === null || worktrees === null) return null;
   if (typeof value.targetHasCode !== "boolean" || backend === null) return null;
+  if (typeof value.agentConnected !== "boolean") return null;
   let model: SessionInfo["model"] = null;
   if (isRecord(value.model)) {
     const provider = asStr(value.model.provider);
     const id = asStr(value.model.id);
     if (provider !== null && id !== null) model = { provider, id };
   }
-  return { sessionId, sessionName, model, cwd, targetHasCode: value.targetHasCode, worktrees, backend };
+  return {
+    sessionId,
+    sessionName,
+    model,
+    cwd,
+    targetHasCode: value.targetHasCode,
+    worktrees,
+    backend,
+    agentConnected: value.agentConnected,
+  };
+}
+
+/** one row of the project picker: a room this server hosts */
+function asProjectSummary(value: unknown): ProjectSummary | null {
+  if (!isRecord(value)) return null;
+  const projectId = asStr(value.projectId);
+  const label = asStr(value.label);
+  const cwd = asStr(value.cwd);
+  const harness = asStr(value.harness);
+  const lastSeen = asStr(value.lastSeen);
+  if (projectId === null || label === null || cwd === null || harness === null || lastSeen === null) return null;
+  if (typeof value.agentConnected !== "boolean") return null;
+  return { projectId, label, cwd, harness, agentConnected: value.agentConnected, lastSeen };
 }
 
 const HARNESSES: readonly string[] = ["omp", "claude", "codex", "opencode", "cursor"];
@@ -338,13 +362,23 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
       const session = asSessionInfo(raw.session);
       const agent = asAgentState(raw.agent);
       const recentProjects = asStrArray(raw.recentProjects);
+      const projects = mapAll(raw.projects, asProjectSummary);
+      const projectId = asStr(raw.projectId);
       const revisions = mapAll(raw.revisions, asRevisionInfo);
       const sessions = mapAll(raw.sessions, asDiscoveredSession);
       if (graph === null || session === null || agent === null || recentProjects === null || revisions === null) {
         return null;
       }
-      if (sessions === null) return null;
-      return { type: "hello", graph, session, agent, recentProjects, revisions, sessions };
+      if (sessions === null || projects === null || projectId === null) return null;
+      return { type: "hello", graph, session, agent, recentProjects, projects, projectId, revisions, sessions };
+    }
+    case "session": {
+      const session = asSessionInfo(raw.session);
+      return session === null ? null : { type: "session", session };
+    }
+    case "projects": {
+      const projects = mapAll(raw.projects, asProjectSummary);
+      return projects === null ? null : { type: "projects", projects };
     }
     case "sessions": {
       const sessions = mapAll(raw.sessions, asDiscoveredSession);

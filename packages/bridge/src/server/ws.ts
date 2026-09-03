@@ -3,10 +3,14 @@
  * canvas client, and the boundary validator for what they send. Server frames
  * are `ServerMsg`; inbound text is narrowed to `ClientMsg`.
  *
+ * A hub is also the room registry for browsers: each socket watches exactly
+ * one project, so a frame a room broadcasts reaches its watchers and nobody
+ * else. Only server-wide news (the project list) goes to everyone.
+ *
  * A handler gets a `reply` alongside the message: frames a caller asked for by
  * id go back to the socket that asked, never to everyone. Link frames are not
  * this socket's business — they arrive on the link and are validated in
- * `agent/linkparse.ts`.
+ * `linkframes.ts`.
  */
 
 import type { WebSocket } from "ws";
@@ -35,6 +39,10 @@ export function parseClientMsg(raw: string): ClientMsg | null {
   if (parsed.type === "switch_project") {
     if (!("path" in parsed) || typeof parsed.path !== "string" || parsed.path.trim().length === 0) return null;
     return { type: "switch_project", path: parsed.path.trim() };
+  }
+  if (parsed.type === "select_project") {
+    if (!("projectId" in parsed) || typeof parsed.projectId !== "string" || parsed.projectId.length === 0) return null;
+    return { type: "select_project", projectId: parsed.projectId };
   }
   if (parsed.type === "diff") {
     if (!("revA" in parsed) || typeof parsed.revA !== "number" || !Number.isInteger(parsed.revA)) return null;
@@ -85,17 +93,26 @@ export interface WsHubOptions {
   /** the shared listener; the hub takes BRIDGE_WS_PATH on it */
   sockets: SocketServer;
   /**
-   * Frame sent to every newly connected client (worktrees are re-detected
-   * here). `null` = there is nothing to say yet — no agent has attached, so the
-   * client is greeted by a broadcast when the project opens.
+   * The project a fresh browser joins: the most recently attached one, or null
+   * while the server hosts none — such a socket has nothing to be told yet and
+   * is greeted the moment the first room opens.
    */
-  hello: () => ServerMsg | null | Promise<ServerMsg | null>;
+  defaultRoom: () => string | null;
+  /**
+   * Frame sent to a socket that just joined `key` (worktrees are re-detected
+   * here). `null` = that room is gone, so the socket waits like an early one.
+   */
+  hello: (key: string) => Promise<ServerMsg | null>;
   /** `reply` reaches only the socket the message came from */
-  onMessage: (msg: ClientMsg, reply: (msg: ServerMsg) => void) => void;
+  onMessage: (msg: ClientMsg, socket: WebSocket, reply: (msg: ServerMsg) => void) => void;
 }
 
 export class WsHub {
   readonly #clients = new Set<WebSocket>();
+  /** the browsers watching each project, by project key */
+  readonly #rooms = new Map<string, Set<WebSocket>>();
+  /** which project each browser is watching */
+  readonly #joined = new Map<WebSocket, string>();
   /** connected while there was no room: owed a hello when one opens */
   readonly #ungreeted = new Set<WebSocket>();
 
@@ -109,19 +126,20 @@ export class WsHub {
           socket.send(JSON.stringify({ type: "error", message: "unparseable client message" } satisfies ServerMsg));
           return;
         }
-        opts.onMessage(msg, (out) => {
+        opts.onMessage(msg, socket, (out) => {
           if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(out));
         });
       });
-      socket.on("close", () => {
-        this.#clients.delete(socket);
-        this.#ungreeted.delete(socket);
-      });
-      socket.on("error", () => {
-        this.#clients.delete(socket);
-        this.#ungreeted.delete(socket);
-      });
-      void Promise.resolve(opts.hello()).then((msg) => {
+      socket.on("close", () => this.#drop(socket));
+      socket.on("error", () => this.#drop(socket));
+
+      const key = opts.defaultRoom();
+      if (key === null) {
+        this.#ungreeted.add(socket);
+        return;
+      }
+      this.join(socket, key);
+      void opts.hello(key).then((msg) => {
         if (socket.readyState !== socket.OPEN) return;
         if (msg === null) {
           this.#ungreeted.add(socket);
@@ -132,23 +150,66 @@ export class WsHub {
     });
   }
 
-  get clientCount(): number {
-    return this.#clients.size;
+  /** Move a browser onto a project; it hears only that room's frames from now on. */
+  join(socket: WebSocket, key: string): void {
+    const previous = this.#joined.get(socket);
+    if (previous === key) return;
+    if (previous !== undefined) this.#rooms.get(previous)?.delete(socket);
+    this.#joined.set(socket, key);
+    const members = this.#rooms.get(key);
+    if (members === undefined) this.#rooms.set(key, new Set([socket]));
+    else members.add(socket);
+    this.#ungreeted.delete(socket);
+  }
+
+  /** null while the socket waits for the first room to open */
+  roomOf(socket: WebSocket): string | null {
+    return this.#joined.get(socket) ?? null;
+  }
+
+  /**
+   * The agent that held `from` re-attached to `to`: its browsers asked for that
+   * switch, so they follow it instead of watching a project nothing runs in.
+   */
+  move(from: string, to: string): void {
+    const members = this.#rooms.get(from);
+    if (members === undefined) return;
+    for (const socket of [...members]) this.join(socket, to);
   }
 
   /** the hello owed to sockets that connected before any room existed */
-  greetPending(msg: ServerMsg): void {
+  greetPending(key: string, msg: ServerMsg): void {
+    if (this.#ungreeted.size === 0) return;
     const text = JSON.stringify(msg);
-    for (const socket of this.#ungreeted) {
+    for (const socket of [...this.#ungreeted]) {
+      this.join(socket, key);
       if (socket.readyState === socket.OPEN) socket.send(text);
     }
-    this.#ungreeted.clear();
   }
 
+  broadcastTo(key: string, msg: ServerMsg): void {
+    const members = this.#rooms.get(key);
+    if (members === undefined) return;
+    const text = JSON.stringify(msg);
+    for (const socket of members) {
+      if (socket.readyState === socket.OPEN) socket.send(text);
+    }
+  }
+
+  /** server-wide news (the project list), not one room's business */
   broadcast(msg: ServerMsg): void {
     const text = JSON.stringify(msg);
     for (const socket of this.#clients) {
       if (socket.readyState === socket.OPEN) socket.send(text);
     }
+  }
+
+  #drop(socket: WebSocket): void {
+    this.#clients.delete(socket);
+    this.#ungreeted.delete(socket);
+    const key = this.#joined.get(socket);
+    if (key === undefined) return;
+    this.#joined.delete(socket);
+    this.#rooms.get(key)?.delete(socket);
   }
 }

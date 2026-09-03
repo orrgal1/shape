@@ -16,7 +16,7 @@
  * Nothing animates: activity pulses would make the numbers this fixture exists
  * to measure move around.
  */
-import type { GraphDoc, SessionInfo } from "../../../shared/src/index.ts";
+import type { GraphDoc, ProjectSummary, SessionInfo } from "../../../shared/src/index.ts";
 import { useApp } from "../store.ts";
 import raw from "./playground.json?raw";
 
@@ -51,6 +51,17 @@ const PLAYGROUND_SESSION: SessionInfo = {
     label: "omp",
     capabilities: { steerMidTurn: true, hostTool: true, events: "native", resume: true, terminal: "shell" },
   },
+  agentConnected: true,
+};
+
+/** one project, named by the same id `hello` reports joined */
+const PLAYGROUND_PROJECT: ProjectSummary = {
+  projectId: "playground-fixture:/Users/orgal/code/shape-playground",
+  label: "shape-playground",
+  cwd: PLAYGROUND_ROOT,
+  harness: "omp",
+  agentConnected: true,
+  lastSeen: "2026-02-11T09:14:00.000Z",
 };
 
 export function isPlaygroundMock(): boolean {
@@ -65,6 +76,8 @@ export function startPlaygroundMock(): () => void {
     session: { ...PLAYGROUND_SESSION, worktrees: PLAYGROUND_SESSION.worktrees.map((entry) => ({ ...entry })) },
     agent: "idle",
     recentProjects: [PLAYGROUND_ROOT],
+    projects: [{ ...PLAYGROUND_PROJECT }],
+    projectId: PLAYGROUND_PROJECT.projectId,
     // this fixture is about layout, not adoption: nothing to attach to
     sessions: [],
     revisions: [],

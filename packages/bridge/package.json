@@ -5,10 +5,13 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.ts",
+    "server": "node src/server-cli.ts",
+    "agent": "node src/agent-cli.ts",
     "smoke": "node scripts/smoke.mjs",
     "smoke:claude": "node scripts/smoke-claude.mjs",
     "smoke:adopt": "node scripts/smoke-adopt.mjs",
     "smoke:drift": "node scripts/smoke-drift.mjs",
+    "smoke:remote": "node scripts/smoke-remote.mjs",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {

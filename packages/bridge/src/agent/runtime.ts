@@ -50,6 +50,15 @@ const NO_REALITY: RealityLayer = { nodes: [], edges: [], extractedAt: null, head
 const MAX_WALK_FILES = 20_000;
 const MAX_WALK_DIRS = 5_000;
 
+/**
+ * What a canvas call in flight when the link drops resolves to. The harness
+ * reads tool results out loud, so it says what happened and what did not.
+ */
+const SERVER_UNREACHABLE = "Shape server unreachable — the canvas was not updated";
+
+/** deliver receipts kept for dedupe: a reconnect only re-sends what is unacknowledged */
+const MAX_RECEIPTS = 64;
+
 export interface AgentRuntimeOptions {
   cwd: string;
   /** `--backend <id>`: beats both config files */
@@ -167,11 +176,19 @@ export class AgentRuntime {
   /** false while frames wait for `attached`; see the file header */
   #outboxOpen = false;
   #queue: AgentToServerMsg[] = [];
-  #attachGate = Promise.withResolvers<void>();
+  /**
+   * One-shot: resolved by the first `attached` (or by a stop, so a signal
+   * handler firing while we still wait for a server that never comes is not a
+   * hang). Re-attaches after a retarget or a reconnect do not reopen it —
+   * nothing awaits it once start() has returned.
+   */
+  readonly #attachGate = Promise.withResolvers<void>();
 
   /** pending canvas calls (native host tool and loopback), by frame id */
   readonly #calls = new Map<string, (result: { text: string; isError: boolean }) => void>();
   #callSeq = 0;
+  /** the last MAX_RECEIPTS `delivered` answers, by deliver id; see #deliver */
+  readonly #receipts = new Map<string, { mode: "prompt" | "steer"; queued: boolean }>();
   #stopped = false;
 
   constructor(opts: AgentRuntimeOptions) {
@@ -195,6 +212,8 @@ export class AgentRuntime {
   async start(): Promise<void> {
     this.#link.onMessage((msg) => this.#onServerMsg(msg));
     this.#link.onClose(() => void this.#teardown());
+    this.#link.onDisconnect((reason) => this.#onLinkGap(reason));
+    this.#link.onReconnect(() => this.#onLinkBack());
     this.#loopback = mountLoopbackLink(this.#sockets, {
       onCanvasCall: (args) => this.#canvasCall(args),
       events: this.#events,
@@ -211,6 +230,31 @@ export class AgentRuntime {
     // the room goes agentless on this frame, so it leaves before the sockets do
     this.#link.send({ type: "detached", reason: "agent stopped" });
     await this.#teardown();
+    // a socket-backed end would otherwise keep reconnecting to a server that
+    // has nothing left to talk to
+    this.#link.close("agent stopped");
+  }
+
+  /**
+   * The socket-backed link dropped and is retrying. In-flight canvas calls
+   * cannot survive the gap — the room that would answer them is gone, and the
+   * harness is blocked on the tool result — so they fail with something worth
+   * reading out loud. The outbox closes behind them: the next thing on this
+   * link is a fresh `attach`, and whatever queues up meanwhile goes out when
+   * the server answers it.
+   */
+  #onLinkGap(reason: string): void {
+    console.error(`[bridge] link to the Shape server dropped: ${reason}`);
+    this.#outboxOpen = false;
+    const pending = [...this.#calls.values()];
+    this.#calls.clear();
+    for (const settle of pending) settle({ text: SERVER_UNREACHABLE, isError: true });
+  }
+
+  /** Reconnected: the room may be new or may have outlived us, so re-announce. */
+  #onLinkBack(): void {
+    console.error("[bridge] link to the Shape server re-established");
+    this.#sendAttach();
   }
 
   // -------------------------------------------------------------------------
@@ -275,7 +319,6 @@ export class AgentRuntime {
    */
   #sendAttach(): void {
     this.#outboxOpen = false;
-    this.#attachGate = Promise.withResolvers<void>();
     // never queued: this frame is what opens the queue
     this.#link.send({
       type: "attach",
@@ -297,6 +340,8 @@ export class AgentRuntime {
   async #teardown(): Promise<void> {
     if (this.#stopped) return;
     this.#stopped = true;
+    // start() may still be waiting for an `attached` that will never come now
+    this.#attachGate.resolve();
     const backend = this.#backend;
     this.#backend = null;
     // the harness's TUI dies with it; the pane must not be left pointing at it
@@ -489,8 +534,19 @@ export class AgentRuntime {
    * as a prompt and the harness picks it up when the turn ends. The first
    * prompt of a harness session carries the server's preamble. The receipt goes
    * out before the send: it is what the server writes the "queued" line from.
+   *
+   * Deliver ids are idempotent. After a reconnect the server re-sends every
+   * deliver it holds no receipt for, and some of those did reach the harness
+   * before the gap: a known id is answered with the receipt it already earned
+   * and never handed to the backend twice.
    */
   async #deliver(id: string, body: string): Promise<void> {
+    const known = this.#receipts.get(id);
+    if (known !== undefined) {
+      this.#post({ type: "delivered", id, mode: known.mode, queued: known.queued });
+      return;
+    }
+
     const backend = this.#backend;
     if (backend === null) return;
 
@@ -504,7 +560,14 @@ export class AgentRuntime {
     const mode: "prompt" | "steer" = backend.capabilities.steerMidTurn && streaming ? "steer" : "prompt";
     const message = streaming || this.#promptSent ? body : `${this.#preamble}${body}`;
     if (!streaming) this.#promptSent = true;
-    this.#post({ type: "delivered", id, mode, queued: mode === "prompt" && streaming });
+    const receipt = { mode, queued: mode === "prompt" && streaming };
+    this.#receipts.set(id, receipt);
+    // only the ids a reconnect could still re-send are worth remembering
+    if (this.#receipts.size > MAX_RECEIPTS) {
+      const oldest = this.#receipts.keys().next();
+      if (oldest.done !== true) this.#receipts.delete(oldest.value);
+    }
+    this.#post({ type: "delivered", id, mode: receipt.mode, queued: receipt.queued });
 
     try {
       await backend.send(message, mode);
@@ -546,6 +609,9 @@ export class AgentRuntime {
       this.#cwd = target;
       this.#pty.retarget(target);
       this.#promptSent = false; // a new session earns the preamble again
+      // a switch is a new room, and deliver ids restart with it: keeping the
+      // old room's receipts would let a fresh `req-1` look like a repeat
+      this.#receipts.clear();
       this.#reality = null;
       this.#realityHead = null;
       // frames from the new harness belong to a room the server has not opened

@@ -52,6 +52,12 @@ function describe(
 }
 
 /**
+ * The canvas is readable with no agent attached, but nothing on it can be
+ * steered: this is what the bar says instead of failing a send.
+ */
+const OFFLINE_HINT = "No agent attached — start `shape agent` in this project";
+
+/**
  * The dictation target. Any dictation tool types plain text into
  * this input, so it takes focus the instant a referent changes: click a bubble,
  * speak, press Enter.
@@ -63,6 +69,9 @@ export function SteeringBar() {
   // A past version cannot be steered: the agent works on the project as it is,
   // and nothing on a comparison canvas is a legitimate referent.
   const comparing = useApp((state) => state.delta !== null);
+  // no agent, no steering: the server refuses the utterance, so the bar refuses
+  // it first and says what to do about it
+  const offline = useApp((state) => state.session !== null && !state.session.agentConnected);
   const select = useApp((state) => state.select);
   const [text, setText] = useState("");
   const input = useRef<HTMLInputElement>(null);
@@ -97,7 +106,12 @@ export function SteeringBar() {
   };
 
   return (
-    <div className="steer" data-armed={selection !== null && !comparing} data-suspended={comparing}>
+    <div
+      className="steer"
+      data-armed={selection !== null && !comparing && !offline}
+      data-suspended={comparing}
+      data-offline={offline}
+    >
       <span className="referent" data-kind={chip.kind ?? "none"} data-phase={chip.phase ?? ""} title={chip.hint}>
         {chip.kind === null ? null : <span className="referent-kind">{chip.kind}</span>}
         <span className="referent-id mono">{chip.id}</span>
@@ -114,13 +128,15 @@ export function SteeringBar() {
         value={text}
         autoFocus
         spellCheck={false}
-        disabled={comparing}
+        disabled={comparing || offline}
         placeholder={
           comparing
             ? "Looking at an older version — go back to now to steer."
-            : selection === null
-              ? "Say what to build, or click a bubble to address one…"
-              : `Steer ${chip.id} — say what should change…`
+            : offline
+              ? ""
+              : selection === null
+                ? "Say what to build, or click a bubble to address one…"
+                : `Steer ${chip.id} — say what should change…`
         }
         aria-label="steering utterance"
         onChange={(event) => setText(event.target.value)}
@@ -138,16 +154,16 @@ export function SteeringBar() {
       />
 
       <span className="steer-hint">
-        {comparing ? "comparing versions" : ready ? "enter to send" : "dictate or type here"}
+        {comparing ? "comparing versions" : offline ? OFFLINE_HINT : ready ? "enter to send" : "dictate or type here"}
       </span>
 
-      {busy ? (
+      {busy && !offline ? (
         <button type="button" className="btn btn-abort" onClick={() => send({ type: "abort" })}>
           Abort
         </button>
       ) : null}
 
-      <button type="button" className="btn btn-send" onClick={commit} disabled={!ready || comparing}>
+      <button type="button" className="btn btn-send" onClick={commit} disabled={!ready || comparing || offline}>
         Send
       </button>
     </div>
