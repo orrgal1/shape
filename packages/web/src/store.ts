@@ -11,6 +11,7 @@ import {
   type SessionInfo,
 } from "../../shared/src/index.ts";
 import type { PtyServerMsg } from "../../shared/src/pty.ts";
+import { isMoreId, moreBaseOf } from "./layer.ts";
 
 /**
  * What the bridge's shell is doing. Terminal *output* is deliberately absent:
@@ -65,10 +66,16 @@ export interface AppState {
   activity: ReadonlySet<string>;
   transcript: TranscriptEntry[];
   selection: Referent | null;
+  /**
+   * The bubble or drawn line the pointer is over. Edge labels are hidden until
+   * something asks for them, so this is what un-hides them; it is deliberately
+   * not part of the selection, which survives the pointer leaving.
+   */
+  hover: HoverTarget | null;
   conn: ConnStatus;
   errors: ErrorToast[];
   showReality: boolean;
-  /** the drilled-into bubble; null is the project root layer */
+  /** the drilled-into bubble or fold; null is the project root layer */
   focus: string | null;
   /** project paths offered by the bridge in `hello`, most recent first */
   recentProjects: string[];
@@ -102,6 +109,8 @@ export interface AppState {
   toggleTerminal: () => void;
   setConn: (conn: ConnStatus) => void;
   select: (referent: Referent | null) => void;
+  /** what the pointer is over, which is what reveals a stroke's words */
+  setHover: (target: HoverTarget | null) => void;
   toggleReality: () => void;
   setFocus: (nodeId: string | null) => void;
   beginCompare: (revA: number, revB: number) => void;
@@ -111,9 +120,37 @@ export interface AppState {
   dismissError: (seq: number) => void;
 }
 
+/**
+ * What the pointer is over. Not a `Referent`: an `edge` here is a *drawn* line,
+ * whose id is a render id and may stand for several relations, so it addresses
+ * the canvas rather than the document.
+ */
+export interface HoverTarget {
+  kind: "node" | "edge";
+  id: string;
+}
+
+/**
+ * A focus only survives while the thing it names can still exist. A fold is
+ * synthetic — it is never in the document — so what has to still be there is
+ * the bubble whose layer folded, or nothing at all for the root layer.
+ */
+function keepFocus(focus: string | null, doc: GraphDoc): string | null {
+  if (focus === null) return null;
+  if (isMoreId(focus)) {
+    const base = moreBaseOf(focus);
+    return base === null || doc.nodes.some((node) => node.id === base) ? focus : null;
+  }
+  return doc.nodes.some((node) => node.id === focus) ? focus : null;
+}
+
 /** a selection only survives while its target still exists in the graph */
 function keepSelection(selection: Referent | null, doc: GraphDoc): Referent | null {
   if (selection === null) return null;
+  // the fold carries no referent, but it is still the highlighted bubble
+  if (selection.kind === "node" && isMoreId(selection.id)) {
+    return keepFocus(selection.id, doc) === null ? null : selection;
+  }
   const pool = selection.kind === "node" ? doc.nodes : doc.edges;
   for (const item of pool) {
     if (item.id === selection.id) return selection;
@@ -128,6 +165,7 @@ export const useApp = create<AppState>((set, get) => ({
   activity: new Set<string>(),
   transcript: [],
   selection: null,
+  hover: null,
   conn: "connecting",
   errors: [],
   showReality: true,
@@ -157,6 +195,7 @@ export const useApp = create<AppState>((set, get) => ({
           agent: msg.agent,
           conn: "live",
           selection: null,
+          hover: null,
           focus: null,
           transcript: [],
           activity: new Set<string>(),
@@ -170,7 +209,9 @@ export const useApp = create<AppState>((set, get) => ({
           doc: msg.graph,
           selection: keepSelection(s.selection, msg.graph),
           // a focus whose bubble the agent deleted falls back to the root layer
-          focus: s.focus !== null && msg.graph.nodes.some((n) => n.id === s.focus) ? s.focus : null,
+          focus: keepFocus(s.focus, msg.graph),
+          // the pointer's target is about the frame that was on screen
+          hover: null,
         }));
         return;
       case "agent":
@@ -234,9 +275,13 @@ export const useApp = create<AppState>((set, get) => ({
 
   select: (referent) => set({ selection: referent }),
 
+  setHover: (target) => set({ hover: target }),
+
   toggleReality: () => set((s) => ({ showReality: !s.showReality })),
 
-  setFocus: (focus) => set({ focus }),
+  // the layer under the pointer is about to be replaced, so what it was over is
+  // no longer under it
+  setFocus: (focus) => set({ focus, hover: null }),
 
   beginCompare: (revA, revB) => set({ compare: { revA, revB }, delta: null, deltaContext: null }),
 

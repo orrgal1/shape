@@ -279,8 +279,9 @@ export function SidePanel() {
   const focus = useApp((state) => state.focus);
 
   // the panel annotates working bubbles with the on-screen bubble that stands
-  // for them, so the same lift map the canvas uses is what it reads
-  const liftOf = useMemo(() => selectLayer({ doc, focus, activity }).liftOf, [doc, focus, activity]);
+  // for them, so the same lift map the canvas uses is what it reads — fold
+  // included, which is why it takes the layer's labels with it
+  const layer = useMemo(() => selectLayer({ doc, focus, activity }), [doc, focus, activity]);
 
   const [collapsed, setCollapsed] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
@@ -336,7 +337,7 @@ export function SidePanel() {
           {node !== null ? <NodeView tldr={node} /> : null}
           {edge !== null ? <EdgeView tldr={edge} /> : null}
           {project ? (
-            <ProjectView tldr={projectTldr(doc, activity, transcript, liftOf)} agent={agent} />
+            <ProjectView tldr={projectTldr(doc, activity, transcript, layer.liftOf, layer.labelOf)} agent={agent} />
           ) : null}
 
           <section className="tl-block tl-transcript">

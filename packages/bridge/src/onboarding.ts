@@ -105,6 +105,10 @@ async function packageDescription(cwd: string, dir: string): Promise<string | nu
 /**
  * Stage 1: one `component` node per workspace package plus a `depends` edge per
  * cross-package reality edge. Ground truth before the model says a word.
+ *
+ * Deliberately FLAT: mechanics know packages, not domains. The survey turn owns
+ * grouping (prompt rule 4 — 3-5 bubbles per layer), so this stays one bubble per
+ * package however many there are.
  */
 export async function synthesizeSkeleton(cwd: string, reality: RealityLayer): Promise<CanvasOp[]> {
   const idByRealityId: Record<string, string> = {};
@@ -219,7 +223,7 @@ export function composeSurveyPrompt(doc: GraphDoc, focus: string | undefined): s
     "Map this existing project onto the canvas the user is watching. The canvas has just been",
     "seeded MECHANICALLY: one bubble per workspace package, real codeRefs, phase \"built\". None of",
     "it is your invention, and none of the placeholder summaries are trustworthy yet. This turn you",
-    "make every bubble's promise true by reading code.",
+    "make every bubble's promise true by reading code — and give the flat pile a readable shape.",
     "",
     "Rules for this survey turn:",
     "",
@@ -236,15 +240,22 @@ export function composeSurveyPrompt(doc: GraphDoc, focus: string | undefined): s
     "   Only codeRefs stay technical — they are machine addresses.",
     `3. Boundary test, verbatim: "${BOUNDARY_TEST}" If the answer is "it is just where these files`,
     '   live", it is not a component — merge it upward.',
-    "4. Altitude: 5-15 top-level bubbles. If the repo has more packages than that, group them under",
-    "   domain parent bubbles (parentId) instead of flattening. Go one level deeper only for",
-    "   deliberate export seams; stop there.",
+    "4. Altitude: 3-5 top-level bubbles, and 3-5 children under any bubble that has children.",
+    "   The skeleton is flat on purpose; your first job is to group it. If this project has more",
+    "   real parts than that, you MUST introduce named parent bubbles and move the mechanical",
+    "   package bubbles under them (set parentId) — never flatten, never leave nine bubbles",
+    "   side by side. Name a group the way you name everything else on this canvas: what the",
+    '   group does for the system — "money rules", "getting the word out" — never a layer,',
+    '   folder or stack name ("backend", "packages", "shared code"), and give it its own',
+    "   one-sentence promise. The same rule holds at every depth: 6 or more children means that",
+    "   bubble is missing a grouping, so add the missing group rather than showing the crowd.",
     "5. Splits are allowed with evidence: where one package holds several genuine seams, add child",
     "   bubbles — each MUST carry real codeRefs of its own.",
     '6. Existing code keeps phase "built". Add edges where you read the relation out of the code,',
     "   with plain-language labels; never add an edge to mean \"contains\".",
     "7. Validation is armed for this turn: every upsert_node MUST carry codeRefs that resolve to",
-    "   paths that exist in this project. Ops without them are rejected with a reason.",
+    "   paths that exist in this project. Ops without them are rejected with a reason. A parent",
+    "   group bubble points at the paths of the parts it holds, so it satisfies this too.",
     "8. Only what git tracks counts as real: a directory git ignores — typically a leftover folder",
     "   holding nothing but installed dependencies after a branch switch — is not part of this",
     "   project, so never survey it and never point codeRefs at it.",

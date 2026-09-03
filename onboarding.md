@@ -32,8 +32,13 @@ Bridge composes an onboarding prompt (bridge/src/onboarding.ts) with these const
    or doc prose (anti-diary rule, stated to the agent explicitly).
 2. **Boundary test** (verbatim from understand.md): a bubble deserves to exist iff its promise
    is stateable in one sentence and deleting it would break a named set of importers.
-3. **Altitude bounds:** 5–15 top-level bubbles. More packages than that → group under domain
-   parent bubbles rather than flattening. Level 2 = deliberate export seams only; stop there.
+3. **Altitude bounds:** 3–5 bubbles per layer — top level and every set of children alike.
+   6+ siblings means a grouping is missing, so the agent MUST introduce named parent bubbles
+   (plain-English group names saying what the group does for the system — "money rules",
+   "getting the word out" — each with its own one-sentence promise) and move the mechanical
+   package bubbles under them via `parentId`, never flattening. Stage 1 stays flat on purpose:
+   mechanics know packages, not domains, so grouping is the survey turn's first job. A group
+   bubble's `codeRefs` are the paths of the parts it holds, which satisfies validation mode.
 4. **Splits allowed with evidence.** Where the mechanical and architectural boundaries disagree
    (one package holding several genuine seams), the agent may add child bubbles — each MUST
    carry real `codeRefs`.

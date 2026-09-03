@@ -29,6 +29,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
     driftInside,
     failedInside,
     isSelected,
+    isMore,
     childCount,
     motion,
     deltaStatus,
@@ -39,7 +40,8 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
   const detail = tier === "full";
   const codeRef = node.codeRefs?.[0];
   const role = node.modelRole;
-  const kind = resolveKind(node);
+  // the fold is not a part, so it carries no component symbol of its own
+  const kind = isMore ? null : resolveKind(node);
 
   // what the bubble says about "now": its own status, or the status of whatever
   // hidden descendant the agent is actually inside
@@ -75,6 +77,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
       title={tip}
       data-phase={node.phase}
       data-kind={kind ?? undefined}
+      data-more={isMore}
       data-selected={isSelected}
       data-active={active || liveInside}
       data-active-inside={liveInside && !active}
@@ -138,18 +141,20 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
       </div>
 
       {/* drill affordance: the only way in, alongside double-click. Single click
-          stays selection so steering never changes what you are looking at. */}
+          stays selection so steering never changes what you are looking at.
+          A real bubble counts what is inside it; the fold IS what is inside it,
+          so counting again would only repeat its own label. */}
       {childCount > 0 ? (
         <button
           type="button"
           className="drill-chip nodrag nopan"
-          title={`open ${node.label} — ${childCount} inside`}
+          title={isMore ? `open the ${childCount} folded parts` : `open ${node.label} — ${childCount} inside`}
           onClick={(event) => {
             event.stopPropagation();
             setFocus(node.id);
           }}
         >
-          {tier === "min" ? null : `${childCount} inside`} <span className="drill-caret">›</span>
+          {isMore ? "open" : tier === "min" ? null : `${childCount} inside`} <span className="drill-caret">›</span>
         </button>
       ) : null}
 

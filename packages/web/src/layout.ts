@@ -1,6 +1,6 @@
 import ELK, { type ElkNode, type LayoutOptions } from "elkjs/lib/elk.bundled.js";
 import type { RealityLayer } from "../../shared/src/index.ts";
-import type { Layer } from "./layer.ts";
+import { LAYER_CAP, type Layer } from "./layer.ts";
 import { routingCost } from "./canvas/geometry.ts";
 
 export interface Box {
@@ -108,30 +108,30 @@ const FLOW_MIN_NODES = 6;
 const FLOW_MIN_DENSITY = 1;
 
 /**
- * The single-layer view produces small sibling sets, so the algorithm is chosen
- * per layer rather than fixed — and by the shape of the relations, not just by
- * how many bubbles there are.
+ * Which algorithm lays a layer out.
  *
- * Three or fewer bubbles are always spread: elk layered renders a three-node
- * chain as a strict vertical column, which wastes the width, stacks the two
- * relations on top of each other and routes one of them straight through the
- * middle bubble. A triangle has none of those problems.
+ * On the live canvas this is now nearly a constant: `selectLayer` folds every
+ * layer down to `LAYER_CAP` bubbles, so what arrives here is a set of two to
+ * five siblings and the answer is always one of the hand-placed arrangements
+ * below. Those are fixed shapes rather than an algorithm's opinion — a pair
+ * side by side, a triangle, a diamond, a pentagon — because at this size the
+ * shape itself is the readable thing and elk layered turns a three-node chain
+ * into a strict column that wastes the width and routes a relation straight
+ * through the middle bubble.
  *
- * A big, densely related layer is the opposite case: the nine packages of a
- * real monorepo with eighteen relations between them. Placed on a grid, which
- * is what a count-only rule chose, the strokes have to find their own way
- * through the rows and the longest ran 3173px to cross a 1100px composition.
- * Handing that layer to elk layered costs the ring's symmetry and buys short
- * strokes, which is the better trade once there are more relations than
- * bubbles. Below that density the relations are sparse enough that a chain, an
- * ellipse or a grid still reads.
+ * The rest is not dead: the comparison view is one flat layer of everything
+ * that changed and must not fold, so it can still hand over twenty bubbles. A
+ * big, densely related layer placed on a grid is what produced strokes 3173px
+ * long across a 1100px composition; elk layered costs the symmetry and buys
+ * short strokes, which is the right trade once there are more relations than
+ * bubbles. Below that density a chain or a grid still reads.
  */
 export function chooseArrangement(layer: Layer, chain = longestChain(layer)): Arrangement {
   const n = layer.nodes.length;
-  if (n <= 3) return "spread";
+  if (n <= LAYER_CAP) return "spread";
   if (n >= FLOW_MIN_NODES && layer.edges.length >= n * FLOW_MIN_DENSITY) return "flow";
   if (chain >= Math.max(3, Math.ceil(n * 0.5))) return "layered";
-  return n <= 6 ? "spread" : "grid";
+  return "grid";
 }
 
 /** rank by distance from a source, so an arrangement still reads in flow order */
@@ -148,61 +148,113 @@ function rankOrder(layer: Layer): string[] {
 }
 
 /**
- * Bubbles on an ellipse whose radii follow the viewport, so a wide window gets a
- * wide triangle and a tall one gets a tall triangle. The radius is derived from
- * the bubble size and the count, which is what keeps them from touching.
+ * Where a layer of two to five bubbles goes.
+ *
+ * One fixed arrangement per count, as unit offsets from the centre: a pair side
+ * by side, a triangle with the ranked bubble on top, a diamond, a pentagon.
+ * Each is convex with an empty middle, which is what makes the strokes both
+ * short and clear: every chord between two bubbles crosses the hollow centre
+ * instead of a third bubble, so `canvas/geometry.ts` rarely has to bow anything
+ * at all, and a label has a lane on either side of the chord to sit in.
+ *
+ * The radii are stated in bubbles-plus-air, so the composition scales with the
+ * card size rather than with a pixel constant, and are stretched by the pane's
+ * aspect so a wide window gets a wide shape and a tall one a tall shape.
+ * `separate` is the invariant behind all of it: whatever the tables and the
+ * stretch say, no two cards end up closer than one axis of clearance apart.
  */
+const ARRANGEMENTS: Record<number, readonly (readonly [number, number])[]> = {
+  1: [[0, 0]],
+  2: [
+    [-1, 0],
+    [1, 0],
+  ],
+  3: [
+    [0, -1],
+    [-1, 0.62],
+    [1, 0.62],
+  ],
+  4: [
+    [0, -1],
+    [1, 0],
+    [0, 1],
+    [-1, 0],
+  ],
+  5: [
+    [0, -1],
+    [0.951, -0.309],
+    [0.588, 0.809],
+    [-0.588, 0.809],
+    [-0.951, -0.309],
+  ],
+};
+
+/** ring reach per count, in half-separations (one bubble plus its air) */
+const REACH_X: Record<number, number> = { 1: 0, 2: 1, 3: 1.45, 4: 1.9, 5: 2.35 };
+const REACH_Y: Record<number, number> = { 1: 0, 2: 0, 3: 1.55, 4: 1.65, 5: 1.75 };
+
+/** air a card keeps to its neighbour on the axis that separates them */
+const MIN_AIR = SPREAD_GAP / 2;
+
+/**
+ * How much the whole arrangement has to grow before no two cards are within
+ * `MIN_AIR` of each other on either axis. Scaling positions is monotone in
+ * every pairwise distance, so the largest factor any pair needs fixes them all
+ * in one pass — and 1 (the normal answer for the tables above) costs nothing.
+ */
+function separate(points: readonly (readonly [number, number])[]): number {
+  let factor = 1;
+  for (let i = 0; i < points.length; i += 1) {
+    for (let j = i + 1; j < points.length; j += 1) {
+      const a = points[i];
+      const b = points[j];
+      if (a === undefined || b === undefined) continue;
+      const dx = Math.abs(a[0] - b[0]);
+      const dy = Math.abs(a[1] - b[1]);
+      if (dx >= NODE_W + MIN_AIR || dy >= NODE_H + MIN_AIR) continue;
+      const needX = dx > 0.5 ? (NODE_W + MIN_AIR) / dx : Number.POSITIVE_INFINITY;
+      const needY = dy > 0.5 ? (NODE_H + MIN_AIR) / dy : Number.POSITIVE_INFINITY;
+      const need = Math.min(needX, needY);
+      if (Number.isFinite(need)) factor = Math.max(factor, need);
+    }
+  }
+  return factor;
+}
+
 function spreadLayout(layer: Layer, aspect: number): BoxMap {
   const ids = rankOrder(layer);
   const n = ids.length;
   const boxes: BoxMap = {};
-  const put = (id: string, cx: number, cy: number): void => {
-    boxes[id] = { x: cx - NODE_W / 2, y: cy - NODE_H / 2, w: NODE_W, h: NODE_H };
-  };
+  if (n === 0) return boxes;
 
-  const first = ids[0];
-  if (n === 0 || first === undefined) return boxes;
-  if (n === 1) {
-    put(first, 0, 0);
-    return boxes;
-  }
-
+  // half the distance two cards must be apart to sit side by side, or stacked
+  const halfX = (NODE_W + SPREAD_GAP) / 2;
+  const halfY = (NODE_H + SPREAD_GAP) / 2;
   const stretch = Math.sqrt(Math.max(0.45, Math.min(2.2, aspect)));
-  if (n === 2) {
-    const second = ids[1];
-    if (second === undefined) return boxes;
-    // side by side when there is width for it, stacked when the window is tall
-    if (aspect >= 1) {
-      const half = (NODE_W + SPREAD_GAP) / 2;
-      put(first, -half, 0);
-      put(second, half, 0);
-    } else {
-      const half = (NODE_H + SPREAD_GAP) / 2;
-      put(first, 0, -half);
-      put(second, 0, half);
-    }
-    return boxes;
-  }
 
-  const radius = Math.max(NODE_W * 0.8, (NODE_W + SPREAD_GAP) / (2 * Math.sin(Math.PI / n)));
-  const rx = radius * stretch;
-  const ry = Math.max(NODE_H * 1.1, radius / stretch);
+  // a pair follows the window: side by side where there is width for it, one
+  // above the other where there is not
+  const unit =
+    n === 2 && aspect < 1
+      ? ([
+          [0, -1],
+          [0, 1],
+        ] as const)
+      : (ARRANGEMENTS[n] ?? ARRANGEMENTS[5] ?? []);
+  const rx = halfX * (REACH_X[n] ?? 2.35) * stretch;
+  const ry = n === 2 && aspect < 1 ? halfY : halfY * (REACH_Y[n] ?? 1.75) * (1 / stretch);
 
-  if (n === 3) {
-    // an explicit triangle rather than a third of a circle: the ranked bubble
-    // sits on top and the other two open out beneath it
-    const second = ids[1];
-    const third = ids[2];
-    if (second === undefined || third === undefined) return boxes;
-    put(first, 0, -ry);
-    put(second, -rx, ry * 0.62);
-    put(third, rx, ry * 0.62);
-    return boxes;
-  }
-
+  const points = unit.map(([ux, uy]) => [ux * rx, uy * ry] as const);
+  const factor = separate(points);
   for (const [index, id] of ids.entries()) {
-    const angle = -Math.PI / 2 + (index * 2 * Math.PI) / n;
-    put(id, Math.cos(angle) * rx, Math.sin(angle) * ry);
+    const point = points[index];
+    if (point === undefined) continue;
+    boxes[id] = {
+      x: point[0] * factor - NODE_W / 2,
+      y: point[1] * factor - NODE_H / 2,
+      w: NODE_W,
+      h: NODE_H,
+    };
   }
   return boxes;
 }

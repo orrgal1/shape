@@ -652,6 +652,23 @@ button {
     var(--shadow-2);
 }
 
+/* The fold: one bubble standing for the parts this layer had no room for. It is
+   a container, not a part, so it borrows the dashed outline the canvas already
+   uses for "this is an approximation of where things are" and keeps its phase
+   hue subdued — the parts inside it are the loud thing, not the wrapper. */
+.bubble[data-more="true"] {
+  border-style: dashed;
+  background: color-mix(in oklab, var(--surface) 80%, transparent);
+}
+
+.bubble[data-more="true"]::before {
+  opacity: 0.45;
+}
+
+.bubble[data-more="true"] .bubble-label {
+  color: var(--text-dim);
+}
+
 .bubble-head {
   display: flex;
   align-items: center;
@@ -1006,7 +1023,8 @@ button {
   transition:
     border-color var(--dur-fast) var(--ease),
     color var(--dur-fast) var(--ease),
-    background var(--dur-fast) var(--ease);
+    background var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
 }
 
 .rel-label:hover {
@@ -2650,6 +2668,38 @@ kbd {
 
 .rel-label[data-bundle="true"] {
   border-style: dashed;
+}
+
+/* --- labels on demand --- */
+
+/* A layer with a label on every stroke is the spaghetti this policy undoes, so
+   the words are asked for rather than always on: they fade in for the line
+   under the pointer, for the lines of the bubble under the pointer, and for the
+   lines of the selected bubble. The strokes themselves never change — only
+   whether they are spelled out. */
+.rel-label[data-shown="false"],
+.rel-tether[data-shown="false"] {
+  opacity: 0;
+}
+
+.rel-tether {
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+/* a bundle's count is not a label: it is what says the line stands for more
+   than one relation, and it is the affordance for drilling to them, so it stays
+   on screen as a bare badge with the words hidden */
+.rel-label[data-bundle="true"][data-shown="false"] {
+  opacity: 1;
+  padding: 2px;
+  border-color: transparent;
+  background: none;
+  box-shadow: none;
+}
+
+.rel-label[data-bundle="true"][data-shown="false"] .rel-text,
+.rel-label[data-bundle="true"][data-shown="false"] .rel-kind {
+  display: none;
 }
 
 /* --- liveness and drift bubbled up from hidden descendants --- */

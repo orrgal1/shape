@@ -363,7 +363,12 @@ try {
     survey.message.includes("NOT from README or doc prose") &&
       survey.message.includes("can you state what it promises to the rest of the system in one sentence, and would deleting it break a named set of importers?"),
   );
-  check("survey prompt states the altitude bound", survey.message.includes("5-15 top-level bubbles"));
+  check(
+    "survey prompt states the altitude bound and demands grouping",
+    survey.message.includes("3-5 top-level bubbles") &&
+      survey.message.includes("The skeleton is flat on purpose; your first job is to group it") &&
+      survey.message.includes("introduce named parent bubbles"),
+  );
   check("survey prompt lists the mechanical skeleton", /- t-auth "auth" — "Workspace package at packages\/auth/.test(survey.message));
   check("survey prompt carries the user focus", survey.message.includes('User focus for this survey: "the auth path"'));
 

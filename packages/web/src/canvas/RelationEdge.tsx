@@ -26,6 +26,7 @@ const DELTA_LINE: Record<string, string> = {
  */
 export function RelationEdge({ id, data }: EdgeProps<RelEdge>) {
   const select = useApp((state) => state.select);
+  const setHover = useApp((state) => state.setHover);
   const setFocus = useApp((state) => state.setFocus);
 
   const geom = data?.geom;
@@ -49,6 +50,13 @@ export function RelationEdge({ id, data }: EdgeProps<RelEdge>) {
   const count = data?.count ?? 0;
   const drillId = data?.drillId ?? null;
   const deltaStatus = data?.deltaStatus ?? null;
+  /**
+   * The words are asked for, not always on: `build.ts` decides, and the pill
+   * stays mounted either way so it can fade rather than pop. A bundle keeps its
+   * count badge visible regardless — the number is what says the line is more
+   * than one relation, and it is the affordance for drilling to them.
+   */
+  const labelShown = data?.labelShown === true;
 
   // A line in a comparison is not a steering target and cannot be drilled, so it
   // spends its tooltip saying what happened to it instead of how to act on it.
@@ -77,10 +85,12 @@ export function RelationEdge({ id, data }: EdgeProps<RelEdge>) {
       {kind === null ? null : (
         <EdgeLabelRenderer>
           {/* a hairline from the curve to the pill whenever the pill had to step
-              aside, so a label is never reading as unattached */}
+              aside, so a label is never reading as unattached; it fades with the
+              pill it belongs to */}
           {geom.labelOff === 0 ? null : (
             <span
               className="rel-tether"
+              data-shown={labelShown}
               style={{
                 transform: `translate(-50%, -50%) translate(${(on.x + labelX) / 2}px, ${(on.y + labelY) / 2}px) rotate(${Math.atan2(labelY - on.y, labelX - on.x)}rad)`,
                 width: Math.abs(geom.labelOff),
@@ -92,12 +102,19 @@ export function RelationEdge({ id, data }: EdgeProps<RelEdge>) {
             className="rel-label nodrag nopan"
             data-selected={data?.isSelected === true}
             data-bundle={bundle}
+            data-shown={labelShown}
             data-delta={deltaStatus ?? undefined}
             style={{
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
               maxWidth: geom.labelMax,
-              pointerEvents: "all",
+              // an invisible pill must not swallow the pointer; a bundle's badge
+              // is always visible, so it always answers to one
+              pointerEvents: labelShown || bundle ? "all" : "none",
             }}
+            // moving from the stroke onto its own pill must not count as
+            // leaving it, or the words would blink out under the cursor
+            onMouseEnter={() => setHover({ kind: "edge", id })}
+            onMouseLeave={() => setHover(null)}
             onClick={(event) => {
               event.stopPropagation();
               if (deltaStatus !== null) return;

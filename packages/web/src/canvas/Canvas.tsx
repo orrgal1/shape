@@ -59,7 +59,9 @@ export function Canvas() {
   const delta = useApp((state) => state.delta);
   const deltaContext = useApp((state) => state.deltaContext);
   const selection = useApp((state) => state.selection);
+  const hover = useApp((state) => state.hover);
   const select = useApp((state) => state.select);
+  const setHover = useApp((state) => state.setHover);
   const setFocus = useApp((state) => state.setFocus);
 
   /**
@@ -67,11 +69,13 @@ export function Canvas() {
    * instead of the live one, so layer selection, layout, framing, motion and
    * edge routing are shared rather than reimplemented.
    *
-   * Three things are switched off on purpose while it is open. Drill-down: the
+   * Four things are switched off on purpose while it is open. Drill-down: the
    * projection is parentless, so a focus would address nothing and nesting
-   * would hide the very change being examined. The reality column: extracted
-   * code describes now, not a version that already happened. Activity pulses:
-   * nothing is being worked on inside a past version.
+   * would hide the very change being examined. The fold: a comparison is one
+   * flat layer of exactly what changed, and folding four fifths of it away
+   * would hide the answer. The reality column: extracted code describes now,
+   * not a version that already happened. Activity pulses: nothing is being
+   * worked on inside a past version.
    *
    * Live `graph` frames keep updating the store while this is open; they cannot
    * disturb the view, because everything below reads the projection instead.
@@ -84,10 +88,11 @@ export function Canvas() {
   const showReality = view === null ? liveShowReality : false;
   const marks = view === null ? null : view.marks;
 
-  // one layer, chosen before layout runs: elk only ever sees the siblings on
-  // screen, which is why the layouts stay small and legible however deep the
-  // decomposition goes
-  const layer = useMemo(() => selectLayer({ doc, focus, activity }), [doc, focus, activity]);
+  // one layer, capped at five bubbles and chosen before layout runs: elk and
+  // the hand arrangements only ever see what is on screen, which is why the
+  // layouts stay small and legible however deep or wide the decomposition goes
+  const fold = view === null;
+  const layer = useMemo(() => selectLayer({ doc, focus, activity, fold }), [doc, focus, activity, fold]);
   // a package a bubble already claims is not news; ghosting it anyway is what
   // filled half the canvas on a nine-package project
   const reality = useMemo(() => selectReality(doc), [doc]);
@@ -125,8 +130,8 @@ export function Canvas() {
   });
 
   const { nodes, edges } = useMemo(
-    () => buildCanvas({ layer, reality, boxes, selection, showReality, entering, leaving, marks }),
-    [layer, reality, boxes, selection, showReality, entering, leaving, marks],
+    () => buildCanvas({ layer, reality, boxes, selection, hover, showReality, entering, leaving, marks }),
+    [layer, reality, boxes, selection, hover, showReality, entering, leaving, marks],
   );
 
   // the dissolve is applied to the pane, never to node positions: React Flow
@@ -162,6 +167,16 @@ export function Canvas() {
         if (typeof children !== "number" || children === 0) return;
         setFocus(node.id);
       }}
+      // Hover is what un-hides a stroke's words: over a bubble, its own
+      // relations say what they are; over a stroke, that one does. Nothing here
+      // touches layout, so revealing a label never moves anything.
+      onNodeMouseEnter={(_event, node) => {
+        if (node.type !== "bubble") return;
+        setHover({ kind: "node", id: node.id });
+      }}
+      onNodeMouseLeave={() => setHover(null)}
+      onEdgeMouseEnter={(_event, edge) => setHover({ kind: "edge", id: edge.id })}
+      onEdgeMouseLeave={() => setHover(null)}
       onEdgeClick={(_event, edge) => {
         // Only a rendered edge that stands for exactly one document relation is
         // a referent. Reality edges and lifted bundles carry a null edgeId, and

@@ -2,6 +2,7 @@ import type { RealityLayer, Referent } from "../../../shared/src/index.ts";
 import type { DeltaMarks, DeltaStatus } from "../deltaView.ts";
 import type { Layer, LayerNode } from "../layer.ts";
 import { STRIP_ID, type Box, type BoxMap } from "../layout.ts";
+import type { HoverTarget } from "../store.ts";
 import { computeEdgeGeometry } from "./geometry.ts";
 import type { CanvasEdge, CanvasNode } from "./types.ts";
 
@@ -15,6 +16,8 @@ export interface BuildInput {
   reality: RealityLayer;
   boxes: BoxMap;
   selection: Referent | null;
+  /** what the pointer is over, which is what reveals a stroke's words */
+  hover: HoverTarget | null;
   showReality: boolean;
   /** bubbles that just arrived: they fade and scale in rather than sliding */
   entering: ReadonlySet<string>;
@@ -55,6 +58,7 @@ export function buildCanvas({
   reality,
   boxes,
   selection,
+  hover,
   showReality,
   entering,
   leaving,
@@ -62,6 +66,8 @@ export function buildCanvas({
 }: BuildInput): CanvasModel {
   const selectedNodeId = selection?.kind === "node" ? selection.id : null;
   const selectedEdgeId = selection?.kind === "edge" ? selection.id : null;
+  const hoveredNodeId = hover?.kind === "node" ? hover.id : null;
+  const hoveredEdgeId = hover?.kind === "edge" ? hover.id : null;
 
   const nodes: CanvasNode[] = [];
   const bubble = (entry: LayerNode, motion: "enter" | "leave" | "none"): void => {
@@ -91,6 +97,7 @@ export function buildCanvas({
         driftInside: entry.driftInside,
         failedInside: entry.failedInside,
         isSelected: entry.node.id === selectedNodeId,
+        isMore: entry.isMore,
         childCount: entry.childCount,
         descendantCount: entry.descendantCount,
         motion,
@@ -125,6 +132,22 @@ export function buildCanvas({
     // so the verdict is its own class and outranks the kind's stroke colour.
     const deltaStatus = marks === null ? null : lineStatus(marks, edge.edgeIds);
     if (deltaStatus !== null) classes.push(`rel-delta-${deltaStatus}`);
+    /**
+     * Eighteen labelled strokes over nine bubbles is the spaghetti this policy
+     * exists to undo, so the words are asked for rather than always on: the
+     * line under the pointer, the lines of the bubble under the pointer, and
+     * the lines of whatever is selected. A comparison is the exception — there
+     * the label carries the verdict, which is the whole reason it is open.
+     */
+    const labelShown =
+      deltaStatus !== null ||
+      isSelected ||
+      hoveredEdgeId === edge.id ||
+      edge.source === hoveredNodeId ||
+      edge.target === hoveredNodeId ||
+      edge.source === selectedNodeId ||
+      edge.target === selectedNodeId;
+    if (labelShown) classes.push("rel-labelled");
     edges.push({
       id: edge.id,
       type: "rel",
@@ -136,6 +159,7 @@ export function buildCanvas({
       data: {
         kind: edge.kind,
         label: edge.label ?? "",
+        labelShown,
         isSelected,
         geom,
         edgeId: edge.edgeId,
@@ -206,6 +230,8 @@ export function buildCanvas({
       data: {
         kind: null,
         label: "",
+        // a ghost edge has no words to show at all
+        labelShown: false,
         isSelected: false,
         // the ghost column is a vertical chain, so a straight chord is right and
         // no clearance search is needed

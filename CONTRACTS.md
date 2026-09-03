@@ -246,6 +246,19 @@ Two invariants keep the single layer honest:
   their visible ancestor.
 No wire changes; pure rendering policy over `GraphDoc`.
 
+**Layer cap (client, user feedback 2026-09-03):** a layer shows at most 5 bubbles. Beyond that
+the top 4 by rank (has children, then degree over the visible layer's lifted edges, then kind
+weight, then document order) stay and the rest fold into one synthetic bubble
+`__more__:<focusId|root>` labelled "N more parts", whose summary lists the folded labels and
+whose phase is the most advanced among them. Drilling into it shows exactly the folded nodes as
+a layer (breadcrumb "more parts"); it has no referent, so selecting it steers the whole project.
+Edges touching a folded node lift onto the more-bubble (self-lifts dropped, merged parallels keep
+their count badge) and liveness/drift/`failed` bubbling counts folded nodes. Edge labels are
+hidden until an endpoint bubble or the edge itself is selected or hovered; strokes always show.
+This cap is a SAFETY NET, not the structure: the agent is instructed to keep 3–5 bubbles per
+layer and to introduce named parent bubbles when there are more real parts (onboarding.md
+§Stage 2), and that grouping is the real structure. No wire changes; the fold is pure rendering.
+
 ## Steering composition (bridge)
 
 With referent, bridge resolves node/edge + immediate neighbors and sends:

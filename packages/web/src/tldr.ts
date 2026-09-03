@@ -81,21 +81,29 @@ export function projectTldr(
   transcript: TranscriptEntry[],
   /** node id -> the bubble currently standing for it on the canvas */
   liftOf: Record<string, string>,
+  /**
+   * Visible bubble id -> label. The canvas can be standing for a node with a
+   * bubble the document has never heard of — the fold — so the label of a lift
+   * target comes from the layer, not from `doc`.
+   */
+  labelOf: Record<string, string>,
 ): ProjectTldr {
   const working: WorkingBubble[] = [];
   const counts: Record<string, number> = {};
   let driftNodes = 0;
   let driftNotes = 0;
 
-  const labelOf = new Map<string, string>();
-  for (const node of doc.nodes) labelOf.set(node.id, node.label);
+  const nameOf = new Map<string, string>();
+  for (const node of doc.nodes) nameOf.set(node.id, node.label);
 
   for (const node of doc.nodes) {
     counts[node.phase] = (counts[node.phase] ?? 0) + 1;
     if (activity.has(node.id)) {
       const owner = liftOf[node.id];
       const insideOf =
-        owner === undefined || owner === node.id ? null : { id: owner, label: labelOf.get(owner) ?? owner };
+        owner === undefined || owner === node.id
+          ? null
+          : { id: owner, label: labelOf[owner] ?? nameOf.get(owner) ?? owner };
       working.push({ id: node.id, label: node.label, status: node.status ?? null, phase: node.phase, insideOf });
     }
     const notes = doc.drift[node.id];

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { GraphEdge, IntentNode, Referent } from "../../shared/src/index.ts";
+import { isMoreId } from "./layer.ts";
 import { useApp } from "./store.ts";
 import { send } from "./ws.ts";
 
@@ -18,6 +19,17 @@ function describe(
 ): ChipInfo {
   if (referent === null) {
     return { kind: null, id: "whole project", phase: null, hint: "no referent — the agent decides where this lands" };
+  }
+  // The fold is a rendering of the parts a layer had no room for, not a part.
+  // There is nothing in the document to address, so the utterance lands on the
+  // project and the chip says where to go to be specific instead.
+  if (referent.kind === "node" && isMoreId(referent.id)) {
+    return {
+      kind: null,
+      id: "whole project",
+      phase: null,
+      hint: "pick one of the parts inside to steer it",
+    };
   }
   if (referent.kind === "node") {
     return {
@@ -73,13 +85,16 @@ export function SteeringBar() {
   const commit = (): void => {
     const body = text.trim();
     if (body.length === 0) return;
-    send({ type: "utterance", referent: selection, text: body });
+    // a fold has no document identity, so what goes on the wire is no referent
+    // at all rather than an id the bridge has never seen
+    const referent = selection !== null && selection.kind === "node" && isMoreId(selection.id) ? null : selection;
+    send({ type: "utterance", referent, text: body });
     setText("");
   };
 
   return (
     <div className="steer" data-armed={selection !== null && !comparing} data-suspended={comparing}>
-      <span className="referent" data-kind={selection?.kind ?? "none"} data-phase={chip.phase ?? ""} title={chip.hint}>
+      <span className="referent" data-kind={chip.kind ?? "none"} data-phase={chip.phase ?? ""} title={chip.hint}>
         {chip.kind === null ? null : <span className="referent-kind">{chip.kind}</span>}
         <span className="referent-id mono">{chip.id}</span>
         {selection === null ? null : (

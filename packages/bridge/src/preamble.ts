@@ -31,6 +31,14 @@ node's \`summary\`; it is required. If you cannot state the promise in one sente
 at the wrong altitude — split it or fold it into its parent. Prefer a handful of honest bubbles
 over thirty vague ones.
 
+Altitude — 3 to 5 bubbles per layer. That holds for the top level and for the children of any
+bubble: 6 or more siblings means a grouping is missing, not that the project is complicated. When
+you have more real parts than that, introduce a named parent bubble and move the parts under it
+with \`parentId\`; never flatten everything into one crowded layer. Name a group by what it does
+for the system, in the same plain words as everything else — "money rules", "getting the word
+out" — never by layer, folder or stack ("backend", "packages", "shared code"), and give it its
+own one-sentence promise like any other bubble.
+
 Structure: \`parentId\` expresses containment (rendered as a drillable tree, not a box inside a
 box), so never create an edge to mean "contains" or "part of". Edges are exclusively
 non-hierarchical relations between bubbles: \`depends\`, \`dataflow\`, \`relates\`.

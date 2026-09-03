@@ -17,6 +17,12 @@ export interface BubbleData extends Record<string, unknown> {
   driftInside: number;
   failedInside: number;
   isSelected: boolean;
+  /**
+   * The fold: one bubble standing for the parts a layer had no room for. It has
+   * no document identity, so it is not a steering referent, and its drill
+   * affordance says "open" rather than counting children.
+   */
+  isMore: boolean;
   /** direct children, i.e. what drilling in reveals */
   childCount: number;
   descendantCount: number;
@@ -55,6 +61,14 @@ export interface RelData extends Record<string, unknown> {
   /** null for reality edges: derived, not authored, and not steerable */
   kind: EdgeKind | null;
   label: string;
+  /**
+   * Whether the words are on screen. Every stroke keeps its label in the DOM so
+   * it can fade, but a layer of labelled lines is unreadable: they show for the
+   * line under the pointer, for the lines of the bubble under the pointer, and
+   * for the lines of the selected bubble. A bundle's count badge is not a label
+   * and stays visible regardless.
+   */
+  labelShown: boolean;
   isSelected: boolean;
   /**
    * Anchors, bow and label position, all computed together in canvas/geometry.ts

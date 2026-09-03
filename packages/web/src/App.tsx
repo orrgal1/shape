@@ -7,7 +7,7 @@ import { SteeringBar } from "./SteeringBar.tsx";
 import { TerminalPane } from "./Terminal.tsx";
 import { Canvas } from "./canvas/Canvas.tsx";
 import { useDismissable } from "./dismiss.ts";
-import { selectLayer, selectReality } from "./layer.ts";
+import { focusParentOf, selectLayer, selectReality } from "./layer.ts";
 import { isMockMode, startMock } from "./mock.ts";
 import { useApp, type ConnStatus } from "./store.ts";
 import { connectBridge, send } from "./ws.ts";
@@ -637,8 +637,8 @@ export function App() {
       // Backspace is drill-up: a comparison is flat and has nothing to drill into
       if (focus === null || delta !== null) return;
       event.preventDefault();
-      const current = doc.nodes.find((node) => node.id === focus);
-      setFocus(current?.parentId ?? null);
+      // one level up is the parent bubble, or the fold this fold nests in
+      setFocus(focusParentOf(doc, focus));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
