@@ -1,6 +1,7 @@
 /**
  * Graph store: owns the single GraphDoc, applies `canvas` tool ops through the
- * shared validator, and persists to <targetCwd>/.shape/graph.json.
+ * shared validator, and persists to <dir>/graph.json — where that directory is
+ * is the storage's business (`server/storage.ts`), not the store's.
  */
 
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
@@ -68,9 +69,10 @@ export class GraphStore {
   readonly #file: string;
   #writing: Promise<void> = Promise.resolve();
 
-  constructor(targetCwd: string) {
-    this.#dir = join(targetCwd, ".shape");
-    this.#file = join(this.#dir, "graph.json");
+  /** `dir` already includes whatever layout the storage chose for this project */
+  constructor(dir: string) {
+    this.#dir = dir;
+    this.#file = join(dir, "graph.json");
   }
 
   get file(): string {

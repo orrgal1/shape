@@ -4,11 +4,18 @@
  * connects in (`src/agent-cli.ts`); local mode (`src/index.ts`) is still the
  * same server with an in-memory link instead of a socket.
  *
- * Run: node src/server-cli.ts [--port 4400] [--host 127.0.0.1]
+ * Graphs live under `--data-dir`, not in the repos: the projects are on other
+ * machines. That directory is also what a restart reads its rooms back from.
+ *
+ * Run: node src/server-cli.ts [--port 4400] [--host 127.0.0.1] [--data-dir <dir>]
  */
 
+import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { AGENT_WS_PATH, BRIDGE_PORT, BRIDGE_WS_PATH } from "../../shared/src/index.ts";
 import { ShapeServer } from "./server/server.ts";
+import { dataDirStorage } from "./server/storage.ts";
 import { SocketServer } from "./wsserver.ts";
 
 interface Cli {
@@ -18,10 +25,16 @@ interface Cli {
    * (Phase 1); Phase 3 gates it behind a token.
    */
   host: string;
+  /** `--data-dir`: every project's graph, revisions and registry row */
+  dataDir: string;
 }
 
 function parseArgv(argv: string[]): Cli {
-  const cli: Cli = { port: BRIDGE_PORT, host: "127.0.0.1" };
+  const cli: Cli = {
+    port: BRIDGE_PORT,
+    host: "127.0.0.1",
+    dataDir: join(process.env.SHAPE_HOME ?? homedir(), ".shape", "server"),
+  };
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -35,6 +48,9 @@ function parseArgv(argv: string[]): Cli {
     } else if (arg === "--host" && next !== undefined) {
       cli.host = next.trim();
       i++;
+    } else if (arg === "--data-dir" && next !== undefined) {
+      cli.dataDir = resolve(next);
+      i++;
     } else {
       throw new Error(`unknown argument ${arg}`);
     }
@@ -47,8 +63,13 @@ function parseArgv(argv: string[]): Cli {
 try {
   const cli = parseArgv(process.argv.slice(2));
   const sockets = new SocketServer({ port: cli.port, host: cli.host });
-  // mounts both paths and needs no further handle: agents arrive on their own
-  new ShapeServer({ sockets });
+  await mkdir(cli.dataDir, { recursive: true });
+  // mounts both paths and needs no further handle beyond the restore below:
+  // agents arrive on their own
+  const server = new ShapeServer({ sockets, storage: dataDirStorage(cli.dataDir) });
+  // rooms are back — agentless — before the first browser or agent can arrive
+  const restored = await server.restore();
+  if (restored > 0) console.error(`[bridge] restored ${restored} project(s) from ${cli.dataDir}`);
   await sockets.listen();
   console.error(`[bridge] server at ${sockets.url(BRIDGE_WS_PATH)} (agents at ${AGENT_WS_PATH})`);
 } catch (err) {

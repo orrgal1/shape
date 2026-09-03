@@ -10,6 +10,9 @@
  *   agent SIGTERM             — session/projects flip to disconnected, utterance refused
  *   agent restart             — the room outlives the agent and re-greets it
  *   a second agent            — two projects, select_project joins the other one
+ *   remote storage            — a graph per project and a registry under --data-dir
+ *   server restart            — the rooms come back; live agents re-bind them
+ *   agentless restore         — restored rooms are read-only, and still diffable
  *
  * The harness on both agents is scripts/fake-omp.mjs, so nothing real is
  * spawned; each target project gets its own log, which is what proves which
@@ -30,6 +33,8 @@ const PORT = Number(process.env.SMOKE_REMOTE_PORT ?? 4412);
 const LINK_PORT_A = PORT + 1;
 const LINK_PORT_B = PORT + 2;
 const SERVER_URL = `ws://127.0.0.1:${PORT}`;
+/** an agent's reconnect backoff tops out at 8 s: a restart must be re-bound inside this */
+const RECONNECT_MS = 10_000;
 
 const results = [];
 let failed = 0;
@@ -58,6 +63,16 @@ function ompFrames(path) {
     .split("\n")
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line));
+}
+
+/** parse a file the server writes under us; a half-written read is just "not yet" */
+function readJson(path) {
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
 }
 
 /** the fake child logs to <its cwd>/fake-omp.log; each agent's target gets its own */
@@ -89,6 +104,8 @@ async function seedWorkspace(dir, scope) {
 const targetA = await mkdtemp(join(tmpdir(), "vh-remote-a-"));
 const targetB = await mkdtemp(join(tmpdir(), "vh-remote-b-"));
 const fakeHome = await mkdtemp(join(tmpdir(), "vh-remote-home-"));
+/** where a remote server keeps graphs, revisions and its project registry */
+const dataDir = await mkdtemp(join(tmpdir(), "vh-remote-data-"));
 await seedWorkspace(targetA, "ra");
 await seedWorkspace(targetB, "rb");
 
@@ -145,23 +162,49 @@ const agentArgs = (target, linkPort) => [
   "node scripts/fake-omp.mjs",
 ];
 
+/**
+ * The server binary, pointed at this run's data dir. It is started three times
+ * (fresh, restarted under live agents, restarted alone), so each start waits on
+ * its own banners — the restore line first when rows are expected, since a step
+ * that raced past it would be talking to a server without its rooms.
+ */
+async function startServer(label, restoredProjects = 0) {
+  const handle = launch(label, ["src/server-cli.ts", "--port", String(PORT), "--data-dir", dataDir]);
+  if (restoredProjects > 0) {
+    const banner = `restored ${restoredProjects} project(s)`;
+    await waitFor(`${label} ${banner}`, () => handle.log.includes(banner));
+  }
+  await waitFor(`${label} listening`, () => handle.log.includes("server at ws://"));
+  return handle;
+}
+
 const send = (msg) => socket.send(JSON.stringify(msg));
 const mark = () => frames.length;
 const frameAfter = (from, predicate, label, timeoutMs = 30_000) =>
   waitFor(label, () => frames.slice(from).find(predicate), timeoutMs);
 
+/**
+ * A fresh browser socket on /ws, replacing any earlier one (a server restart
+ * drops it anyway). Frames from every socket land in the one ordered log, so
+ * `mark()` is what separates a step's frames from the steps before it.
+ */
+async function openBrowser() {
+  socket?.close();
+  const next = new WebSocket(`${SERVER_URL}/ws`);
+  next.on("message", (data) => frames.push(JSON.parse(data.toString())));
+  const opened = Promise.withResolvers();
+  next.once("open", opened.resolve);
+  // stays registered: a killed server errors this socket long after it opened
+  next.on("error", opened.reject);
+  await opened.promise;
+  socket = next;
+}
+
 try {
   // --- 1. the server alone, and a browser that arrives before any agent ------
 
-  const server = launch("server", ["src/server-cli.ts", "--port", String(PORT)]);
-  await waitFor("server listening", () => server.log.includes("server at ws://"));
-
-  socket = new WebSocket(`${SERVER_URL}/ws`);
-  socket.on("message", (data) => frames.push(JSON.parse(data.toString())));
-  const opened = Promise.withResolvers();
-  socket.once("open", opened.resolve);
-  socket.once("error", opened.reject);
-  await opened.promise;
+  const server = await startServer("server");
+  await openBrowser();
 
   await sleep(300);
   check(
@@ -364,10 +407,152 @@ try {
     unknown.message.includes("unknown project"),
     unknown.message,
   );
+
+  // --- 9. what a remote server keeps on disk --------------------------------
+
+  const projectAId = hello.projectId;
+  const graphPath = join(dataDir, "projects", projectAId, "graph.json");
+  const storedGraph = await waitFor("the first project's graph under the data dir", () => readJson(graphPath), 10_000);
+  check(
+    "a remote server keeps each project's graph at <data-dir>/projects/<projectId>/graph.json",
+    storedGraph.nodes.some((n) => n.id === "auth-service") &&
+      storedGraph.edges.some((e) => e.id === "auth-service--user-db"),
+    JSON.stringify(storedGraph.nodes.map((n) => n.id)),
+  );
+
+  const registry = await waitFor(
+    "both projects in the server's registry",
+    () => {
+      const rows = readJson(join(dataDir, "projects.json"));
+      return Array.isArray(rows) && rows.length === 2 ? rows : null;
+    },
+    10_000,
+  );
+  check(
+    "the registry names both attached projects by cwd",
+    [targetA, targetB].every((cwd) => registry.some((row) => row.project?.cwd === cwd)),
+    JSON.stringify(registry.map((row) => row.project?.cwd ?? null)),
+  );
+  check(
+    "registry rows are stored projects, not browser summaries",
+    registry.every(
+      (row) =>
+        !("agentConnected" in row) && !("agentConnected" in (row.session ?? {})) && typeof row.lastSeen === "string",
+    ),
+    JSON.stringify(registry.map((row) => Object.keys(row))),
+  );
+
+  // --- 10. the server restarts while both agents are still up ---------------
+
+  await stopChild(server);
+  const restartAt = mark();
+  const server2 = await startServer("server-2", 2);
+  await openBrowser();
+  const restartHello = await frameAfter(restartAt, (f) => f.type === "hello", "hello from the restarted server", 3_000);
+  check(
+    "a restarted server greets a browser at once, out of its registry alone",
+    restartHello.projects.length === 2,
+    JSON.stringify(restartHello.projects.map((p) => `${p.cwd}:${String(p.agentConnected)}`)),
+  );
+
+  const reattached = await waitFor(
+    "both restored rooms reporting their agent back",
+    () =>
+      frames
+        .slice(restartAt)
+        .filter((f) => f.type === "projects" || f.type === "hello")
+        .map((f) => f.projects)
+        .find((projects) => projects.length === 2 && projects.every((p) => p.agentConnected === true)) ?? null,
+    RECONNECT_MS,
+  );
+  check(
+    "the live agents reconnect and re-bind the rooms the restart restored",
+    reattached.some((p) => p.cwd === targetA) && reattached.some((p) => p.cwd === targetB),
+    JSON.stringify(reattached.map((p) => `${p.cwd}:${String(p.agentConnected)}`)),
+  );
+
+  const restoredA = reattached.find((p) => p.cwd === targetA);
+  const restoredAt = mark();
+  send({ type: "select_project", projectId: restoredA.projectId });
+  const helloRestored = await frameAfter(
+    restoredAt,
+    (f) => f.type === "hello" && f.projectId === restoredA.projectId,
+    "hello for the first project after the restart",
+  );
+  check(
+    "a restored room keeps its project key and serves the graph the old server persisted",
+    restoredA.projectId === projectAId &&
+      helloRestored.graph.nodes.some((n) => n.id === "auth-service") &&
+      helloRestored.session.agentConnected === true,
+    `${restoredA.projectId} vs ${projectAId}; ${JSON.stringify(helloRestored.graph.nodes.map((n) => n.id))}`,
+  );
+
+  // --- 11. the same rooms with no agent anywhere ----------------------------
+
+  await stopChild(agentA);
+  await stopChild(agentB);
+  await stopChild(server2);
+  const aloneAt = mark();
+  await startServer("server-3", 2);
+  await openBrowser();
+  const aloneHello = await frameAfter(aloneAt, (f) => f.type === "hello", "hello from the agentless server", 3_000);
+  check(
+    "a server restarted with no agent at all still greets a browser, read-only",
+    aloneHello.session.agentConnected === false,
+    JSON.stringify(aloneHello.session.agentConnected),
+  );
+  check(
+    "both projects come back agentless after a restart with no agents",
+    aloneHello.projects.length === 2 &&
+      aloneHello.projects.every((p) => p.agentConnected === false) &&
+      [targetA, targetB].every((cwd) => aloneHello.projects.some((p) => p.cwd === cwd)),
+    JSON.stringify(aloneHello.projects.map((p) => `${p.cwd}:${String(p.agentConnected)}`)),
+  );
+
+  const agentlessIdA = aloneHello.projects.find((p) => p.cwd === targetA)?.projectId;
+  const joinAt = mark();
+  send({ type: "select_project", projectId: agentlessIdA });
+  const agentlessA = await frameAfter(
+    joinAt,
+    (f) => f.type === "hello" && f.projectId === agentlessIdA,
+    "hello for the restored first project",
+  );
+
+  const refusedAloneAt = mark();
+  send({ type: "utterance", referent: null, text: "anyone survived the restart?" });
+  const refusedAlone = await frameAfter(
+    refusedAloneAt,
+    (f) => f.type === "error",
+    "error for the utterance in a restored room",
+  );
+  check(
+    "an utterance in a restored room with no agent is refused by name",
+    refusedAlone.message.includes("no agent is attached"),
+    refusedAlone.message,
+  );
+
+  // the snapshots are the room's, not the agent's: two of them must still diff
+  const revs = (agentlessA.revisions ?? []).map((r) => r.rev).sort((a, b) => a - b);
+  const diffAt = mark();
+  if (revs.length >= 2) send({ type: "diff", revA: revs[0], revB: revs[1] });
+  const delta =
+    revs.length < 2
+      ? null
+      : await frameAfter(
+          diffAt,
+          (f) => f.type === "delta" && f.delta.revA === revs[0] && f.delta.revB === revs[1],
+          "delta over the restored revisions",
+          5_000,
+        ).catch(() => null);
+  check(
+    "diff over a restored room's two oldest revisions is answered from the snapshots on disk",
+    delta !== null,
+    `revisions=${revs.join(",")}`,
+  );
 } catch (err) {
   check("the remote smoke ran to completion", false, err instanceof Error ? err.message : String(err));
 } finally {
-  // --- 8. teardown: every child dies, even when a step above threw -----------
+  // --- 12. teardown: every child dies, even when a step above threw ----------
   socket?.close();
   for (const handle of spawned.slice().reverse()) {
     try {
@@ -379,6 +564,7 @@ try {
   await rm(targetA, { recursive: true, force: true });
   await rm(targetB, { recursive: true, force: true });
   await rm(fakeHome, { recursive: true, force: true });
+  await rm(dataDir, { recursive: true, force: true });
 }
 
 console.log("");

@@ -454,3 +454,16 @@ form differs. No I/O, so the client can diff too.
 Wire: `hello` carries `revisions: RevisionInfo[]` (ascending), and a `revisions` frame is
 broadcast whenever a new snapshot lands. The client asks with `diff` `{ revA, revB }` and the
 bridge broadcasts `delta` `{ delta }`; an unknown rev answers with the usual `error` frame.
+
+## Storage (server, 2026-09-03)
+
+`packages/bridge/src/server/storage.ts` decides where a room's `graph.json` and
+`revisions/` live: `Storage { dirFor(project), listProjects(), saveProject(row) }`.
+- `projectDirStorage()` — local mode (`pnpm bridge`): `<cwd>/.shape/`, no registry.
+- `dataDirStorage(root)` — `shape server --data-dir` (default `~/.shape/server`, `SHAPE_HOME`
+  honored): `<root>/projects/<projectId>/` per room and `<root>/projects.json`, an atomically
+  written array of `StoredProject { project: AgentProject, session, worktrees, lastSeen }`
+  rows upserted after every attach and detach. At startup the server restores each row as an
+  agentless room (`[bridge] restored N project(s) from <root>`), so a browser is greeted
+  read-only immediately and agents re-bind on reconnect. A corrupt registry is skipped with
+  `[bridge] ignoring unparseable <path>`, never fatal.

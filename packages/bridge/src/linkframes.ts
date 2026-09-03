@@ -120,7 +120,8 @@ function parseBackend(value: unknown): BackendInfo | null {
   return { id: b.id, label: b.label, capabilities };
 }
 
-function parseProject(value: unknown): AgentProject | null {
+/** the project half of an `attach`; also one row's project in the server's registry */
+export function parseProject(value: unknown): AgentProject | null {
   if (value === null || typeof value !== "object") return null;
   const p = value as Record<string, unknown>;
   // the key is the room's identity: an empty one would merge unrelated projects
@@ -132,7 +133,7 @@ function parseProject(value: unknown): AgentProject | null {
   return { key: p.key, label: p.label, cwd: p.cwd, backend, targetHasCode: p.targetHasCode };
 }
 
-function parseSession(value: unknown): AgentSession | null {
+export function parseSession(value: unknown): AgentSession | null {
   if (value === null || typeof value !== "object") return null;
   const s = value as Record<string, unknown>;
   const sessionId = s.sessionId ?? null;
@@ -169,7 +170,7 @@ function parseReality(value: unknown): RealityLayer | null {
   };
 }
 
-function parseWorktrees(value: unknown): WorktreeInfo[] | null {
+export function parseWorktrees(value: unknown): WorktreeInfo[] | null {
   if (!Array.isArray(value)) return null;
   const rows: unknown[] = value;
   const out: WorktreeInfo[] = [];

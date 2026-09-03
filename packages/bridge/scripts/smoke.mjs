@@ -107,7 +107,8 @@ let socket = null;
 // interleaving lives entirely in GraphStore, no wire round-trip needed.
 {
   const { GraphStore } = await import(new URL("../src/server/store.ts", import.meta.url));
-  const store = new GraphStore(join(tmpdir(), `vh-smoke-store-${process.pid}`));
+  // the constructor takes the directory the graph lives in, as the storage hands it over
+  const store = new GraphStore(join(tmpdir(), `vh-smoke-store-${process.pid}`, ".shape"));
   const mkNode = (id, parentId = null) => ({
     op: "upsert_node",
     node: { id, parentId, label: id, summary: `promise of ${id}`, phase: "idea" },
@@ -188,7 +189,7 @@ let socket = null;
   // committed workspace, so this is the same index the bridge itself would build
   const targetIndex = gitFileIndexSync(target) ?? buildFileIndex(walkFiles(target));
 
-  const store = new GraphStore(join(tmpdir(), `vh-smoke-product-${process.pid}`));
+  const store = new GraphStore(join(tmpdir(), `vh-smoke-product-${process.pid}`, ".shape"));
   // the build layer a survey would already have on the canvas
   store.applyCanvasCall({
     ops: [

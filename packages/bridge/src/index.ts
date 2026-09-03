@@ -10,6 +10,7 @@ import { resolve } from "node:path";
 import { BRIDGE_PORT, BRIDGE_WS_PATH } from "../../shared/src/index.ts";
 import { AgentRuntime } from "./agent/runtime.ts";
 import { ShapeServer } from "./server/server.ts";
+import { projectDirStorage } from "./server/storage.ts";
 import { memoryLinkPair } from "./transport.ts";
 import { SocketServer } from "./wsserver.ts";
 
@@ -55,7 +56,8 @@ function parseArgv(argv: string[]): Cli {
 try {
   const cli = parseArgv(process.argv.slice(2));
   const sockets = new SocketServer({ port: cli.port });
-  const server = new ShapeServer({ sockets });
+  // local mode keeps every project's canvas in the project: <cwd>/.shape/
+  const server = new ShapeServer({ sockets, storage: projectDirStorage() });
   const link = memoryLinkPair();
   server.attachAgent(link.server);
   const agent = new AgentRuntime({

@@ -33,6 +33,7 @@ import { composeSurveyPrompt, onboardingOpGate } from "./onboarding.ts";
 import { PREAMBLE } from "./preamble.ts";
 import { SnapshotStore } from "./snapshots.ts";
 import { composeUtterance } from "./steering.ts";
+import type { Storage, StoredProject } from "./storage.ts";
 import { GraphStore } from "./store.ts";
 
 /** the frame that opens (or retargets) a room */
@@ -51,6 +52,8 @@ export interface ProjectRoomOptions {
   projects: () => ProjectSummary[];
   /** this room lost its agent: every browser on the server owes a fresh list */
   onProjectsChanged: () => void;
+  /** where this project's graph, its revisions and its registry row live */
+  storage: Storage;
 }
 
 /**
@@ -87,7 +90,8 @@ export class ProjectRoom {
   readonly #broadcast: (msg: ServerMsg) => void;
   readonly #projects: () => ProjectSummary[];
   readonly #onProjectsChanged: () => void;
-  /** assigned by retarget(), which always runs before anything else reaches the room */
+  readonly #storage: Storage;
+  /** assigned by retarget() or restore(), which always run before anything else reaches the room */
   #project!: AgentProject;
   #store!: GraphStore;
   #snapshots!: SnapshotStore;
@@ -121,6 +125,7 @@ export class ProjectRoom {
     this.#broadcast = opts.broadcast;
     this.#projects = opts.projects;
     this.#onProjectsChanged = opts.onProjectsChanged;
+    this.#storage = opts.storage;
   }
 
   get agentConnected(): boolean {
@@ -167,8 +172,9 @@ export class ProjectRoom {
 
     const project = attach.project;
     this.#project = project;
-    this.#store = new GraphStore(project.cwd);
-    this.#snapshots = new SnapshotStore(project.cwd);
+    const dir = this.#storage.dirFor(project);
+    this.#store = new GraphStore(dir);
+    this.#snapshots = new SnapshotStore(dir);
     await this.#store.load();
     // the rev we opened at must be diffable, not just the ones we go on to make
     await this.#snapshots.save(this.#store.doc);
@@ -197,6 +203,59 @@ export class ProjectRoom {
     this.#link.send({ type: "attached", projectId: project.key, preamble: PREAMBLE });
     // the agent dedupes by id, so a delivery the harness already saw is not repeated
     for (const [id, body] of this.#undelivered) this.#link.send({ type: "deliver", id, body });
+  }
+
+  /**
+   * Reopen a project from the registry with no agent behind it: the graph and
+   * the opening snapshot load exactly as an attach loads them, the session is
+   * what the agent last reported, and `agentConnected` starts false — the very
+   * state a room lands in when its agent leaves, so the agent coming back
+   * later is the ordinary re-bind and not a second path.
+   */
+  async restore(row: StoredProject): Promise<void> {
+    const project = row.project;
+    this.#project = project;
+    const dir = this.#storage.dirFor(project);
+    this.#store = new GraphStore(dir);
+    this.#snapshots = new SnapshotStore(dir);
+    await this.#store.load();
+    // the rev we reopened at must be diffable, exactly as after an attach
+    await this.#snapshots.save(this.#store.doc);
+
+    this.#worktrees = row.worktrees;
+    this.#session = {
+      ...row.session,
+      cwd: project.cwd,
+      targetHasCode: project.targetHasCode,
+      worktrees: row.worktrees,
+      backend: project.backend,
+      agentConnected: false,
+    };
+    this.#loaded = true;
+    this.#lastSeen = row.lastSeen;
+  }
+
+  /**
+   * File this project in the registry: what a restarted server needs to reopen
+   * the room without its agent. Called after every attach, and again when the
+   * agent leaves so `lastSeen` is the departure. A registry that cannot be
+   * written costs the next restart a project, never this session a turn.
+   */
+  saveProject(): Promise<void> {
+    return this.#storage
+      .saveProject({
+        project: this.#project,
+        session: {
+          sessionId: this.#session.sessionId,
+          sessionName: this.#session.sessionName,
+          model: this.#session.model,
+        },
+        worktrees: this.#worktrees,
+        lastSeen: this.#lastSeen,
+      })
+      .catch((err: unknown) => {
+        console.error(`[bridge] failed to save project registry: ${errText(err)}`);
+      });
   }
 
   /**
@@ -248,6 +307,7 @@ export class ProjectRoom {
     }
     this.#pending.clear();
     this.#onProjectsChanged();
+    void this.saveProject();
   }
 
   // -------------------------------------------------------------------------

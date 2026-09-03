@@ -132,11 +132,17 @@ function ProjectSelector() {
   const [path, setPath] = useState("");
   const menuRef = useDismissable(open, setOpen);
   const cwd = session?.cwd ?? null;
+  // recents, the free-text path and the adopt list are all answered by this
+  // project's agent; without one they would offer frames the server refuses
+  const agentless = session !== null && !session.agentConnected;
   // One room you are already standing in is the local case and needs no list;
   // a second room on the server — or a socket joined to something the list does
-  // not name — is the only reason to offer a choice of projects.
+  // not name — is the only reason to offer a choice of projects. Agentless, the
+  // list is the only thing left in the menu, so it always shows.
   const showProjects =
-    projects.length > 1 || (projects.length === 1 && !projects.some((entry) => entry.projectId === projectId));
+    agentless ||
+    projects.length > 1 ||
+    (projects.length === 1 && !projects.some((entry) => entry.projectId === projectId));
 
   // a successful switch answers with a hello carrying the new cwd
   useEffect(() => {
@@ -191,69 +197,75 @@ function ProjectSelector() {
             </>
           ) : null}
 
-          <div className="project-menu-head">
-            <p className="project-menu-title">running sessions</p>
-            <button
-              type="button"
-              className="project-rescan"
-              title="re-scan this machine for running agent sessions"
-              onClick={() => send({ type: "discover" })}
-            >
-              rescan
-            </button>
-          </div>
-          {sessions.length === 0 ? (
-            <p className="tl-empty">No agent is running anywhere else on this machine.</p>
+          {agentless ? (
+            <p className="tl-empty">Recents and running sessions need this project&apos;s agent</p>
           ) : (
-            <ul className="project-recents project-sessions">
-              {sessions.map((entry) => (
-                <SessionRow key={entry.pid} session={entry} current={entry.cwd === cwd} />
-              ))}
-            </ul>
-          )}
+            <>
+              <div className="project-menu-head">
+                <p className="project-menu-title">running sessions</p>
+                <button
+                  type="button"
+                  className="project-rescan"
+                  title="re-scan this machine for running agent sessions"
+                  onClick={() => send({ type: "discover" })}
+                >
+                  rescan
+                </button>
+              </div>
+              {sessions.length === 0 ? (
+                <p className="tl-empty">No agent is running anywhere else on this machine.</p>
+              ) : (
+                <ul className="project-recents project-sessions">
+                  {sessions.map((entry) => (
+                    <SessionRow key={entry.pid} session={entry} current={entry.cwd === cwd} />
+                  ))}
+                </ul>
+              )}
 
-          <p className="project-menu-title">recent projects</p>
-          {recents.length === 0 ? (
-            <p className="tl-empty">The bridge has not reported any recents yet.</p>
-          ) : (
-            <ul className="project-recents">
-              {recents.map((entry) => (
-                <li key={entry}>
-                  <button
-                    type="button"
-                    className="project-recent"
-                    data-current={entry === cwd}
-                    onClick={() => switchTo(entry)}
-                    title={entry}
-                  >
-                    <span className="project-recent-name">{basename(entry)}</span>
-                    <span className="project-recent-path mono">{entry}</span>
-                    {entry === cwd ? <span className="project-recent-tag">current</span> : null}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+              <p className="project-menu-title">recent projects</p>
+              {recents.length === 0 ? (
+                <p className="tl-empty">The bridge has not reported any recents yet.</p>
+              ) : (
+                <ul className="project-recents">
+                  {recents.map((entry) => (
+                    <li key={entry}>
+                      <button
+                        type="button"
+                        className="project-recent"
+                        data-current={entry === cwd}
+                        onClick={() => switchTo(entry)}
+                        title={entry}
+                      >
+                        <span className="project-recent-name">{basename(entry)}</span>
+                        <span className="project-recent-path mono">{entry}</span>
+                        {entry === cwd ? <span className="project-recent-tag">current</span> : null}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
 
-          <p className="project-menu-title">open another</p>
-          <div className="project-open">
-            <input
-              className="project-path mono"
-              value={path}
-              spellCheck={false}
-              placeholder="~/code/..."
-              aria-label="project path"
-              onChange={(event) => setPath(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter") return;
-                event.preventDefault();
-                switchTo(path);
-              }}
-            />
-            <button type="button" className="btn" onClick={() => switchTo(path)} disabled={path.trim().length === 0}>
-              Open
-            </button>
-          </div>
+              <p className="project-menu-title">open another</p>
+              <div className="project-open">
+                <input
+                  className="project-path mono"
+                  value={path}
+                  spellCheck={false}
+                  placeholder="~/code/..."
+                  aria-label="project path"
+                  onChange={(event) => setPath(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") return;
+                    event.preventDefault();
+                    switchTo(path);
+                  }}
+                />
+                <button type="button" className="btn" onClick={() => switchTo(path)} disabled={path.trim().length === 0}>
+                  Open
+                </button>
+              </div>
+            </>
+          )}
 
           {latestError === undefined || latestError === null ? null : (
             <p className="project-error">{latestError.message}</p>

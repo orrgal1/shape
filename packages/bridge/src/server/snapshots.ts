@@ -1,7 +1,8 @@
 /**
  * Revision snapshots: one canonical GraphSnapshot per `rev` under
- * <targetCwd>/.shape/revisions/<rev>.json, so the browser can diff any
- * two points in the canvas's history.
+ * <dir>/revisions/<rev>.json — where that directory is is the storage's
+ * business (`server/storage.ts`) — so the browser can diff any two points in
+ * the canvas's history.
  *
  * A revision is immutable once written (a rev never means two different graphs),
  * writes are serialized and atomic, and every failure is reported and swallowed:
@@ -36,8 +37,8 @@ export class SnapshotStore {
   readonly #dir: string;
   #writing: Promise<RevisionInfo | null> = Promise.resolve(null);
 
-  constructor(targetCwd: string) {
-    this.#dir = join(targetCwd, ".shape", "revisions");
+  constructor(dir: string) {
+    this.#dir = join(dir, "revisions");
   }
 
   /**

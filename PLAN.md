@@ -185,15 +185,22 @@ speak steer (`delivered` receipt visible in transcript), canvas updates from the
 revisions/diff, worktree switch; (c) kill the agent → canvas goes read-only with a reason,
 restart → resumes without browser reload.
 
-### Phase 2 — Multi-room and registry
+### Phase 2 — Multi-room and registry — DONE 2026-09-03
 
-Multiple agents per server, project picker in the client replacing the local recents pop-up
-when remote, `lastSeen`/`agentConnected` per project, room GC (agentless rooms persist
-graphs; nothing runs). `FsStorage` under `SHAPE_DATA_DIR`. Browser can watch a room whose
-agent is gone (history/diff only).
+Landed: `server/storage.ts` — `Storage { dirFor, listProjects, saveProject }` with
+`projectDirStorage()` (local: `<cwd>/.shape`, byte-identical layout, no registry) and
+`dataDirStorage(root)` (remote: `<root>/projects/<projectId>/{graph.json,revisions/}` plus an
+atomically written `<root>/projects.json` registry of `StoredProject` rows). `shape server
+--data-dir` (default `~/.shape/server`) restores every registered project as an agentless
+room before listening; a browser is greeted read-only at once, agents re-bind on reconnect,
+`diff` answers from the persisted snapshots. Agentless rooms stay in memory (nothing runs:
+no requests, no timers) — eviction was not needed. The client hides recents/adopt while
+agentless and keeps the server's project list as the way out. `pnpm smoke:remote` grew to
+32 checks: data layout, restart with agents up, restart with none.
 
-Acceptance: two agents attached, two browsers each on a different room, no cross-talk in
-`graph`/`transcript`/`pty_data`; restart the server → rooms reload from storage.
+Original scope: multiple agents per server, project picker in the client replacing the local
+recents pop-up when remote, `lastSeen`/`agentConnected` per project, room GC, `FsStorage`
+under a data dir, browser can watch a room whose agent is gone (history/diff only).
 
 ### Phase 3 — Auth for on-prem
 

@@ -8,7 +8,9 @@
  * revisions and the transcript are the project's, not the agent's, and a
  * browser watching an agentless room gets a read-only canvas rather than an
  * empty one. An `attach` therefore either opens a room, re-binds an agentless
- * one, or retargets the room this very link already holds.
+ * one, or retargets the room this very link already holds. A restart is the
+ * same story over a longer gap: `restore()` reopens every project the storage
+ * remembers, agentless, before the first socket arrives.
  */
 
 import type { WebSocket } from "ws";
@@ -20,10 +22,13 @@ import {
 import { socketServerEnd, type ServerEnd } from "../transport.ts";
 import type { SocketServer } from "../wsserver.ts";
 import { ProjectRoom, type AttachMsg } from "./room.ts";
+import type { Storage } from "./storage.ts";
 import { WsHub } from "./ws.ts";
 
 export interface ShapeServerOptions {
   sockets: SocketServer;
+  /** where rooms keep their files, and which projects a restart reopens */
+  storage: Storage;
 }
 
 export class ShapeServer {
@@ -35,8 +40,10 @@ export class ShapeServer {
   #defaultKey: string | null = null;
   /** attaches are serialized: a retarget must finish loading before the next starts */
   #attaching: Promise<void> = Promise.resolve();
+  readonly #storage: Storage;
 
   constructor(opts: ShapeServerOptions) {
+    this.#storage = opts.storage;
     this.#hub = new WsHub({
       sockets: opts.sockets,
       defaultRoom: () => this.#defaultKey,
@@ -55,6 +62,29 @@ export class ShapeServer {
       },
     });
     opts.sockets.mount(AGENT_WS_PATH, (socket) => this.attachAgent(socketServerEnd(socket)));
+  }
+
+  /**
+   * Reopen the projects the storage remembers, before anything can reach the
+   * server. Rooms come back agentless: the graph and the revisions are there to
+   * read and to diff, and the agent that returns takes the ordinary re-bind
+   * path. Resolves with how many rooms opened, which is what the operator is
+   * told. A storage without a registry (local mode) restores nothing.
+   */
+  async restore(): Promise<number> {
+    const rows = await this.#storage.listProjects();
+    for (const row of rows) {
+      const key = row.project.key;
+      if (this.#rooms.has(key)) continue;
+      const room = this.#newRoom(key);
+      await room.restore(row);
+      this.#rooms.set(key, room);
+    }
+    // a browser connecting before any agent is back is greeted by the project
+    // seen most recently, instead of waiting ungreeted for the first attach
+    const newest = this.#projects()[0];
+    if (newest !== undefined) this.#defaultKey = newest.projectId;
+    return this.#rooms.size;
   }
 
   /**
@@ -111,13 +141,7 @@ export class ShapeServer {
     }
 
     const previous = this.#links.get(end);
-    const room =
-      existing ??
-      new ProjectRoom({
-        broadcast: (out: ServerMsg) => this.#hub.broadcastTo(key, out),
-        projects: () => this.#projects(),
-        onProjectsChanged: () => this.#broadcastProjects(),
-      });
+    const room = existing ?? this.#newRoom(key);
     // loaded before it is reachable: nothing may see a half-open room. The
     // link is bound right after, because the hello below asks the agent
     // questions whose answers must find their room.
@@ -125,6 +149,8 @@ export class ShapeServer {
     this.#rooms.set(key, room);
     this.#links.set(end, key);
     this.#defaultKey = key;
+    // the row a restart reopens this room from; a stale one costs a project
+    void room.saveProject();
 
     if (previous !== undefined && previous !== key) {
       // the agent switched projects: its browsers asked for that, so they
@@ -140,6 +166,20 @@ export class ShapeServer {
     // the sockets that beat the first attach are joined here and greeted once
     this.#hub.greetPending(key, hello);
     this.#broadcastProjects();
+  }
+
+  /**
+   * A room's wiring: what it broadcasts reaches its own watchers, the project
+   * list is the server's to answer, and its files are wherever the storage puts
+   * them. Both an attach and a restore open rooms this way.
+   */
+  #newRoom(key: string): ProjectRoom {
+    return new ProjectRoom({
+      broadcast: (out: ServerMsg) => this.#hub.broadcastTo(key, out),
+      projects: () => this.#projects(),
+      onProjectsChanged: () => this.#broadcastProjects(),
+      storage: this.#storage,
+    });
   }
 
   /** A browser asked to watch another project this server hosts. */
