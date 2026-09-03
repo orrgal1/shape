@@ -315,13 +315,12 @@ jump the other way. Product bubbles roll up their realizers' activity/drift/fail
 product node past `concept` with no realizers renders as **unrealized** — nothing on the
 build side makes it real yet. Client-only derivation; no wire changes.
 
-**Product view opens on the root (user decision 2026-09-03):** the product view's default
-focus is the product root (`productRootOf(doc)`), not `null` — the root is the focus card at
-the top of the stage, styled as the product itself, and the layer under it is its
-capabilities. The first breadcrumb crumb in product view is therefore the product's name, and
-there is nothing above it: Backspace at the root does nothing. A legacy graph with several
-top-level product bubbles has no root, so the view falls back to focus `null` and renders
-them flat — never a crash.
+**Product view starts from the root bubble (user decision 2026-09-03):** the product view
+opens with focus `null`, whose layer is the product layer's top level — exactly one bubble,
+the product root, rendered louder than a capability (`data-root`) with a "N capabilities"
+drill chip. Drilling into it shows the capabilities under a focus card styled as the product;
+crumbs read `product › <name>`; Backspace / ‹ return to the lone bubble. A legacy graph with
+several top-level product bubbles simply renders them flat — never a crash.
 
 ## Steering composition (bridge)
 

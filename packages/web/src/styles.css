@@ -3142,6 +3142,20 @@ kbd {
   color: var(--text);
 }
 
+/* the product root: the one bubble the graph starts from — louder than a
+   capability, and the only bubble that is ever alone on a layer */
+.bubble[data-root="true"] {
+  border-color: color-mix(in oklab, var(--capability) 60%, var(--line-strong));
+  background: color-mix(in oklab, var(--capability) 9%, var(--surface));
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--capability) 25%, transparent), 0 18px 48px -18px color-mix(in oklab, var(--capability) 55%, transparent);
+}
+.bubble[data-root="true"] .bubble-label {
+  font-size: var(--t-lg);
+}
+.bubble[data-root="true"] .drill-chip {
+  color: var(--capability);
+}
+
 .kind-sigil[data-kind="capability"] {
   color: color-mix(in oklab, var(--capability) 72%, var(--text));
 }

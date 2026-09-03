@@ -2,7 +2,6 @@ import { create } from "zustand";
 import {
   emptyGraph,
   layerOf,
-  productRootOf,
   type AgentState,
   type DiscoveredSession,
   type GraphDelta,
@@ -195,24 +194,6 @@ function keepSelection(selection: Referent | null, doc: GraphDoc): Referent | nu
   return null;
 }
 
-/**
- * Where a view stands when nothing has been drilled into. The build layer's
- * home is its own root — several top-level parts, no bubble above them. The
- * product layer's home is the product itself: one bubble naming the whole
- * thing, with every capability under it, so the canvas always opens on what is
- * being built rather than on a shelf of promises.
- *
- * Null focus survives only where there is nothing to stand on: a build-only
- * project, or a graph written before the root existed and left with several
- * top-level capabilities, which reads flat. That is also what makes this safe
- * to run over a `keepFocus` result — a frame that deletes the root drops the
- * focus to null and lands back on whatever root the next frame brings.
- */
-function homeFocus(view: Layer, focus: string | null, doc: GraphDoc): string | null {
-  if (focus !== null || view !== "product") return focus;
-  return productRootOf(doc)?.id ?? null;
-}
-
 export const useApp = create<AppState>((set, get) => ({
   doc: emptyGraph(),
   session: null,
@@ -257,15 +238,11 @@ export const useApp = create<AppState>((set, get) => ({
           conn: "live",
           selection: null,
           hover: null,
-          // the product view opens standing on the product itself
-          focus: homeFocus(view, null, msg.graph),
+          // both views open at their own root layer: for the product view that
+          // is the one bubble naming the whole product, which you drill into
+          focus: null,
           view,
-          // whichever view was not opened is parked at its own home, so the
-          // first toggle into the product layer lands on the product too
-          parked: {
-            product: { focus: homeFocus("product", null, msg.graph), selection: null },
-            build: NOWHERE,
-          },
+          parked: { product: NOWHERE, build: NOWHERE },
           transcript: [],
           activity: new Set<string>(),
           compare: null,
@@ -286,11 +263,11 @@ export const useApp = create<AppState>((set, get) => ({
             // home: the root of the build layer, the product itself in the
             // product layer — including when the deleted bubble was the product
             // and a renamed one took its place.
-            focus: homeFocus(view, keepFocus(s.focus, msg.graph), msg.graph),
+            focus: keepFocus(s.focus, msg.graph),
             view,
             parked: {
               product: {
-                focus: homeFocus("product", keepFocus(s.parked.product.focus, msg.graph), msg.graph),
+                focus: keepFocus(s.parked.product.focus, msg.graph),
                 selection: keepSelection(s.parked.product.selection, msg.graph),
               },
               build: {
@@ -368,10 +345,9 @@ export const useApp = create<AppState>((set, get) => ({
 
   toggleReality: () => set((s) => ({ showReality: !s.showReality })),
 
-  // The layer under the pointer is about to be replaced, so what it was over is
-  // no longer under it. Asking for no focus in the product view asks for the
-  // product, which is the one bubble every capability hangs under.
-  setFocus: (focus) => set((s) => ({ focus: homeFocus(s.view, focus, s.doc), hover: null })),
+  // the layer under the pointer is about to be replaced, so what it was over is
+  // no longer under it
+  setFocus: (focus) => set(() => ({ focus, hover: null })),
 
   setView: (view) =>
     set((s) => {
@@ -380,7 +356,7 @@ export const useApp = create<AppState>((set, get) => ({
       // realizes drill is what gets dropped. Without this the build root is
       // unreachable from a "built by" layer without walking through a bubble.
       if (view === s.view) {
-        return s.focus !== null && isRealizesId(s.focus) ? { focus: homeFocus(s.view, null, s.doc), hover: null } : {};
+        return s.focus !== null && isRealizesId(s.focus) ? { focus: null, hover: null } : {};
       }
       // a "built by" drill is a one-shot detour, not a place: leaving it parks
       // the build root, so toggling back lands on the build view's real home
@@ -389,7 +365,7 @@ export const useApp = create<AppState>((set, get) => ({
       const there = s.parked[view];
       return {
         view,
-        focus: homeFocus(view, there.focus, s.doc),
+        focus: there.focus,
         selection: there.selection,
         parked: { ...s.parked, [s.view]: here },
         hover: null,
@@ -421,7 +397,7 @@ export const useApp = create<AppState>((set, get) => ({
       const view = layerOf(target);
       return {
         view,
-        focus: homeFocus(view, target.parentId, s.doc),
+        focus: target.parentId,
         selection: { kind: "node", id: nodeId },
         parked: { ...s.parked, [s.view]: { focus: s.focus, selection: s.selection } },
         hover: null,

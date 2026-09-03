@@ -335,9 +335,6 @@ function Breadcrumb() {
   const layer = useMemo(() => selectLayer({ doc, focus, activity, layer: view }), [doc, focus, activity, view]);
   const trail = layer.trail;
   const product = layer.product;
-  // The product is already the first crumb of its own trail, so a "project"
-  // crumb in front of it would offer a layer wider than the whole product.
-  const rooted = product === null && isProductRoot(doc, view, trail[0]?.id ?? null);
   if (comparing || trail.length === 0) return null;
 
   return (
@@ -351,14 +348,14 @@ function Breadcrumb() {
         >
           {product.label}
         </button>
-      ) : rooted ? null : (
+      ) : (
         <button type="button" className="crumb" onClick={() => setFocus(null)}>
-          project
+          {view === "product" ? "product" : "project"}
         </button>
       )}
       {trail.map((node, index) => (
         <span key={node.id} className="crumb-step">
-          {rooted && index === 0 ? null : <span className="crumb-sep">›</span>}
+          <span className="crumb-sep">›</span>
           <button
             type="button"
             className="crumb"
@@ -672,25 +669,25 @@ function FocusCard() {
   const capabilities = isRoot ? doc.nodes.filter((other) => other.parentId === node.id).length : 0;
   return (
     <div className="focus-card" data-phase={node.phase} data-realizes={fromProduct} data-root={isRoot}>
-      {isRoot ? null : (
-        <button
-          type="button"
-          className="focus-up"
-          title={
-            fromProduct
-              ? `back to ${product.label} on the product layer`
+      <button
+        type="button"
+        className="focus-up"
+        title={
+          fromProduct
+            ? `back to ${product.label} on the product layer`
+            : isRoot
+              ? "back to the product bubble"
               : parent === null
                 ? "back to the project layer"
                 : "up one level"
-          }
-          onClick={() => {
-            if (fromProduct) setView("product");
-            else setFocus(parent);
-          }}
-        >
-          ‹
-        </button>
-      )}
+        }
+        onClick={() => {
+          if (fromProduct) setView("product");
+          else setFocus(parent);
+        }}
+      >
+        ‹
+      </button>
       <div className="focus-body">
         <div className="focus-head">
           <span className="focus-dot" />
@@ -741,9 +738,8 @@ export function App() {
       }
       const { focus, doc, delta, view, setFocus, setView } = useApp.getState();
       // Backspace is drill-up: a comparison is flat and has nothing to drill
-      // into, and the product root is already the whole product — there is no
-      // layer above it to walk up to.
-      if (focus === null || delta !== null || isProductRoot(doc, view, focus)) return;
+      // into, and the root layer of either view has nothing above it.
+      if (focus === null || delta !== null) return;
       event.preventDefault();
       // Out of the "built by" layer is out of the layer entirely: it was entered
       // from the product view, and that is where its capability lives.

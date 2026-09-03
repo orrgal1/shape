@@ -44,6 +44,9 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
   const hasDrift = drift.length > 0;
   const detail = tier === "full";
   const product = layer === "product";
+  // the one top-level capability is the product itself: the bubble the whole
+  // graph starts from, so it says so and counts capabilities, not parts
+  const isRoot = product && !isMore && node.parentId === null;
   // a capability points at code only through the build bubbles that realize it,
   // so a path on the card would be claiming something it does not own
   const codeRef = product ? undefined : node.codeRefs?.[0];
@@ -88,6 +91,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
       title={tip}
       data-phase={node.phase}
       data-layer={layer}
+      data-root={isRoot}
       // in a comparison what moved is the whole story; a second loud claim
       // about the build side would answer a question nobody asked
       data-unrealized={unrealized && !comparing}
@@ -193,7 +197,8 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
             setFocus(node.id);
           }}
         >
-          {isMore ? "open" : tier === "min" ? null : `${childCount} inside`} <span className="drill-caret">›</span>
+          {isMore ? "open" : tier === "min" ? null : isRoot ? `${childCount} ${childCount === 1 ? "capability" : "capabilities"}` : `${childCount} inside`}{" "}
+          <span className="drill-caret">›</span>
         </button>
       ) : null}
 
