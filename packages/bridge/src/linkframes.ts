@@ -225,6 +225,10 @@ export function parseProject(value: unknown): AgentProject | null {
   // a registry row written before publishing existed still parses: the machine
   // that wrote it never claimed it could publish
   const canPublish = p.canPublish === true;
+  // older registry rows and older agents never wrote a directive: null means
+  // "no file to point a launcher at", which is a real state, not a bad frame
+  const directivePath =
+    typeof p.directivePath === "string" && p.directivePath.length > 0 ? p.directivePath : null;
   // a project with no harness running is a real state (nothing resolved, or
   // nothing installed): the room opens on the "start a session" card
   const backend = p.backend === null || p.backend === undefined ? null : parseBackend(p.backend);
@@ -239,6 +243,7 @@ export function parseProject(value: unknown): AgentProject | null {
     tools,
     targetHasCode: p.targetHasCode,
     canPublish,
+    directivePath,
     legacyKeys: parseLegacyKeys(p.legacyKeys),
   };
 }

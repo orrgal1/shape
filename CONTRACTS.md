@@ -664,6 +664,14 @@ re-derived on every `switch_project`.
 only; the field also travels on `AgentProject`, so a registry row remembers what the
 machine that wrote it could do (a row written without the field parses as `false`).
 
+`SessionInfo.directivePath: string | null` — absolute path on the agent's machine of
+`<SHAPE_HOME|~>/.shape/server/projects/<projectKey>/shape-directive.md`, the per-project
+directive the agent writes on every project open (what Shape is, this project's link URL,
+`CANVAS_TOOL_DESCRIPTION` verbatim, and the `packages/link/src/cli.ts` fallback). Null when
+the write failed — the directive is a convenience, never fatal. Travels on `AgentProject`
+too, so a launcher reading the registry can point a builder's brief at it; absent or empty
+on the wire parses as `null`.
+
 `DiscoveredSession` (shared/) is one row of the bridge's `discoverSessions()`
 (`packages/bridge/src/agent/discover.ts`): `{ harness: "omp" | "claude" | "codex" | "opencode" |
 "cursor", pid, command, cwd, sessionId, sessionFile, startedAt, resumeCommand, attach:
@@ -871,7 +879,7 @@ what lets one canvas merge them; `AgentProject.cwd` is the MAIN worktree's path.
   and the usual `session`, `projects`, `projectId`, `recentProjects`, `sessions`
   (discovered). The single `graph`/`agent`/`revisions` are gone.
 - `SessionInfo` is `{ cwd (main worktree), targetHasCode, worktrees, sessions:
-  WorktreeSession[], agentConnected, canPublish }`; `sessionId`/`sessionName`/`model`/
+  WorktreeSession[], agentConnected, canPublish, directivePath }`; `sessionId`/`sessionName`/`model`/
   `backend` moved into `sessions`, one per worktree.
 - Server → browser: `worktree` on `graph`, `agent`, `activity`, `transcript`, `revisions`,
   `delta` and every `pty_*`; new `session_started { worktree, session, backend }` and
