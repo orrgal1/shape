@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@lydell/node-pty": "1.2.0-beta.15",
+    "@orrgal1/manager-skill": "github:orrgal1/manager-skill#4a2f29ef854b58c6a99422bb30ecf698875fd5fd",
     "typescript": "^5.7.0",
     "ws": "^8.18.0"
   },
