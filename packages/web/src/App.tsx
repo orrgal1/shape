@@ -205,8 +205,9 @@ function ProjectSelector() {
   // project's agent; without one they would offer frames the server refuses
   const agentless = session !== null && !session.agentConnected;
   // a session already in this project's folder is where you are standing:
-  // nothing to connect to
-  const others = sessions.filter((entry) => entry.cwd !== cwd);
+  // nothing to connect to. With no project attached nothing is "here", so a
+  // session whose folder is unreadable (cwd null too) must still be offered
+  const others = cwd === null ? sessions : sessions.filter((entry) => entry.cwd !== cwd);
   // One room you are already standing in is the local case and needs no list;
   // a second room on the server — or a socket joined to something the list does
   // not name — is the only reason to offer a choice of projects. Agentless, the
