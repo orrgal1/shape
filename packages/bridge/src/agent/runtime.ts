@@ -56,6 +56,7 @@ import type { SocketServer } from "../wsserver.ts";
 import { createBackend, loadShapeConfig, rememberBackend, resolveBackend } from "./backend/index.ts";
 import type { Backend, BackendEvents } from "./backend/types.ts";
 import { harnessIdFor, launchableHarnesses, detectTools, type DetectedTools } from "./detect.ts";
+import { LINK_CLI, directivePath, renderDirective, writeDirective } from "./directive.ts";
 import { discoverSessions } from "./discover.ts";
 import type { LinkTarget } from "./external.ts";
 import { chooseLauncher } from "./launcher/index.ts";
@@ -336,6 +337,11 @@ export class AgentRuntime {
   #canPublish = false;
   #discovered: DiscoveredSession[] = [];
   #recents: string[] = [];
+  /**
+   * Where this project's directive was written, for a launcher that wants to
+   * point a builder's brief at it. Null when the write failed.
+   */
+  #directivePath: string | null = null;
 
   /** the server's preamble, from `attached`; prepended to each harness's first prompt */
   #preamble = "";
@@ -486,6 +492,35 @@ export class AgentRuntime {
     await ensureGitExclude(this.#cwd);
     this.#recents = await pushRecent(this.#projectCwd);
     this.#discovered = await this.#discoverSessions();
+    await this.#writeDirective();
+  }
+
+  /**
+   * Drop this project's directive on disk, so a harness Shape never registered
+   * a tool in can still find the canvas. Called from every `#openProject` —
+   * startup and every `switch` — which is also how it keeps up with the link
+   * URL: the URL is fixed for this process (the socket server's port is set at
+   * construction), so the only way it changes is a new agent, whose first
+   * `#openProject` rewrites the file. `writeDirective` skips an identical
+   * write, so re-opening the same project costs a read.
+   * Never fatal: without the file the tool-bearing harnesses are unaffected.
+   */
+  async #writeDirective(): Promise<void> {
+    const path = directivePath(this.#projectKey);
+    try {
+      await writeDirective(
+        path,
+        renderDirective({
+          linkUrl: this.#sockets.url(LINK_WS_PATH),
+          cliPath: LINK_CLI,
+          projectCwd: this.#projectCwd,
+        }),
+      );
+      this.#directivePath = path;
+    } catch (err) {
+      this.#directivePath = null;
+      console.error(`[bridge] could not write shape-directive.md: ${errText(err)}`);
+    }
   }
 
   /**
@@ -650,6 +685,7 @@ export class AgentRuntime {
         tools: { launcher: this.#launcher.id, launchers: this.#tools.launchers, harnesses: this.#tools.harnesses },
         targetHasCode: this.#targetHasCode,
         canPublish: this.#canPublish,
+        directivePath: this.#directivePath,
         legacyKeys,
       },
       worktrees: this.#worktrees,
