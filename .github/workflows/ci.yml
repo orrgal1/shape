@@ -52,3 +52,6 @@ jobs:
 
       - name: link omp extension selftest
         run: pnpm --filter @shape/link selftest:omp
+
+      - name: link CLI smoke
+        run: pnpm smoke:link-cli

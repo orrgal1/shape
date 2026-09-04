@@ -109,10 +109,12 @@ Packages:
   `canvas` tool schema, the WebSocket and link message shapes, and revision diffing.
   `packages/shared/src/index.ts` is the machine-readable form of `CONTRACTS.md` and wins on
   disagreement.
-- `packages/link` — what runs *inside* the harness: the omp extension
+- `packages/link` — what runs *next to* the harness: the omp extension
   (`src/omp-extension.ts`, loaded by omp's Bun), the canvas tool as an MCP server
-  (`src/mcp.ts`, for any harness that can load one), and a hook that reports agent activity
-  (`src/hook.ts`, for a harness with no event stream).
+  (`src/mcp.ts`, for any harness that can load one), a one-shot CLI (`src/cli.ts`, one
+  `canvas` call per process, for a session with no tool at all), and a hook that reports
+  agent activity (`src/hook.ts`, for a harness with no event stream). See
+  [`packages/link/README.md`](packages/link/README.md).
 
 Every bubble sits on one of **four layers**: `product` (the capabilities a person gets, no
 file names), `build` (the parts that exist as code — the default), `infra` (where it runs and
