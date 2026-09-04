@@ -21,8 +21,11 @@ import {
 } from "../../shared/src/index.ts";
 import type { PtyServerMsg } from "../../shared/src/pty.ts";
 import {
+  coveredByIdOf,
+  coveredByPartOf,
   hostsIdOf,
   hostsInfraOf,
+  isCoveredById,
   isHostsId,
   isMoreId,
   isRealizesId,
@@ -385,6 +388,8 @@ export interface AppState {
   drillHosts: (infraId: string) => void;
   /** correctness → build: show exactly the parts one verification attests */
   drillVerified: (verifyId: string) => void;
+  /** build → correctness: show exactly the checks that cover one part */
+  drillCovering: (buildId: string) => void;
   /**
    * Put one bubble on screen wherever it lives: the layer it belongs to, the
    * altitude that shows it, selected. This is what following a cross-layer chip
@@ -417,11 +422,12 @@ export interface ViewPlace {
 const NOWHERE: ViewPlace = { focus: null, selection: null };
 
 /**
- * A focus only survives while the thing it names can still exist. Four of the
- * five kinds are synthetic — never in the document — so what has to still be
+ * A focus only survives while the thing it names can still exist. Five of the
+ * six kinds are synthetic — never in the document — so what has to still be
  * there is the bubble whose layer folded, the capability a realizes drill asks
  * about, the infrastructure a hosts drill asks about, the verification a
- * verifies drill asks about, or nothing at all for a root layer.
+ * verifies drill asks about, the part a covered-by drill asks about, or nothing
+ * at all for a root layer.
  */
 function keepFocus(focus: string | null, doc: GraphDoc): string | null {
   if (focus === null) return null;
@@ -431,6 +437,8 @@ function keepFocus(focus: string | null, doc: GraphDoc): string | null {
   if (infra !== null) return doc.nodes.some((node) => node.id === infra) ? focus : null;
   const verify = verifiesVerifyOf(focus);
   if (verify !== null) return doc.nodes.some((node) => node.id === verify) ? focus : null;
+  const covered = coveredByPartOf(focus);
+  if (covered !== null) return doc.nodes.some((node) => node.id === covered) ? focus : null;
   if (isMoreId(focus)) {
     const base = moreBaseOf(focus);
     return base === null || doc.nodes.some((node) => node.id === base) ? focus : null;
@@ -514,12 +522,16 @@ function switched(state: AppState, view: Layer): Partial<AppState> {
   // A cross-layer drill is a question about a bubble in another layer, not a
   // place in this one.
   const detour =
-    state.focus !== null && (isRealizesId(state.focus) || isHostsId(state.focus) || isVerifiesId(state.focus));
+    state.focus !== null &&
+    (isRealizesId(state.focus) ||
+      isHostsId(state.focus) ||
+      isVerifiesId(state.focus) ||
+      isCoveredById(state.focus));
   // Asking for the layer you are already in, while the canvas is answering a
   // question about another one, means "just show me this layer" — so the drill
   // is what gets dropped. Without this the build root is unreachable from a
-  // "built by", "running on" or "attested by" layer without walking through a
-  // bubble.
+  // "built by", "running on", "attested by" or "covers" layer without walking
+  // through a bubble.
   if (view === state.view) return detour ? { focus: null, hover: null } : {};
   // leaving a drill parks the layer's own root, so toggling back lands on the
   // build view's real home rather than back inside the detour
@@ -970,6 +982,22 @@ export const useApp = create<AppState>((set, get) => ({
       parked: {
         ...s.parked,
         correctness: { focus: s.focus, selection: { kind: "node", id: verifyId } },
+      },
+      hover: null,
+      viewPinnedAt: Date.now(),
+    })),
+
+  // The fourth door, read from the build end: the part you clicked is parked as
+  // the build view's way back, so leaving the checks that cover it lands on it
+  // again rather than at the top of the build layer.
+  drillCovering: (buildId) =>
+    set((s) => ({
+      view: "correctness",
+      focus: coveredByIdOf(buildId),
+      selection: null,
+      parked: {
+        ...s.parked,
+        build: { focus: s.focus, selection: { kind: "node", id: buildId } },
       },
       hover: null,
       viewPinnedAt: Date.now(),

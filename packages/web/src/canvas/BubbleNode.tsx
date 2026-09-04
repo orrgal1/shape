@@ -47,6 +47,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
   const drillRealizers = useApp((state) => state.drillRealizers);
   const drillHosts = useApp((state) => state.drillHosts);
   const drillVerified = useApp((state) => state.drillVerified);
+  const drillCovering = useApp((state) => state.drillCovering);
 
   const {
     node,
@@ -67,6 +68,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
     serveCount,
     hostCount,
     verifyCount,
+    coverCount,
     shield,
     symbolCount,
     gaps,
@@ -103,6 +105,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
   const product = layer === "product";
   const infra = layer === "infra";
   const verifies = layer === "correctness";
+  const build = layer === "build";
   // the one top-level capability is the product itself: the bubble the whole
   // graph starts from, so it says so and counts capabilities, not parts
   const isRoot = product && !isMore && node.parentId === null;
@@ -340,6 +343,22 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
             }}
           >
             verifies {verifyCount} {verifyCount === 1 ? "part" : "parts"}
+          </button>
+        ) : null}
+        {/* The same door read from the build end: a part says how many checks
+            cover it, and opening it shows exactly those checks. Zero is hidden
+            because a hollow shield already says so. */}
+        {build && !isMore && coverCount > 0 && tier !== "min" && !comparing ? (
+          <button
+            type="button"
+            className="built-by covered-by nodrag nopan"
+            title={`show the ${coverCount} ${coverCount === 1 ? "check" : "checks"} that cover “${node.label}”`}
+            onClick={(event) => {
+              event.stopPropagation();
+              drillCovering(node.id);
+            }}
+          >
+            covered by {coverCount}
           </button>
         ) : null}
         {!product && detail && serveCount > 0 && !comparing ? (

@@ -208,6 +208,7 @@ export function buildCanvas({
         serveCount: entry.serveCount,
         hostCount: entry.hostCount,
         verifyCount: entry.verifyCount,
+        coverCount: entry.coverCount,
         shield: entry.shield,
         symbolCount: entry.symbolCount,
         gaps: entry.gaps,

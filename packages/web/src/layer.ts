@@ -27,6 +27,7 @@ import {
   symbolRefOf,
   verificationOf,
   verifiedOf,
+  verifiersOf,
   type EdgeKind,
   type GraphDoc,
   type GraphEdge,
@@ -270,6 +271,34 @@ export function verifiesVerifyOf(focus: string | null): string | null {
   return id.length === 0 ? null : id;
 }
 
+/**
+ * The fourth cross-layer drill, and the first one answered inside the
+ * correctness layer rather than the build layer: a build bubble's "covered by
+ * N" chip focuses one flat layer of the checks that cover it. It is the
+ * `__verifies__:` drill read from the other end — the same one relation, asked
+ * of the part instead of of the check — and synthetic for the same reason:
+ * `verifies` names a set no parent chain describes, and the ancestor rule (a
+ * check that attests a parent covers its children) makes it wider still.
+ */
+const COVERED_BY_PREFIX = "__coveredby__:";
+
+export function isCoveredById(id: string): boolean {
+  return id.startsWith(COVERED_BY_PREFIX);
+}
+
+export function coveredByIdOf(buildId: string): string {
+  return `${COVERED_BY_PREFIX}${buildId}`;
+}
+
+/** the build bubble a focus is asking "what covers this?" about, folds included */
+export function coveredByPartOf(focus: string | null): string | null {
+  if (focus === null) return null;
+  const base = isMoreId(focus) ? moreBaseOf(focus) : focus;
+  if (base === null || !isCoveredById(base)) return null;
+  const id = base.slice(COVERED_BY_PREFIX.length);
+  return id.length === 0 ? null : id;
+}
+
 /** one level up from a focus: the parent bubble, or the fold this one nests in */
 export function focusParentOf(doc: GraphDoc, focus: string): string | null {
   const more = parseMoreId(focus);
@@ -414,6 +443,13 @@ export interface LayerNode {
    */
   verifyCount: number;
   /**
+   * Build bubbles only: how many correctness bubbles name this bubble or an
+   * ancestor in their `verifies` — the authored half only, never the mechanical
+   * coverage the extractor reads out of the code. Zero hides the "covered by N"
+   * chip; whether anything attests the part at all is the shield's business.
+   */
+  coverCount: number;
+  /**
    * The shield pip, or null where the question is not asked. On a build bubble
    * it is `verificationOf`: something attests this, or nothing does. On a
    * capability it is `capabilityVerification` rolled up over its realizers,
@@ -510,6 +546,12 @@ export interface Layer {
    */
   correctness: IntentNode | null;
   /**
+   * The build bubble this layer was opened to answer for — set only while the
+   * focus is a `__coveredby__:` drill, where the bubbles on screen are the
+   * checks that cover one part.
+   */
+  covered: IntentNode | null;
+  /**
    * The mechanical "inside" of the focused bubble: the classes and functions of
    * its own code, in full and uncapped, when the focus is a build leaf. Empty
    * everywhere else — a bubble with children answers "what is inside" with
@@ -549,12 +591,14 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
   const wholeById = new Map<string, IntentNode>();
   for (const node of whole.nodes) wholeById.set(node.id, node);
 
-  // The three cross-layer drills are the questions asked across the layers:
+  // The four cross-layer drills are the questions asked across the layers:
   // which build bubbles make this capability real, which build bubbles run on
-  // this piece of infrastructure, and which build bubbles one verification
-  // attests. All three are asked of the whole document and answered inside the
-  // build layer, so the bubble being asked about is resolved before the
-  // document is narrowed to a layer.
+  // this piece of infrastructure, which build bubbles one verification attests,
+  // and — the same `verifies` relation read from the other end — which checks
+  // cover one build bubble. All four are asked of the whole document, so the
+  // bubble being asked about is resolved before the document is narrowed to a
+  // layer; the first three are answered inside the build layer, the fourth
+  // inside the correctness layer.
   const askedFor = realizesProductOf(focus);
   const asked = askedFor === null ? undefined : wholeById.get(askedFor);
   const product = asked !== undefined && layerOf(asked) === "product" ? asked : null;
@@ -566,6 +610,10 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
   const askedVerify = verifiesVerifyOf(focus);
   const attesting = askedVerify === null ? undefined : wholeById.get(askedVerify);
   const correctness = attesting !== undefined && layerOf(attesting) === "correctness" ? attesting : null;
+
+  const askedCovered = coveredByPartOf(focus);
+  const part = askedCovered === null ? undefined : wholeById.get(askedCovered);
+  const covered = part !== undefined && layerOf(part) === "build" ? part : null;
 
   // One layer at a time. Hierarchy and relations are same-layer by
   // construction, so this single filter is what keeps the product view from
@@ -595,7 +643,7 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
   const parentOf = (node: IntentNode): string | null =>
     node.parentId !== null && byId.has(node.parentId) ? node.parentId : null;
 
-  // A focus is either a real bubble, one of the three cross-layer drills, or one
+  // A focus is either a real bubble, one of the four cross-layer drills, or one
   // of the folds under any of them. A focus whose base is gone addresses
   // nothing, so it falls back to the root layer, the same way a deleted bubble
   // does.
@@ -604,17 +652,21 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
   const realizesBase = baseId !== null && isRealizesId(baseId);
   const hostsBase = baseId !== null && isHostsId(baseId);
   const verifiesBase = baseId !== null && isVerifiesId(baseId);
-  const crossBase = realizesBase || hostsBase || verifiesBase;
+  const coveredBase = baseId !== null && isCoveredById(baseId);
+  const crossBase = realizesBase || hostsBase || verifiesBase || coveredBase;
   const focusNode = baseId === null || crossBase ? null : (byId.get(baseId) ?? null);
   const focusId = focusNode === null ? null : focusNode.id;
   /**
    * The fold namespace of this layer. A cross-layer drill folds under its own
    * synthetic id rather than under the root, so walking out of that fold lands
-   * back on the realizers — or the hosted parts, or the attested parts —
-   * instead of on the whole build layer.
+   * back on the realizers — or the hosted parts, the attested parts, or the
+   * checks that cover one part — instead of on the whole layer.
    */
   const foldBase =
-    (realizesBase && product !== null) || (hostsBase && infra !== null) || (verifiesBase && correctness !== null)
+    (realizesBase && product !== null) ||
+    (hostsBase && infra !== null) ||
+    (verifiesBase && correctness !== null) ||
+    (coveredBase && covered !== null)
       ? baseId
       : focusId;
   const baseAlive = realizesBase
@@ -623,7 +675,9 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
       ? infra !== null
       : verifiesBase
         ? correctness !== null
-        : baseId === null || focusNode !== null;
+        : coveredBase
+          ? covered !== null
+          : baseId === null || focusNode !== null;
   const wantedDepth = more === null || !baseAlive ? 0 : more.depth;
 
   const childCount: Record<string, number> = {};
@@ -632,10 +686,10 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
     if (parent !== null) childCount[parent] = (childCount[parent] ?? 0) + 1;
   }
 
-  // A capability's realizers, the parts running on one piece of infrastructure
-  // and the parts one verification attests are sets, not subtrees: they may sit
-  // at any depth and under different parents, which is exactly why these layers
-  // are flat.
+  // A capability's realizers, the parts running on one piece of infrastructure,
+  // the parts one verification attests and the checks that cover one part are
+  // sets, not subtrees: they may sit at any depth and under different parents,
+  // which is exactly why these layers are flat.
   const members =
     product !== null
       ? realizersOf(whole, product.id)
@@ -645,7 +699,9 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
         ? hostsOf(whole, infra.id).filter((node) => byId.has(node.id))
         : correctness !== null
           ? verifiedOf(whole, correctness.id).filter((node) => byId.has(node.id))
-          : doc.nodes.filter((node) => parentOf(node) === focusId);
+          : covered !== null
+            ? verifiersOf(whole, covered.id).filter((node) => byId.has(node.id))
+            : doc.nodes.filter((node) => parentOf(node) === focusId);
 
   /**
    * Every node maps to the visible bubble that stands for it, or to nothing when
@@ -860,6 +916,18 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
       phase: correctness.phase,
     });
   }
+  // The covered crumb is that same relation read from the part's end, so it
+  // says what the layer holds rather than who wrote it: "covers the sync
+  // engine" is the whole sentence, and the crumb is the way back to the part.
+  if (covered !== null) {
+    trail.push({
+      id: coveredByIdOf(covered.id),
+      parentId: null,
+      label: `covers ${covered.label}`,
+      summary: `the checks that cover “${covered.label}”`,
+      phase: covered.phase,
+    });
+  }
   // one crumb per fold walked into; only the last one is ever the focus card,
   // so the intermediate crumbs need a label and a hue, nothing more
   const insidePhase = mostAdvanced(shown.length > 0 ? shown : folded);
@@ -870,9 +938,11 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
         ? `what runs on ${infra.label}`
         : correctness !== null
           ? `what ${correctness.label} attests`
-          : focusNode === null
-            ? "the project"
-            : focusNode.label;
+          : covered !== null
+            ? `what covers ${covered.label}`
+            : focusNode === null
+              ? "the project"
+              : focusNode.label;
   for (let level = 1; level <= depth; level += 1) {
     trail.push({
       id: moreIdOf(foldBase, level),
@@ -979,6 +1049,7 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
       serveCount: isProduct ? 0 : servesOf(whole, node.id).length,
       hostCount: own === "infra" ? hostsOf(whole, node.id).length : 0,
       verifyCount: own === "correctness" ? verifiedOf(whole, node.id).length : 0,
+      coverCount: own === "build" ? verifiersOf(whole, node.id).length : 0,
       // Two ends of the same question and no third: a part says whether
       // anything attests it, a capability says how much of what keeps it is
       // attested. Infrastructure and the verifications themselves are not
@@ -1015,6 +1086,7 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
       serveCount: 0,
       hostCount: 0,
       verifyCount: 0,
+      coverCount: 0,
       // the fold stands for a mixed bag; one shield over several answers would
       // be a claim about none of them
       shield: null,
@@ -1045,6 +1117,7 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
     product,
     infra,
     correctness,
+    covered,
     // the mechanical inside of a leaf, which is what the ghost bubbles on an
     // otherwise empty layer are drawn from
     symbols:

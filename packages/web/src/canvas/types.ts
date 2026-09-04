@@ -73,6 +73,8 @@ export interface BubbleData extends Record<string, unknown> {
   hostCount: number;
   /** correctness bubbles: build bubbles this verification attests */
   verifyCount: number;
+  /** build bubbles: correctness bubbles that cover this bubble (or an ancestor) */
+  coverCount: number;
   /**
    * Whether anything attests this bubble, or null where the question is not
    * asked — infrastructure, a verification itself, a fold, or a capability with

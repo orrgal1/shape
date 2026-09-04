@@ -3929,6 +3929,27 @@ kbd {
   background: color-mix(in oklab, var(--correctness) 6%, var(--surface-2));
 }
 
+/* the fourth door, read from the build end */
+.covered-by {
+  flex: none;
+  white-space: nowrap;
+  border-color: color-mix(in oklab, var(--correctness) 42%, var(--line-strong));
+  background: color-mix(in oklab, var(--correctness) 12%, var(--surface-3));
+  color: color-mix(in oklab, var(--correctness) 68%, var(--text));
+}
+
+.covered-by:hover {
+  background: color-mix(in oklab, var(--correctness) 26%, var(--surface-3));
+  border-color: color-mix(in oklab, var(--correctness) 78%, var(--line-strong));
+  color: var(--text);
+}
+
+/* the "covers" layer: its card says which part it answers for */
+.focus-card[data-covers="true"] {
+  border-color: color-mix(in oklab, var(--correctness) 32%, var(--line-strong));
+  background: color-mix(in oklab, var(--correctness) 6%, var(--surface-2));
+}
+
 /* --- the meta row, now that it carries one more mark ---
 
    Up to six things can share this row: the phase word, the shield, a badge or
