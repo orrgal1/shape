@@ -151,6 +151,8 @@ try {
       env: {
         ...process.env,
         SHAPE_AUTO_MAP: "0",
+        // the fake herdr has no manager to find, and this smoke is the launcher's
+        SHAPE_MANAGER: "0",
         HERDR_SOCKET_PATH: socketPath,
         SHAPE_HOME: fakeHome,
         HOME: fakeHome,

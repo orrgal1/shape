@@ -13,6 +13,9 @@ importers:
       '@lydell/node-pty':
         specifier: 1.2.0-beta.15
         version: 1.2.0-beta.15
+      '@orrgal1/manager-skill':
+        specifier: github:orrgal1/manager-skill#4a2f29ef854b58c6a99422bb30ecf698875fd5fd
+        version: https://codeload.github.com/orrgal1/manager-skill/tar.gz/4a2f29ef854b58c6a99422bb30ecf698875fd5fd
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
@@ -400,6 +403,11 @@ packages:
     cpu: [x64]
     os: [linux]
     libc: [glibc]
+
+  '@orrgal1/manager-skill@https://codeload.github.com/orrgal1/manager-skill/tar.gz/4a2f29ef854b58c6a99422bb30ecf698875fd5fd':
+    resolution: {gitHosted: true, integrity: sha512-CcoROddIZ6BDBoR9S2hiPDUYa7QwFZXdDmTCs5yNwhqgDksHpQjaByiFSSfDo+qGvjl2C7ebwWJ6EwsR66DwIg==, tarball: https://codeload.github.com/orrgal1/manager-skill/tar.gz/4a2f29ef854b58c6a99422bb30ecf698875fd5fd}
+    version: 0.1.0
+    hasBin: true
 
   '@rolldown/pluginutils@1.0.0-rc.3':
     resolution: {integrity: sha512-eybk3TjzzzV97Dlj5c+XrBFW57eTNhzod66y9HrBlzJ6NsCrWCp/2kaPS3K9wJmurBC0Tdw4yPjXKZqlznim3Q==}
@@ -1506,6 +1514,8 @@ snapshots:
 
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
+
+  '@orrgal1/manager-skill@https://codeload.github.com/orrgal1/manager-skill/tar.gz/4a2f29ef854b58c6a99422bb30ecf698875fd5fd': {}
 
   '@rolldown/pluginutils@1.0.0-rc.3': {}
 

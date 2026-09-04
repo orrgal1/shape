@@ -261,6 +261,26 @@ button {
   letter-spacing: 0;
 }
 
+/* whether this project has a manager session in the user's herdr, said the same
+   way the harness is: a key word and a state, because "who dispatches the
+   builders" is not something to infer from an empty header */
+.pill-manager {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+.pill-manager .pill-key {
+  color: var(--text-faint);
+  letter-spacing: 0.12em;
+}
+.pill-manager .pill-manager-state {
+  font-weight: 600;
+}
+/* no manager is a state, not a fault: dim, like the offline pill */
+.pill-manager .pill-manager-none {
+  font-weight: 400;
+  color: var(--text-faint);
+}
+
 /* an attached agent is the default, so its absence is what gets said — grey,
    because this is a fact about the project, not a failure to shout about */
 .pill-offline {

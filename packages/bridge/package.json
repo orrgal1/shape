@@ -18,6 +18,7 @@
     "smoke:claude": "node scripts/smoke-claude.mjs",
     "smoke:adopt": "node scripts/smoke-adopt.mjs",
     "smoke:herdr": "node scripts/smoke-herdr.mjs",
+    "smoke:manager": "node scripts/smoke-manager.mjs",
     "smoke:drift": "node scripts/smoke-drift.mjs",
     "smoke:remote": "node scripts/smoke-remote.mjs",
     "smoke:auth": "node scripts/smoke-auth.mjs",
@@ -26,6 +27,7 @@
   },
   "dependencies": {
     "@lydell/node-pty": "1.2.0-beta.15",
+    "@orrgal1/manager-skill": "github:orrgal1/manager-skill#4a2f29ef854b58c6a99422bb30ecf698875fd5fd",
     "typescript": "^5.7.0",
     "ws": "^8.18.0"
   },

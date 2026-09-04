@@ -24,6 +24,7 @@
     "smoke:remote": "pnpm --filter @shape/bridge smoke:remote",
     "smoke:wire": "pnpm --filter @shape/bridge smoke:wire",
     "smoke:herdr": "pnpm --filter @shape/bridge smoke:herdr",
+    "smoke:manager": "pnpm --filter @shape/bridge smoke:manager",
     "web": "pnpm --filter @shape/web dev",
     "smoke:shared": "pnpm --filter @shape/shared smoke",
     "smoke:link-cli": "pnpm --filter @shape/link smoke:link-cli",
