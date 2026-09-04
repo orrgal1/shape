@@ -48,6 +48,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
   const drillHosts = useApp((state) => state.drillHosts);
   const drillVerified = useApp((state) => state.drillVerified);
   const drillCovering = useApp((state) => state.drillCovering);
+  const drillServed = useApp((state) => state.drillServed);
 
   const {
     node,
@@ -361,13 +362,21 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
             covered by {coverCount}
           </button>
         ) : null}
+        {/* The "built by" door read from the build end: a part says how many
+            capabilities it serves, and opening it shows exactly those
+            capabilities. */}
         {!product && detail && serveCount > 0 && !comparing ? (
-          <span
-            className="badge badge-serves"
-            title={`part of ${serveCount} ${serveCount === 1 ? "capability" : "capabilities"} on the product layer`}
+          <button
+            type="button"
+            className="built-by serves nodrag nopan"
+            title={`show the ${serveCount} ${serveCount === 1 ? "capability" : "capabilities"} “${node.label}” serves`}
+            onClick={(event) => {
+              event.stopPropagation();
+              drillServed(node.id);
+            }}
           >
             serves {serveCount}
-          </span>
+          </button>
         ) : null}
       </div>
 

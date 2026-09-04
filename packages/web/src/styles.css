@@ -3578,8 +3578,8 @@ kbd {
 
 /* A part no capability says it is for, or one no infrastructure runs: a short
    dashed rule at the head of the foot row, which is already where the card
-   says what it IS connected to — the "serves 1" badge and the cross-layer
-   doors. It takes its place in the row rather than floating over the card: the
+   says what it IS connected to — the cross-layer doors, "serves 1" among
+   them. It takes its place in the row rather than floating over the card: the
    bottom-left corner belongs to the variation pips. */
 .bubble[data-gaps~="unserved"] .bubble-foot::before,
 .bubble[data-gaps~="unhosted"] .bubble-foot::before {
@@ -3618,16 +3618,14 @@ kbd {
   color: var(--text);
 }
 
-/* the same link read from the build side, where it is a fact rather than a
-   door: the panel is where its capabilities are named and followed */
-.badge-serves {
-  border-color: color-mix(in oklab, var(--capability) 34%, var(--line-strong));
-  color: color-mix(in oklab, var(--capability) 55%, var(--text-dim));
-}
+/* the serves door is the same link read from the build side — a part naming the
+   capabilities it serves — so it is a .built-by in the capability hue too and
+   needs no rule of its own */
 
-/* the "built by" layer: not a bubble of its own, so its card says which
-   capability it is answering for */
-.focus-card[data-realizes="true"] {
+/* the "built by" and "served by" layers: neither is a bubble of its own, so the
+   card says which capability, or which part, it answers for */
+.focus-card[data-realizes="true"],
+.focus-card[data-serves="true"] {
   border-color: color-mix(in oklab, var(--capability) 32%, var(--line-strong));
   background: color-mix(in oklab, var(--capability) 6%, var(--surface-2));
 }
@@ -3951,6 +3949,12 @@ kbd {
 .bubble-foot > .bubble-phase,
 .bubble-foot > .built-by {
   flex: none;
+}
+
+/* two doors on one part — "covered by" and "serves" — sit together at the right
+   end rather than being pushed apart by a second `margin-left: auto` */
+.bubble-foot > .built-by + .built-by {
+  margin-left: 0;
 }
 
 /* a block rather than the badge's usual inline-flex: `text-overflow` only

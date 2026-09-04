@@ -20,6 +20,7 @@ import {
   isHostsId,
   isProductRoot,
   isRealizesId,
+  isServesId,
   isVerifiesId,
   selectLayer,
 } from "./layer.ts";
@@ -642,6 +643,7 @@ function Breadcrumb() {
   const infra = layer.infra;
   const correctness = layer.correctness;
   const covered = layer.covered;
+  const served = layer.served;
   if (comparing || trail.length === 0) return null;
 
   return (
@@ -682,6 +684,17 @@ function Breadcrumb() {
           type="button"
           className="crumb"
           title={`back to ${covered.label} on the build layer`}
+          onClick={() => setView("build")}
+        >
+          project
+        </button>
+      ) : served !== null ? (
+        // like the covered crumb, this one goes back to the part on the build
+        // layer rather than repeating its name
+        <button
+          type="button"
+          className="crumb"
+          title={`back to ${served.label} on the build layer`}
           onClick={() => setView("build")}
         >
           project
@@ -1337,10 +1350,12 @@ function FocusCard() {
   const infra = layer.infra;
   const correctness = layer.correctness;
   const covered = layer.covered;
+  const served = layer.served;
   const fromProduct = product !== null && isRealizesId(node.id);
   const fromInfra = infra !== null && isHostsId(node.id);
   const fromCorrectness = correctness !== null && isVerifiesId(node.id);
   const fromBuild = covered !== null && isCoveredById(node.id);
+  const fromServes = served !== null && isServesId(node.id);
   const parent = node.parentId;
   const isRoot = product === null && isProductRoot(doc, view, node.id);
   // the fold counts as what it holds, so the capabilities are counted in the
@@ -1357,6 +1372,7 @@ function FocusCard() {
       data-hosts={fromInfra}
       data-verifies={fromCorrectness}
       data-covers={fromBuild}
+      data-serves={fromServes}
       data-root={isRoot}
       data-thinking={thinking}
     >
@@ -1372,17 +1388,20 @@ function FocusCard() {
                 ? `back to ${correctness.label} on the correctness layer`
                 : fromBuild
                   ? `back to ${covered.label} on the build layer`
-                  : isRoot
-                    ? "back to the product bubble"
-                    : parent === null
-                      ? "back to the project layer"
-                      : "up one level"
+                  : fromServes
+                    ? `back to ${served.label} on the build layer`
+                    : isRoot
+                      ? "back to the product bubble"
+                      : parent === null
+                        ? "back to the project layer"
+                        : "up one level"
         }
         onClick={() => {
           if (fromProduct) setView("product");
           else if (fromInfra) setView("infra");
           else if (fromCorrectness) setView("correctness");
           else if (fromBuild) setView("build");
+          else if (fromServes) setView("build");
           else setFocus(parent);
         }}
       >
@@ -1531,6 +1550,10 @@ export function App() {
       }
       if (isCoveredById(focus)) {
         setView(view === "correctness" ? "build" : "correctness");
+        return;
+      }
+      if (isServesId(focus)) {
+        setView(view === "product" ? "build" : "product");
         return;
       }
       // one level up is the parent bubble, or the fold this fold nests in
