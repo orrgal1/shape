@@ -99,6 +99,7 @@ const PROJECT = {
   tools: TOOLS,
   targetHasCode: true,
   canPublish: false,
+  directivePath: "/home/u/.shape/server/projects/k-1/shape-directive.md",
   legacyKeys: LEGACY,
 };
 const REALITY = { nodes: [], edges: [], symbols: [], infra: [], verification: [], extractedAt: null, head: "abc123" };

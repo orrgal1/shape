@@ -1306,6 +1306,23 @@ try {
     JSON.parse(await readFile(join(fakeHome, ".shape", "recents.json"), "utf8"))[0] === wtB,
   );
 
+  // the file a harness Shape never registered a tool in reads to find the
+  // canvas: written under SHAPE_HOME per project, rewritten on every open
+  const directiveFile = join(fakeHome, ".shape", "server", "projects", projectKeyOf(targetB), "shape-directive.md");
+  const directive = await readFile(directiveFile, "utf8");
+  check(
+    "the project's shape-directive.md names the link, the fallback CLI and the canvas contract verbatim",
+    directive.includes(`ws://127.0.0.1:${PORT}/link`) &&
+      directive.includes(join("packages", "link", "src", "cli.ts")) &&
+      directive.includes(CANVAS_TOOL_DESCRIPTION.split("\n")[0]),
+    JSON.stringify(directive.slice(0, 200)),
+  );
+  check(
+    "hello points a launcher at the directive it wrote",
+    helloB.session.directivePath === directiveFile,
+    `${helloB.session.directivePath} / ${directiveFile}`,
+  );
+
   const persistedA = storedGraph(target);
   check("the old project's graph was persisted before switching away", persistedA.nodes.length === 4 && persistedA.edges.length === 2, `nodes=${persistedA.nodes.length}`);
 
