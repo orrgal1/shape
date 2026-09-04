@@ -145,11 +145,11 @@ function startedAgo(iso: string | null): string {
 }
 
 /**
- * One running agent session, offered for adoption. Clicking retargets the
+ * One running agent session, offered for connection. Clicking retargets the
  * bridge at that session's folder on that harness — resuming the conversation
  * when the session has an id, and otherwise opening a fresh one there.
  */
-function SessionRow({ session, current }: { session: DiscoveredSession; current: boolean }) {
+function SessionRow({ session }: { session: DiscoveredSession }) {
   const folder = session.cwd === null ? "unknown folder" : basename(session.cwd);
   const short = session.sessionId === null ? null : session.sessionId.slice(0, 8);
   return (
@@ -157,9 +157,8 @@ function SessionRow({ session, current }: { session: DiscoveredSession; current:
       <button
         type="button"
         className="project-recent project-session"
-        data-current={current}
         onClick={() => send({ type: "adopt", pid: session.pid })}
-        title={`${session.command} (pid ${session.pid}) in ${session.cwd ?? "an unreadable folder"} — attach: ${session.attach}`}
+        title={`connect to ${session.command} (pid ${session.pid}) in ${session.cwd ?? "an unreadable folder"} — attach: ${session.attach}`}
       >
         <span className="session-harness">{HARNESS_LABEL[session.harness]}</span>
         <span className="project-recent-name">{folder}</span>
@@ -168,7 +167,7 @@ function SessionRow({ session, current }: { session: DiscoveredSession; current:
           {short === null ? null : ` · ${short}`}
         </span>
         <span className="session-hint">
-          {session.sessionId === null ? "opens a new conversation here" : "reopens this conversation"}
+          {session.sessionId === null ? "connect: opens a new conversation here" : "connect: reopens this conversation"}
         </span>
       </button>
     </li>
@@ -176,7 +175,8 @@ function SessionRow({ session, current }: { session: DiscoveredSession; current:
 }
 
 /**
- * Current project plus a menu of recents and a free-text path. Switching is a
+ * Current project plus a menu led by recents, then a free-text path, a create
+ * form, and a folded list of running sessions to connect to. Switching is a
  * bridge-side retarget, so the answer arrives as a fresh `hello` — which is
  * also what closes this menu.
  */
@@ -196,11 +196,17 @@ function ProjectSelector() {
   const [visibility, setVisibility] = useState<"private" | "public">("private");
   const [creating, setCreating] = useState(false);
   const [picking, setPicking] = useState(false);
+  // the fold outlives the menu: it lives here, not in the menu body, so a
+  // person who opened it once finds it open the next time the menu drops
+  const [sessionsOpen, setSessionsOpen] = useState(false);
   const menuRef = useDismissable(open, setOpen);
   const cwd = session?.cwd ?? null;
-  // recents, the free-text path and the adopt list are all answered by this
+  // recents, the free-text path and the connect list are all answered by this
   // project's agent; without one they would offer frames the server refuses
   const agentless = session !== null && !session.agentConnected;
+  // a session already in this project's folder is where you are standing:
+  // nothing to connect to
+  const others = sessions.filter((entry) => entry.cwd !== cwd);
   // One room you are already standing in is the local case and needs no list;
   // a second room on the server — or a socket joined to something the list does
   // not name — is the only reason to offer a choice of projects. Agentless, the
@@ -318,33 +324,12 @@ function ProjectSelector() {
           ) : null}
 
           {agentless ? (
-            <p className="tl-empty">Recents and running sessions need this project&apos;s agent</p>
+            <p className="tl-empty">Open, create and connect need this project&apos;s agent</p>
           ) : (
             <>
-              <div className="project-menu-head">
-                <p className="project-menu-title">running sessions</p>
-                <button
-                  type="button"
-                  className="project-rescan"
-                  title="re-scan this machine for running agent sessions"
-                  onClick={() => send({ type: "discover" })}
-                >
-                  rescan
-                </button>
-              </div>
-              {sessions.length === 0 ? (
-                <p className="tl-empty">No agent is running anywhere else on this machine.</p>
-              ) : (
-                <ul className="project-recents project-sessions">
-                  {sessions.map((entry) => (
-                    <SessionRow key={entry.pid} session={entry} current={entry.cwd === cwd} />
-                  ))}
-                </ul>
-              )}
-
               <p className="project-menu-title">recent projects</p>
               {recents.length === 0 ? (
-                <p className="tl-empty">The bridge has not reported any recents yet.</p>
+                <p className="tl-empty">No recent projects yet — open one below.</p>
               ) : (
                 <ul className="project-recents">
                   {recents.map((entry) => (
@@ -354,7 +339,7 @@ function ProjectSelector() {
                         className="project-recent"
                         data-current={entry === cwd}
                         onClick={() => switchTo(entry)}
-                        title={entry}
+                        title={entry === cwd ? `${entry} — current project` : `open ${entry}`}
                       >
                         <span className="project-recent-name">{basename(entry)}</span>
                         <span className="project-recent-path mono">{entry}</span>
@@ -364,6 +349,39 @@ function ProjectSelector() {
                   ))}
                 </ul>
               )}
+
+              <p className="project-menu-title">open a project</p>
+              <div className="project-open">
+                <input
+                  className="project-path mono"
+                  value={path}
+                  spellCheck={false}
+                  placeholder="~/code/..."
+                  aria-label="project path"
+                  onChange={(event) => setPath(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") return;
+                    event.preventDefault();
+                    openOrPick();
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={openOrPick}
+                  disabled={agentless || picking}
+                  title={path.trim().length === 0 ? "pick a folder on this machine" : "open this path"}
+                >
+                  {picking ? "picking…" : "Open"}
+                </button>
+              </div>
+              {path.trim().length === 0 ? (
+                // the empty box is now the interesting case, and a tooltip is
+                // invisible until someone hovers the thing they have not tried
+                <p className="project-create-preview project-open-hint">
+                  Open with nothing typed asks this machine for a folder
+                </p>
+              ) : null}
 
               <p className="project-menu-title">start a new project</p>
               <div className="project-create">
@@ -430,35 +448,30 @@ function ProjectSelector() {
                 ) : null}
               </div>
 
-              <p className="project-menu-title">open another</p>
-              <div className="project-open">
-                <input
-                  className="project-path mono"
-                  value={path}
-                  spellCheck={false}
-                  placeholder="~/code/..."
-                  aria-label="project path"
-                  onChange={(event) => setPath(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter") return;
-                    event.preventDefault();
-                    openOrPick();
-                  }}
-                />
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={openOrPick}
-                  disabled={agentless || picking}
-                  title={path.trim().length === 0 ? "pick a folder on this machine" : "open this path"}
-                >
-                  {picking ? "picking…" : "Open"}
-                </button>
-              </div>
-              {path.trim().length === 0 ? (
-                // the empty box is now the interesting case, and a tooltip is
-                // invisible until someone hovers the thing they have not tried
-                <p className="project-create-preview">Open with nothing typed asks this machine for a folder</p>
+              <button
+                type="button"
+                className="project-fold"
+                aria-expanded={sessionsOpen}
+                onClick={() => setSessionsOpen((value) => !value)}
+              >
+                <span className="project-caret">{sessionsOpen ? "▾" : "▸"}</span>
+                <span className="project-menu-title">connect to a running session ({others.length})</span>
+              </button>
+              {sessionsOpen ? (
+                <div className="project-fold-body">
+                  {others.length === 0 ? (
+                    <p className="tl-empty">No agent is running anywhere else on this machine.</p>
+                  ) : (
+                    <ul className="project-recents project-sessions">
+                      {others.map((entry) => (
+                        <SessionRow key={entry.pid} session={entry} />
+                      ))}
+                    </ul>
+                  )}
+                  <button type="button" className="project-rescan" onClick={() => send({ type: "discover" })}>
+                    rescan this machine for running sessions
+                  </button>
+                </div>
               ) : null}
             </>
           )}

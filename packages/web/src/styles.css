@@ -338,20 +338,43 @@ button {
   margin-bottom: var(--s4);
 }
 
-/* the "running sessions" heading carries its own rescan control */
-.project-menu-head {
+/* the picker stacks several titled sections, so its lists need the gap even
+   though `.project-recents` resets its own margin below; the other menus end
+   on their list and keep the reset */
+.project > .project-menu .project-menu-title + * {
+  margin-bottom: var(--s4);
+}
+
+/* the running-sessions section is folded: its heading is the toggle, and the
+   title's "space before the list" rule must not apply to the caret beside it */
+.project-fold {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
+  gap: var(--s2);
+  width: 100%;
+  margin: 0 0 var(--s2);
+  padding: 0;
+  text-align: left;
+}
+
+.project-fold .project-menu-title {
+  margin: 0;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.project-fold:hover .project-menu-title {
+  color: var(--text-dim);
+}
+
+.project-fold-body {
+  display: flex;
+  flex-direction: column;
   gap: var(--s2);
 }
 
-/* the title's "space before the list" rule must not push the rescan control */
-.project-menu-head .project-menu-title + * {
-  margin-bottom: 0;
-}
-
 .project-rescan {
+  align-self: flex-start;
+  padding: 2px 0;
   font-family: var(--font-mono);
   font-size: var(--t-xs);
   letter-spacing: 0.08em;
@@ -525,6 +548,12 @@ button {
   color: var(--text-faint);
   font-size: var(--t-sm);
   overflow-wrap: anywhere;
+}
+
+/* the open box is followed by the create form now: the hint sits close under
+   its box and carries the section gap the title rule would have put there */
+.project-open-hint {
+  margin: calc(var(--s2) - var(--s4)) 0 var(--s4);
 }
 
 .project-create-opt {
