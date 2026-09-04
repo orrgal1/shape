@@ -4363,13 +4363,17 @@ volumes:
         !catchUp.body.includes("Mechanical skeleton"),
       JSON.stringify(catchUp.body.slice(0, 120)),
     );
-    check(
-      "no mechanical skeleton was seeded over the map somebody already grouped",
-      !cuFrames.some(
-        (f) => f.type === "graph" && f.graph.nodes.some((n) => n.id === "cu-auth" || n.id === "cu-db"),
-      ),
-      JSON.stringify(cuFrames.filter((f) => f.type === "graph").at(-1)?.graph.nodes.map((n) => n.id) ?? null),
-    );
+    {
+      // the canvas as this browser has seen it: the hello it opened on, plus
+      // every revision since — a browser that connected after the turn was
+      // delivered still holds the canvas the turn left behind
+      const cuSeen = [cuHello.graphs[cuWt], ...cuFrames.filter((f) => f.type === "graph" && f.worktree === cuWt).map((f) => f.graph)];
+      check(
+        "no mechanical skeleton was seeded over the map somebody already grouped",
+        cuSeen.every((g) => g !== undefined && !g.nodes.some((n) => n.id === "cu-auth" || n.id === "cu-db")),
+        JSON.stringify(cuSeen.at(-1)?.nodes.map((n) => n.id) ?? null),
+      );
+    }
 
     // the same validation a survey turn runs under: the fake answers this
     // prompt with one legal claim and one bubble pointing at a path that does
