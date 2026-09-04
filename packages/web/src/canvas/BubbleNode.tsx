@@ -348,7 +348,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
         {/* The same door read from the build end: a part says how many checks
             cover it, and opening it shows exactly those checks. Zero is hidden
             because a hollow shield already says so. */}
-        {build && !isMore && coverCount > 0 && tier !== "min" && !comparing ? (
+        {build && coverCount > 0 && tier !== "min" && !comparing ? (
           <button
             type="button"
             className="built-by covered-by nodrag nopan"

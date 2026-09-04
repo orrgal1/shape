@@ -676,8 +676,8 @@ function Breadcrumb() {
           what proves it works
         </button>
       ) : covered !== null ? (
-        // read from the build end the trail goes back to the part, so this crumb
-        // names the layer that part lives on
+        // read from the build end, the trail goes back to the part, so this
+        // crumb names the layer that part lives on
         <button
           type="button"
           className="crumb"
