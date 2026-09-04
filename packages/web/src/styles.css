@@ -3578,8 +3578,8 @@ kbd {
 
 /* A part no capability says it is for, or one no infrastructure runs: a short
    dashed rule at the head of the foot row, which is already where the card
-   says what it IS connected to — the "serves 1" badge and the cross-layer
-   doors. It takes its place in the row rather than floating over the card: the
+   says what it IS connected to — the cross-layer doors, "serves 1" among
+   them. It takes its place in the row rather than floating over the card: the
    bottom-left corner belongs to the variation pips. */
 .bubble[data-gaps~="unserved"] .bubble-foot::before,
 .bubble[data-gaps~="unhosted"] .bubble-foot::before {
@@ -3618,16 +3618,14 @@ kbd {
   color: var(--text);
 }
 
-/* the same link read from the build side, where it is a fact rather than a
-   door: the panel is where its capabilities are named and followed */
-.badge-serves {
-  border-color: color-mix(in oklab, var(--capability) 34%, var(--line-strong));
-  color: color-mix(in oklab, var(--capability) 55%, var(--text-dim));
-}
+/* the serves door is the same link read from the build side — a part naming the
+   capabilities it serves — so it is a .built-by in the capability hue too and
+   needs no rule of its own */
 
-/* the "built by" layer: not a bubble of its own, so its card says which
-   capability it is answering for */
-.focus-card[data-realizes="true"] {
+/* the "built by" and "served by" layers: neither is a bubble of its own, so the
+   card says which capability, or which part, it answers for */
+.focus-card[data-realizes="true"],
+.focus-card[data-serves="true"] {
   border-color: color-mix(in oklab, var(--capability) 32%, var(--line-strong));
   background: color-mix(in oklab, var(--capability) 6%, var(--surface-2));
 }
@@ -3949,8 +3947,39 @@ kbd {
 }
 
 .bubble-foot > .bubble-phase,
-.bubble-foot > .built-by {
+.bubble-foot > .built-by,
+.bubble-foot > .bubble-doors {
   flex: none;
+}
+
+/* The build end's doors travel together, at the right end of the row where a
+   lone door sits. Inside the group the first door's `margin-left: auto` has no
+   room to take, so the two sit at the row's own gap. */
+.bubble-foot > .bubble-doors {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+/* Two doors do not fit beside the phase word in a 210px row, and a door the
+   row clips is not a door. So they take the card's bottom-right corner on a
+   row of their own, and the summary gives up its second line to pay for it —
+   the lens shows the whole promise anyway. Reserved from the card's padding
+   so the foot above keeps its place, and clear of the drill chip, which hangs
+   below the bottom edge. */
+.bubble[data-doors="2"] {
+  padding-bottom: calc(var(--s3) + 17px + var(--s1));
+}
+
+.bubble[data-doors="2"] .bubble-summary {
+  -webkit-line-clamp: 1;
+}
+
+.bubble[data-doors="2"] .bubble-doors {
+  position: absolute;
+  right: var(--s3);
+  bottom: var(--s3);
 }
 
 /* a block rather than the badge's usual inline-flex: `text-overflow` only

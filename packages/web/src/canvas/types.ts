@@ -60,6 +60,12 @@ export interface BubbleData extends Record<string, unknown> {
   /** under the lens: the card is grown to say its whole promise and drawn above its neighbours */
   lens: boolean;
   /**
+   * The product itself, on its own layer: the one bubble the whole graph starts
+   * from. False for the same node inside a serves drill, where it is one
+   * capability among the flat set a part serves and no longer the top.
+   */
+  root: boolean;
+  /**
    * Which layer the bubble is drawn in. The four cards share their geometry and
    * differ in what they are allowed to say: a capability has no code line, a
    * component has no "built by", a verification says what it attests.
