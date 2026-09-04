@@ -6,7 +6,9 @@
   "description": "The link: Shape's canvas tool as an MCP server, plus a harness hook that reports what the agent is doing",
   "scripts": {
     "mcp": "node src/mcp.ts",
+    "canvas": "node src/cli.ts",
     "selftest:omp": "sh -c 'command -v bun >/dev/null 2>&1 && exec bun scripts/omp-extension-selftest.mjs; exec node scripts/omp-extension-selftest.mjs'",
+    "smoke:link-cli": "node scripts/link-cli-smoke.mjs",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
