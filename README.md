@@ -26,7 +26,8 @@ requirement, and the running agent gets both as an addressed instruction.
 - **herdr — optional, recommended.** A terminal multiplexer: with it installed, the harness
   session runs in a tab of your own terminal, which you can look at and type into; without it
   Shape owns a pty and the browser renders the session for you.
-- **`gh`, authenticated — only for manager mode** (see below).
+- **`gh`, authenticated — optional.** Used by "start a new project → publish to GitHub" from
+  the canvas, and by manager mode (see below).
 
 ## Quick start
 
