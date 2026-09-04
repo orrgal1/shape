@@ -1,12 +1,12 @@
 /**
- * The lens grows a bubble instead of zooming into it.
+ * The lens grows a bubble so its whole summary fits; the viewport then zooms
+ * onto the grown box (see motion.ts).
  *
- * Zooming the viewport scaled the text and the borders with it, so the lensed
- * bubble read as a different, larger drawing of the same card. Here the canvas
- * keeps its zoom and the bubble's own box grows — around its centre, to reading
- * width, by exactly the height its clamped summary was hiding. Type stays the
- * size it was everywhere else, which is the whole point: the lens reveals text,
- * it does not magnify it.
+ * Zooming alone scaled a clamped card: bigger type, still two lines and an
+ * ellipsis. Growing alone showed every line at a type size nobody had asked to
+ * read at. So both: the bubble's own box grows — around its centre, to reading
+ * width, by exactly the height its clamped summary was hiding — and the
+ * viewport zooms in on that box, so the words are larger AND all there.
  *
  * The extra height is measured against the real stylesheet rather than guessed
  * from a character count: a hidden card of the lens width, the summary in it,

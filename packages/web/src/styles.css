@@ -891,8 +891,8 @@ button {
 }
 
 /* Under the lens the card is grown by the layout to fit exactly these lines, so
-   nothing is clipped — and the type stays at canvas scale on purpose: the lens
-   gives a bubble room to speak without pretending the canvas zoomed in. */
+   nothing is clipped; the viewport zooms onto the grown card, which is what
+   makes the type larger — the stylesheet only stops hiding lines. */
 .bubble[data-lens="true"] .bubble-summary {
   -webkit-line-clamp: unset;
 }

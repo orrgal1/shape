@@ -29,6 +29,13 @@ type Padding = Parameters<typeof getViewportForBounds>[5];
 export const MOTION_MS = 380;
 /** a layer swap dissolves the outgoing layer before the new one arrives */
 export const SWAP_OUT_MS = 150;
+/**
+ * A grown lens box fills this much of the pane's shorter dimension, at most
+ * this zoom. The cap keeps the lens a step up in type size rather than a
+ * poster; the fill keeps the whole grown card on screen with room around it.
+ */
+const LENS_FILL = 0.7;
+const LENS_MAX_ZOOM = 1.8;
 
 /** exponential ease-out; the same family as --ease in the stylesheet */
 const ease = (t: number): number => 1 - Math.pow(1 - t, 3);
@@ -48,12 +55,15 @@ export interface MotionState {
   setInteracting: (interacting: boolean) => void;
   /**
    * Put one bubble under the lens: its own box grows around its centre until the
-   * whole summary shows — at the type size it already had — and the viewport
-   * *pans*, never zooms, to put that grown box in the middle. Every other bubble
-   * keeps the size and the place the layout gave it. The same bubble again puts
-   * the boxes and the viewport back; another bubble hands the lens on and keeps
-   * the remembered way back. Automatic framing is held off while the lens is on;
-   * a layer change lifts it.
+   * whole summary shows, and the viewport zooms in and pans so that grown box
+   * sits in the middle of the pane, filling most of it — the type gets larger
+   * AND every line of it is there. The zoom is chosen from the grown box, never
+   * higher than LENS_MAX_ZOOM and never lower than the canvas minimum, so a long
+   * summary lands as a whole and a short one does not balloon. Every other
+   * bubble keeps the size and the place the layout gave it. The same bubble
+   * again puts the boxes and the viewport back; another bubble hands the lens
+   * on and keeps the remembered way back. Automatic framing is held off while
+   * the lens is on; a layer change lifts it.
    */
   toggleLens: (id: string) => void;
   /** the bubble under the lens, if any */
@@ -284,8 +294,12 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
       interacting.current = true;
       const target = withLens(laid.current, id, summaryOf);
       const grown = target[id] ?? box;
-      // pan only: the zoom the user chose is the zoom they keep
-      const { zoom } = getViewport();
+      // zoom to the grown box: large enough that the type steps up, small
+      // enough that the whole card — every line it just unclamped — is in view
+      const zoom = Math.max(
+        minZoom,
+        Math.min(LENS_MAX_ZOOM, (width * LENS_FILL) / grown.w, (height * LENS_FILL) / grown.h),
+      );
       const wanted = {
         x: width / 2 - (grown.x + grown.w / 2) * zoom,
         y: height / 2 - (grown.y + grown.h / 2) * zoom,
@@ -293,7 +307,7 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
       };
       tween({ origin: originFor(current.current, target), target, wanted, hold: 0, layer: false, insist: true });
     },
-    [width, height, getViewport, tween, summaryOf],
+    [width, height, minZoom, getViewport, tween, summaryOf],
   );
 
   useEffect(() => {

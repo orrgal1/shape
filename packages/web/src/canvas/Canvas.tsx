@@ -272,10 +272,10 @@ export function Canvas() {
         if (comparing || node.type !== "bubble") return;
         select({ kind: "node", id: node.id });
       }}
-      // double-click is the lens: centre this bubble and grow it to fit its
-      // words at the same scale; a second double-click on it gives the previous
-      // view back. Drilling in stays on the chip, so the gesture never changes
-      // what layer is on screen.
+      // double-click is the lens: grow this bubble to fit its words, then zoom
+      // and centre the viewport on the grown card; a second double-click on it
+      // gives the previous view back. Drilling in stays on the chip, so the
+      // gesture never changes what layer is on screen.
       onNodeDoubleClick={(_event, node) => {
         if (comparing || node.type !== "bubble") return;
         select({ kind: "node", id: node.id });
