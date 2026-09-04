@@ -1,30 +1,48 @@
 /**
  * Shape in local mode: the canvas server and the agent that drives the coding
- * harness, in one process, joined by the in-memory link. Same frames, same
- * `.shape/` files as remote mode — only the transport is shorter.
+ * harnesses, in one process, joined by the in-memory link. Same frames and the
+ * same records as remote mode — only the transport is shorter and the database
+ * is the user's own (`~/.shape/shape.db`, or `$SHAPE_HOME`).
+ *
+ * `--cwd` may be ANY worktree of the repo: the project is the repo, all of its
+ * worktrees share one canvas, and the one named here is the variation that gets
+ * the first harness.
  *
  * Run: node src/index.ts [--cwd <dir>] [--port <n>] [--backend <id>] [--omp "<cmd ...>"]
+ *                        [--db <file>]
  */
 
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { BRIDGE_PORT, BRIDGE_WS_PATH } from "../../shared/src/index.ts";
 import { AgentRuntime } from "./agent/runtime.ts";
 import { ShapeServer } from "./server/server.ts";
-import { projectDirStorage } from "./server/storage.ts";
+import { openSqliteStorage } from "./server/sqlite.ts";
 import { memoryLinkPair } from "./transport.ts";
 import { SocketServer } from "./wsserver.ts";
 
 interface Cli {
+  /** `--cwd <dir>`: the worktree to open first; the project is its whole repo */
   cwd: string;
   port: number;
-  /** `--backend <id>`: beats both config files */
+  /**
+   * `--backend <id>`: which harness to start. A project's own
+   * `.shape/config.json` beats it; with neither, and more than one harness
+   * installed, the browser asks.
+   */
   backend?: string;
-  /** `--omp "<cmd ...>"`: replaces the omp adapter's command */
+  /** `--omp "<cmd ...>"`: the omp executable and its leading args */
   ompCommand?: string[];
+  /** `--db <file>`: the database every project's canvas is kept in */
+  db: string;
 }
 
 function parseArgv(argv: string[]): Cli {
-  const cli: Cli = { cwd: process.cwd(), port: BRIDGE_PORT };
+  const cli: Cli = {
+    cwd: process.cwd(),
+    port: BRIDGE_PORT,
+    db: join(process.env.SHAPE_HOME ?? homedir(), ".shape", "shape.db"),
+  };
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -44,6 +62,9 @@ function parseArgv(argv: string[]): Cli {
     } else if (arg === "--omp" && next !== undefined) {
       cli.ompCommand = next.trim().split(/\s+/).filter((token) => token.length > 0);
       i++;
+    } else if (arg === "--db" && next !== undefined) {
+      cli.db = resolve(next);
+      i++;
     } else {
       throw new Error(`unknown argument ${arg}`);
     }
@@ -56,8 +77,13 @@ function parseArgv(argv: string[]): Cli {
 try {
   const cli = parseArgv(process.argv.slice(2));
   const sockets = new SocketServer({ port: cli.port });
-  // local mode keeps every project's canvas in the project: <cwd>/.shape/
-  const server = new ShapeServer({ sockets, storage: projectDirStorage() });
+  // one database for every project this user opens, keyed by project AND
+  // worktree, so every variation of a repo keeps its own canvas on the one
+  // canvas they are merged onto
+  const storage = openSqliteStorage(cli.db);
+  // and this is the machine those repos are on, so a canvas drawn before Shape
+  // kept state here is still there to be taken over
+  const server = new ShapeServer({ sockets, storage, importLegacy: true });
   const link = memoryLinkPair();
   server.attachAgent(link.server);
   const agent = new AgentRuntime({
@@ -68,10 +94,35 @@ try {
     allowTerminal: true,
     sockets,
     link: link.agent,
-    // the harness is this process's reason to exist: the browsers have already
-    // been told why (`agent_exit`), so all that is left is to go
-    onExit: () => setTimeout(() => process.exit(1), 50),
+    // a retarget that failed has left this process with nowhere to stand:
+    // the browsers have already been told why, so all that is left is to
+    // flush and go
+    onExit: () =>
+      setTimeout(() => {
+        storage.close();
+        process.exit(1);
+      }, 50),
   });
+
+  // The sessions live in the user's terminal and outlive this process unless
+  // told otherwise: a bridge stopped by its supervisor (or Ctrl-C) must close
+  // the tabs it opened, or the next bridge finds herdr still running its
+  // predecessor's harness. Registered before start() so a stop mid-startup
+  // settles too.
+  let stopping = false;
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => {
+      if (stopping) return;
+      stopping = true;
+      void agent.stop().then(
+        () => {
+          storage.close();
+          process.exit(0);
+        },
+        () => process.exit(0),
+      );
+    });
+  }
 
   // The socket listens BEFORE the harness is started, and that order matters:
   // a hook-driven adapter's first event (Claude Code fires SessionStart within

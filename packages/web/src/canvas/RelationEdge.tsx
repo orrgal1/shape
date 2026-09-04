@@ -50,6 +50,8 @@ export function RelationEdge({ id, data }: EdgeProps<RelEdge>) {
   const count = data?.count ?? 0;
   const drillId = data?.drillId ?? null;
   const deltaStatus = data?.deltaStatus ?? null;
+  /** colour slot of the variation working in the target bubble, or null */
+  const tone = data?.tone ?? null;
   /**
    * The words are asked for, not always on: `build.ts` decides, and the pill
    * stays mounted either way so it can fade rather than pop. A bundle keeps its
@@ -79,6 +81,9 @@ export function RelationEdge({ id, data }: EdgeProps<RelEdge>) {
         id={id}
         path={path}
         className="rel-path"
+        // the colour of the variation the work is arriving in, read by the glow
+        // in the stylesheet; absent on every line no work is arriving along
+        style={tone === null ? undefined : { ["--wt" as string]: `var(--wt-${tone})` }}
         interactionWidth={kind === null ? 0 : 26}
         markerEnd={kind === null ? undefined : MARKER_BY_KIND[kind]}
       />

@@ -1,8 +1,25 @@
 import type { Edge, Node } from "@xyflow/react";
-import type { EdgeKind, IntentNode, Layer, Phase } from "../../../shared/src/index.ts";
+import type { EdgeKind, IntentNode, Layer, LinkGap, Phase } from "../../../shared/src/index.ts";
 import type { DeltaStatus } from "../deltaView.ts";
-import type { InsideRef } from "../layer.ts";
+import type { GhostSigil, InsideRef, Shield } from "../layer.ts";
 import type { EdgeGeom } from "./geometry.ts";
+
+/**
+ * One variation that holds this bubble, drawn as a small dot under the card.
+ * The colour slot is the variation's own and stable across every bubble, so a
+ * reader learns "the green pip is the reminders branch" once.
+ */
+export interface BranchPip {
+  worktree: string;
+  /** what a person calls it: the branch name */
+  branch: string;
+  /** this variation's copy of the bubble says something else */
+  differs: boolean;
+  /** colour slot, `--wt-N` in the stylesheet */
+  tone: number;
+  /** the copy that is the one drawn on the card */
+  primary: boolean;
+}
 
 export interface BubbleData extends Record<string, unknown> {
   node: IntentNode;
@@ -16,6 +33,18 @@ export interface BubbleData extends Record<string, unknown> {
   /** drift notes on hidden descendants: a subdued version of the same warning */
   driftInside: number;
   failedInside: number;
+  /**
+   * Which variations hold this bubble, or empty when one variation is on screen
+   * — a canvas that is not merging anything has nothing to say about where a
+   * bubble also lives.
+   */
+  pips: readonly BranchPip[];
+  /**
+   * Colour slots of the variations working inside this bubble right now: one
+   * ring per variation, so two branches touching the same part read as two.
+   * Empty with a single variation on screen, where the ring is the plain one.
+   */
+  rings: readonly number[];
   isSelected: boolean;
   /**
    * The fold: one bubble standing for the parts a layer had no room for. It has
@@ -29,17 +58,50 @@ export interface BubbleData extends Record<string, unknown> {
   /** alone on its layer: the card is wide and says its whole promise */
   solo: boolean;
   /**
-   * Which layer the bubble is drawn in. A capability card and a component card
-   * share their geometry and differ in what they are allowed to say: a
-   * capability has no code line, a component has no "built by".
+   * Which layer the bubble is drawn in. The four cards share their geometry and
+   * differ in what they are allowed to say: a capability has no code line, a
+   * component has no "built by", a verification says what it attests.
    */
   layer: Layer;
   /** product bubbles: build bubbles that make this capability real */
   realizerCount: number;
   /** build bubbles: capabilities this bubble (or an ancestor) serves */
   serveCount: number;
+  /** infra bubbles: build bubbles that run on this piece of infrastructure */
+  hostCount: number;
+  /** correctness bubbles: build bubbles this verification attests */
+  verifyCount: number;
+  /**
+   * Whether anything attests this bubble, or null where the question is not
+   * asked — infrastructure, a verification itself, a fold, or a capability with
+   * nothing behind it yet.
+   */
+  shield: Shield | null;
+  /** build leaves: classes and functions inside them that no bubble claims */
+  symbolCount: number;
+  /**
+   * What this bubble should be connected to across the layers and is not, in
+   * `linkGapsOf`'s order. The card marks it quietly — a bubble nothing points
+   * at is a fact about the graph, not an alarm — and says each one out loud in
+   * its label. Empty on a fold and in a comparison.
+   */
+  gaps: readonly LinkGap[];
   /** a capability past `concept` that nothing on the build side answers */
   unrealized: boolean;
+  /**
+   * The agent is working and has not said where yet, and this is the bubble the
+   * reader is looking at — so it breathes rather than the canvas sitting still.
+   */
+  thinking: boolean;
+  /**
+   * The agent is working and has said nothing about where — the same gap
+   * `thinking` answers on one card, carried by every bubble on the layer as a
+   * faint staggered wash so the whole canvas reads as alive rather than one
+   * card doing all the breathing.
+   */
+  pondering: boolean;
+  /** position on the layer, which is what staggers the pondering wash */
+  order: number;
   /** entry and exit animation state, driven by the motion choreography */
   motion: "enter" | "leave" | "none";
   /**
@@ -54,10 +116,19 @@ export interface BubbleData extends Record<string, unknown> {
 
 export type BubbleNodeType = Node<BubbleData, "bubble">;
 
+/**
+ * One card in the code-derived column: a package, a piece of infrastructure or
+ * a class the code holds. Read-only in every reading — a ghost is a fact about
+ * the code, and the way to act on it is to put a bubble there.
+ */
 export interface GhostData extends Record<string, unknown> {
   phase: "reality";
   label: string;
-  dir: string;
+  /** the dim second line: a directory, a file and line, or one sentence */
+  note: string;
+  /** the note is a path, so it is set in mono */
+  mono: boolean;
+  sigil: GhostSigil | null;
 }
 
 export type GhostNodeType = Node<GhostData, "ghost">;
@@ -99,6 +170,20 @@ export interface RelData extends Record<string, unknown> {
   count: number;
   /** true when drawn between bubbles that are not the relation's real endpoints */
   lifted: boolean;
+  /**
+   * Which end of this line the agent is working in. A line with a live end
+   * carries a dash flow — source to target, which is the direction the
+   * relation itself reads in — so the graph shows work travelling rather than
+   * sitting in one card.
+   */
+  live: "none" | "source" | "target" | "both";
+  /**
+   * Colour slot of the variation working in the TARGET bubble, or null when the
+   * work is not arriving here. A line into the bubble the agent is inside
+   * glows in that variation's own colour, so two branches working at once stay
+   * two.
+   */
+  tone: number | null;
   /** one line per collapsed relation, for the tooltip */
   parts: string[];
   /** drill target when a bundle is clicked: the source side of the bundle */

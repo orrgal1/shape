@@ -13,6 +13,9 @@ importers:
       '@lydell/node-pty':
         specifier: 1.2.0-beta.15
         version: 1.2.0-beta.15
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
       ws:
         specifier: ^8.18.0
         version: 8.21.3
@@ -23,9 +26,6 @@ importers:
       '@types/ws':
         specifier: ^8.18.0
         version: 8.18.1
-      typescript:
-        specifier: ^5.7.0
-        version: 5.9.3
 
   packages/link:
     dependencies:

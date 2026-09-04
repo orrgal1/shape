@@ -26,7 +26,12 @@ import {
 import type { ConnectionHandler, SocketServer } from "../wsserver.ts";
 import { LOCAL_TENANT } from "./auth.ts";
 
-/** Boundary validator for browser input. */
+/**
+ * Boundary validator for browser input. A frame that acts on one canvas names
+ * its `worktree`: the view merges a repo's worktrees, so which one a click is
+ * about is in the frame, never in the connection. An empty worktree id is a
+ * malformed frame — the room would have to guess which canvas to write.
+ */
 export function parseClientMsg(raw: string): ClientMsg | null {
   let parsed: unknown;
   try {
@@ -35,25 +40,78 @@ export function parseClientMsg(raw: string): ClientMsg | null {
     return null;
   }
   if (parsed === null || typeof parsed !== "object" || !("type" in parsed)) return null;
-  if (parsed.type === "abort") return { type: "abort" };
+  // the worktree every worktree-scoped frame below is checked against; read
+  // once, because a frame that has none is rejected by each of them
+  const worktree = "worktree" in parsed && typeof parsed.worktree === "string" && parsed.worktree.length > 0 ? parsed.worktree : null;
+  if (parsed.type === "abort") {
+    if (worktree === null) return null;
+    return { type: "abort", worktree };
+  }
   if (parsed.type === "onboard") {
-    if ("focus" in parsed && typeof parsed.focus === "string") return { type: "onboard", focus: parsed.focus };
-    return { type: "onboard" };
+    if (worktree === null) return null;
+    if ("focus" in parsed && typeof parsed.focus === "string") return { type: "onboard", worktree, focus: parsed.focus };
+    return { type: "onboard", worktree };
+  }
+  if (parsed.type === "set_autonomous") {
+    if (worktree === null) return null;
+    // a toggle is a boolean: anything else is a frame that does not say which way
+    if (!("on" in parsed) || typeof parsed.on !== "boolean") return null;
+    return { type: "set_autonomous", worktree, on: parsed.on };
   }
   if (parsed.type === "switch_project") {
     if (!("path" in parsed) || typeof parsed.path !== "string" || parsed.path.trim().length === 0) return null;
     return { type: "switch_project", path: parsed.path.trim() };
   }
+  if (parsed.type === "create_project") {
+    if (!("path" in parsed) || typeof parsed.path !== "string" || parsed.path.trim().length === 0) return null;
+    // absent, null and explicit null are the same request: the folder only
+    const raw = "github" in parsed ? parsed.github : null;
+    if (raw === null || raw === undefined) return { type: "create_project", path: parsed.path.trim(), github: null };
+    if (typeof raw !== "object" || !("visibility" in raw)) return null;
+    if (raw.visibility !== "public" && raw.visibility !== "private") return null;
+    return { type: "create_project", path: parsed.path.trim(), github: { visibility: raw.visibility } };
+  }
   if (parsed.type === "select_project") {
     if (!("projectId" in parsed) || typeof parsed.projectId !== "string" || parsed.projectId.length === 0) return null;
     return { type: "select_project", projectId: parsed.projectId };
   }
+  // a worktree is opened by PATH: the browser knows the paths `hello` listed,
+  // the agent is what resolves one to the id every later frame carries
+  if (parsed.type === "open_worktree") {
+    if (!("path" in parsed) || typeof parsed.path !== "string" || parsed.path.trim().length === 0) return null;
+    const open: Extract<ClientMsg, { type: "open_worktree" }> = { type: "open_worktree", path: parsed.path.trim() };
+    // the harness to start: named or resolved by the agent, never guessed here
+    if ("backend" in parsed && parsed.backend !== null && parsed.backend !== undefined) {
+      if (typeof parsed.backend !== "string" || parsed.backend.trim().length === 0) return null;
+      open.backend = parsed.backend.trim();
+    }
+    // both are choices made at launch, so both are booleans or absent
+    if ("autonomous" in parsed && parsed.autonomous !== undefined) {
+      if (typeof parsed.autonomous !== "boolean") return null;
+      open.autonomous = parsed.autonomous;
+    }
+    if ("remember" in parsed && parsed.remember !== undefined) {
+      if (typeof parsed.remember !== "boolean") return null;
+      open.remember = parsed.remember;
+    }
+    return open;
+  }
+  if (parsed.type === "focus_terminal") {
+    if (worktree === null) return null;
+    return { type: "focus_terminal", worktree };
+  }
+  if (parsed.type === "close_worktree") {
+    if (worktree === null) return null;
+    return { type: "close_worktree", worktree };
+  }
   if (parsed.type === "diff") {
+    if (worktree === null) return null;
     if (!("revA" in parsed) || typeof parsed.revA !== "number" || !Number.isInteger(parsed.revA)) return null;
     if (!("revB" in parsed) || typeof parsed.revB !== "number" || !Number.isInteger(parsed.revB)) return null;
-    return { type: "diff", revA: parsed.revA, revB: parsed.revB };
+    return { type: "diff", worktree, revA: parsed.revA, revB: parsed.revB };
   }
   if (parsed.type === "pty_open" || parsed.type === "pty_resize") {
+    if (worktree === null) return null;
     // a terminal size must be a real geometry: the pty is resized with it
     if (!("cols" in parsed) || typeof parsed.cols !== "number" || !Number.isInteger(parsed.cols) || parsed.cols <= 0) {
       return null;
@@ -61,14 +119,21 @@ export function parseClientMsg(raw: string): ClientMsg | null {
     if (!("rows" in parsed) || typeof parsed.rows !== "number" || !Number.isInteger(parsed.rows) || parsed.rows <= 0) {
       return null;
     }
-    return { type: parsed.type, cols: parsed.cols, rows: parsed.rows };
+    return { type: parsed.type, worktree, cols: parsed.cols, rows: parsed.rows };
   }
   if (parsed.type === "pty_input") {
+    if (worktree === null) return null;
     if (!("data" in parsed) || typeof parsed.data !== "string") return null;
-    return { type: "pty_input", data: parsed.data };
+    return { type: "pty_input", worktree, data: parsed.data };
   }
-  if (parsed.type === "pty_close") return { type: "pty_close" };
+  if (parsed.type === "pty_close") {
+    if (worktree === null) return null;
+    return { type: "pty_close", worktree };
+  }
   if (parsed.type === "discover") return { type: "discover" };
+  // no fields: which machine's chooser to open is the connection's project,
+  // and the answer goes back to this socket alone
+  if (parsed.type === "pick_folder") return { type: "pick_folder" };
   if (parsed.type === "adopt") {
     if (!("pid" in parsed) || typeof parsed.pid !== "number" || !Number.isInteger(parsed.pid) || parsed.pid <= 0) {
       return null;
@@ -76,6 +141,7 @@ export function parseClientMsg(raw: string): ClientMsg | null {
     return { type: "adopt", pid: parsed.pid };
   }
   if (parsed.type !== "utterance") return null;
+  if (worktree === null) return null;
   if (!("text" in parsed) || typeof parsed.text !== "string") return null;
 
   let referent: Referent | null = null;
@@ -90,7 +156,13 @@ export function parseClientMsg(raw: string): ClientMsg | null {
       referent = { kind: r.kind, id: r.id };
     }
   }
-  return { type: "utterance", referent, text: parsed.text };
+  // absent = on: the product-first first turn is the default, and a browser
+  // that sends the flag at all sends a boolean
+  if ("productFirst" in parsed) {
+    if (typeof parsed.productFirst !== "boolean") return null;
+    return { type: "utterance", worktree, referent, text: parsed.text, productFirst: parsed.productFirst };
+  }
+  return { type: "utterance", worktree, referent, text: parsed.text };
 }
 
 export interface WsHubOptions {

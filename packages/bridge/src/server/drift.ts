@@ -7,6 +7,7 @@
  */
 
 import { normalizeIndexPath } from "../../../shared/src/fileindex.ts";
+import { symbolRefOf } from "../../../shared/src/index.ts";
 import type {
   DriftMap,
   GraphDoc,
@@ -52,6 +53,14 @@ const REALIZED_PHASES: Record<Phase, boolean> = {
  *    declaration is already reported once by rule A, and reporting it twice
  *    would be noise. Ends that share a package are skipped — an intra-package
  *    dependency can never show up as a cross-package import.
+ *
+ * C. Vanished part. A `${file}#${Name}` codeRef whose file the reality layer
+ *    did read, but which declares no such class or function any more, is a
+ *    claim on something that is gone. The note lands on the bubble that makes
+ *    the claim, not on an ancestor: a ref this precise names one bubble's own
+ *    business. A file reality never parsed says nothing either way, so nothing
+ *    is reported for it — that keeps a config ref or an older extraction from
+ *    inventing drift.
  */
 export function computeDrift(
   doc: Pick<GraphDoc, "nodes" | "edges">,
@@ -243,6 +252,28 @@ export function computeDrift(
       edge.source,
       `declared dependency on "${target.label}" has no corresponding import in code`,
     );
+  }
+
+  // C. vanished part: a ref names a class or function the file no longer has.
+  // `symbols` is absent in a document written before the bridge read parts.
+  const namesByFile = new Map<string, Set<string>>();
+  for (const symbol of reality.symbols ?? []) {
+    const bucket = namesByFile.get(symbol.file);
+    if (bucket === undefined) namesByFile.set(symbol.file, new Set([symbol.name]));
+    else bucket.add(symbol.name);
+  }
+  for (const node of doc.nodes) {
+    if (!REALIZED_PHASES[node.phase]) continue;
+    const refs = node.codeRefs;
+    if (refs === undefined) continue;
+    for (const raw of refs) {
+      const ref = symbolRefOf(raw);
+      if (ref === null) continue;
+      const file = normalizeIndexPath(ref.path);
+      const names = namesByFile.get(file);
+      if (names === undefined || names.has(ref.name)) continue;
+      note(node.id, `names a part of the code that is no longer there: ${ref.name} in ${file}`);
+    }
   }
 
   return drift;

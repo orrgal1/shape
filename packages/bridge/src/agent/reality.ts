@@ -3,11 +3,14 @@
  * on the agent side because it is the half that sits on the user's disk.
  *
  * Workspace packages become nodes, cross-package import specifiers become
- * edges. The result is derived — the agent never writes it — and the server
- * compares it against the intent layer (`server/drift.ts`).
+ * edges, the top-level classes and functions of each file become symbols
+ * (`agent/symbols.ts`), and the configuration files become infra
+ * (`agent/infra.ts`). The result is derived — the agent never writes it — and
+ * the server compares it against the intent layer (`server/drift.ts`).
  *
  * v1 scope (per CONTRACTS.md): pnpm/npm workspaces, TS sources, regex import
- * scan. Zero dependencies beyond node builtins.
+ * scan, TypeScript-parser symbol scan. Zero dependencies beyond node builtins
+ * and the TypeScript parser.
  */
 
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -16,13 +19,29 @@ import path from "node:path";
 
 import { buildFileIndex, normalizeIndexPath, type FileIndex } from "../../../shared/src/fileindex.ts";
 import type { RealityEdge, RealityLayer, RealityNode } from "../../../shared/src/index.ts";
+import { extractInfra } from "./infra.ts";
+import { extractSymbols } from "./symbols.ts";
+import { extractVerification } from "./verification.ts";
 
 // ---------------------------------------------------------------------------
 // Scan limits / static tables
 // ---------------------------------------------------------------------------
 
 const SKIP_DIRS: Record<string, true> = { node_modules: true, dist: true, ".git": true };
-const SOURCE_EXTS: Record<string, true> = { ".ts": true, ".tsx": true };
+/**
+ * What counts as source. JavaScript is here too: plenty of real projects write
+ * their server, their browser code or their scripts in plain .js/.mjs, and a
+ * scan that only sees TypeScript maps half of them. The parser reads each by
+ * extension, and the import regex below never cared which language it is.
+ */
+const SOURCE_EXTS: Record<string, true> = {
+  ".ts": true,
+  ".tsx": true,
+  ".js": true,
+  ".jsx": true,
+  ".mjs": true,
+  ".cjs": true,
+};
 
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_FILES = 5000;
@@ -39,7 +58,8 @@ const MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024;
 const IMPORT_RE =
   /\bfrom\s*["']([^"'\n]+)["']|\brequire\s*\(\s*["']([^"'\n]+)["']|\bimport\s*\(?\s*["']([^"'\n]+)["']/g;
 
-interface WorkspacePkg {
+/** one workspace package as the scan found it; also what the verify scan groups by */
+export interface WorkspacePkg {
   name: string;
   /** absolute dir */
   dir: string;
@@ -283,8 +303,9 @@ interface Budget {
 }
 
 /**
- * Recursively collect .ts/.tsx files under `root`, never descending into a dir
- * owned by a different workspace package (matters for nested / root packages).
+ * Recursively collect source files (see {@link SOURCE_EXTS}) under `root`, never
+ * descending into a dir owned by a different workspace package (matters for
+ * nested / root packages).
  * Non-git targets only; inside a repo the index decides what exists.
  */
 async function collectSources(
@@ -345,7 +366,12 @@ function sourcesFromIndex(
   return files;
 }
 
-function importSpecifiers(text: string): string[] {
+/**
+ * Every module specifier a file mentions. Exported because the verification
+ * scan reads "what does this test touch" with the same regex that reads "what
+ * does this package depend on" — one definition of what an import looks like.
+ */
+export function importSpecifiers(text: string): string[] {
   const specs: string[] = [];
   IMPORT_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -356,8 +382,11 @@ function importSpecifiers(text: string): string[] {
   return specs;
 }
 
-/** Which workspace package does this specifier point at, if any? */
-function resolveSpecifier(
+/**
+ * Which workspace package does this specifier point at, if any? Exported for
+ * the verification scan, which resolves a test's imports the same way.
+ */
+export function resolveSpecifier(
   spec: string,
   fromFile: string,
   byNameLongestFirst: readonly WorkspacePkg[],
@@ -392,13 +421,16 @@ export async function extractReality(cwd: string): Promise<RealityLayer> {
 
   // sorted once here: the scan below walks it per package
   const sorted = index === null ? [] : [...index.files].sort();
-  const edges: RealityEdge[] = [];
-  const seenEdges = new Set<string>();
   const budget: Budget = { left: MAX_FILES };
 
+  // Which package owns each admitted source file. Collected first so the read
+  // that follows happens exactly once per file and serves both passes: the
+  // import scan that makes edges, and the symbol parse that makes the parts.
+  const files: string[] = [];
+  const pkgByFile = new Map<string, WorkspacePkg>();
   for (const pkg of pkgs) {
     const foreignRels = pkgs.filter((p) => p.rel !== pkg.rel).map((p) => p.rel);
-    const files =
+    const owned =
       index === null
         ? await collectSources(
             pkg.dir,
@@ -406,9 +438,26 @@ export async function extractReality(cwd: string): Promise<RealityLayer> {
             budget,
           )
         : sourcesFromIndex(root, sorted, pkg, foreignRels, budget);
-    for (const file of files) {
+    for (const file of owned) {
+      if (pkgByFile.has(file)) continue;
+      pkgByFile.set(file, pkg);
+      files.push(file);
+    }
+  }
+
+  const edges: RealityEdge[] = [];
+  const seenEdges = new Set<string>();
+  const symbols = await extractSymbols(
+    root,
+    files,
+    (file) => {
+      const pkg = pkgByFile.get(file);
+      return pkg === undefined ? null : `r:${pkg.name}`;
+    },
+    async (file) => {
       const text = await readTextFile(file, MAX_FILE_BYTES);
-      if (text === null) continue;
+      const pkg = pkgByFile.get(file);
+      if (text === null || pkg === undefined) return text;
       for (const spec of importSpecifiers(text)) {
         const target = resolveSpecifier(spec, file, byName, byDir);
         if (target === null || target.dir === pkg.dir) continue;
@@ -418,14 +467,21 @@ export async function extractReality(cwd: string): Promise<RealityLayer> {
         seenEdges.add(id);
         edges.push({ id, source, target: `r:${target.name}` });
       }
-    }
-  }
+      return text;
+    },
+  );
 
   edges.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   return {
     nodes,
     edges,
+    symbols,
+    infra: await extractInfra(root, index),
+    // the same reader, so a test file already read for its symbols is read the
+    // same way here — and never through the edge-scanning reader above, which
+    // would turn a test's imports into package edges
+    verification: await extractVerification(root, index, pkgs, (file) => readTextFile(file, MAX_FILE_BYTES)),
     extractedAt: new Date().toISOString(),
     head: await gitHead(root),
   };

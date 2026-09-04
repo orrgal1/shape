@@ -26,6 +26,9 @@ Early, and dogfooded daily. The v1 slice works end to end:
 
 - Greenfield: speak an idea → the agent decomposes it into bubbles → it builds, advancing
   each bubble's phase (`idea → concept → component → building → built | failed`) as it goes.
+- Product first: the first words about an empty canvas become a bubble immediately, and the
+  agent spends that turn naming the product and 3 to 5 promises under it, then stops for you
+  to correct the picture before anything is built. Switchable off in the empty state.
 - Onboarding an existing repo: mechanical package skeleton first, then an agent survey turn
   that must anchor every bubble to real paths, then drift verification.
 - Single-layer drill-down as the default view: one layer at a time, drill chip and breadcrumb,
@@ -33,6 +36,12 @@ Early, and dogfooded daily. The v1 slice works end to end:
 - Git worktrees as architecture variations, each with its own canvas state.
 - Revision snapshots with compare: every accepted change bumps a revision, and any two
   revisions can be diffed.
+- Start a new project from the canvas: folder + git + optional GitHub (public/private) in
+  one form.
+- Watch it work: the Canvas | Session switch (or Ctrl + backtick) shows the agent's session
+  as it runs — what you asked, what it is saying, and one line per tool call. It is read-only,
+  and a tab that opens it late is redrawn from the session so far. A harness with its own
+  terminal shows that terminal instead; one with neither gets a shell in the project.
 
 Known rough edges: drift UX has only been exercised on synthetic drift, the reality extractor
 covers pnpm/TypeScript monorepos (other stacks degrade to a pure agent survey), and empty-state
@@ -54,21 +63,25 @@ The bridge spawns `omp --mode rpc` in the target project and registers exactly o
 `canvas`. The agent mutates the picture only through that tool (`upsert_node`, `remove_node`,
 `upsert_edge`, `remove_edge`, `set_phase`); the bridge validates each op, applies it, and
 broadcasts the whole document to every connected browser. Steering is delivered as `steer`
-while a turn is streaming, otherwise as a fresh `prompt`. Nothing is installed into the target
-project except state:
+while a turn is streaming, otherwise as a fresh `prompt`. Nothing is written into the target
+project at all — the canvas lives in a database beside the harness, not in the repo:
 
-- `<target>/.shape/graph.json` — the canvas for that project (per worktree).
-- `<target>/.shape/revisions/<rev>.json` — one snapshot per revision, newest 50 kept.
-- `~/.shape/recents.json` — recently targeted projects (override the home dir with `SHAPE_HOME`).
-- The bridge appends `.shape/` to the repo's `.git/info/exclude`, so canvas state never lands
-  in a commit.
+- `~/.shape/shape.db` — every project's canvas, its revisions and the project registry, in
+  one SQLite file (`SHAPE_HOME` moves the home dir; `--db <file>` names another database).
+  Projects are keyed per repo path, so a worktree keeps a canvas of its own.
+- `<target>/.shape/config.json` — optional, and yours: which harness backend to use here.
+  A `graph.json` and `revisions/` left by an older Shape are imported into the database on
+  the next attach, then moved aside under `.shape/imported/`.
+- `~/.shape/recents.json` — recently targeted projects.
+- The bridge appends `.shape/` to the repo's `.git/info/exclude`, so a project-local config
+  never lands in a commit.
 
 Packages:
 
 - `packages/bridge` — Node process: omp RPC client, `canvas` host tool, graph + snapshot
   stores, steering composer, reality/drift extractor, WebSocket server on 127.0.0.1:4400.
 - `packages/web` — Vite + React + React Flow canvas: layer policy, layout and motion, side
-  panel, steering bar, project/worktree switcher.
+  panel, steering bar, project/worktree switcher, session pane.
 - `packages/shared` — the contract both sides import: types, `applyOps` validation, the
   `canvas` tool schema, the WebSocket message shapes, and revision diffing.
 
@@ -83,6 +96,7 @@ Packages:
 ```bash
 pnpm install
 pnpm bridge -- --cwd <target-project>   # local mode: server + agent in one process
+#   add --db <file> to keep the canvases somewhere other than ~/.shape/shape.db
 pnpm web                                # canvas dev server
 ```
 

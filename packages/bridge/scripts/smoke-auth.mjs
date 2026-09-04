@@ -13,10 +13,10 @@
  *                         select_project across tenants is an unknown project
  *   terminal gating     — no --allow-terminal ⇒ terminal "none" and pty_* dropped
  *   shape login         — servers.json (0600) alone authenticates an agent
- *   audit               — deliver/delivered lines under the caller's tenant
- *   storage             — graphs under tenants/<tenant>/projects/<key>/
+ *   audit               — deliver/delivered entries under the caller's tenant
+ *   storage             — one graph row per (tenant, project, variation) in <data-dir>/shape.db
  *
- * The harness on every agent is scripts/fake-omp.mjs, so nothing real is
+ * The harness on every agent is scripts/fake-omp-tui.mjs, so nothing real is
  * spawned; each target gets its own log, which is what proves which process
  * served a turn.
  *
@@ -24,10 +24,11 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import WebSocket from "ws";
 
 const PORT = Number(process.env.SMOKE_AUTH_PORT ?? 4422);
@@ -44,6 +45,13 @@ const TOKEN_A = "aaaaaaaaaaaaaaaa-A";
 const TOKEN_B = "bbbbbbbbbbbbbbbb-B";
 const TENANT_A = "acme";
 const TENANT_B = "globex";
+
+// Every bridge/agent below inherits this environment: a smoke must not depend
+// on what is installed on the machine running it. The launcher is Shape's own
+// pty (never a herdr tab in the developer's terminal), and detection reports
+// exactly one harness — `omp`, which `--omp` points at the fake.
+process.env.SHAPE_LAUNCHER = "pty";
+process.env.SHAPE_FORCE_HARNESSES = "omp";
 
 const results = [];
 let failed = 0;
@@ -84,19 +92,34 @@ function readJson(path) {
   }
 }
 
-/** one JSON object per line, appended under us: a torn tail is just "not yet" */
-function readAudit(path) {
-  if (!existsSync(path)) return [];
-  const entries = [];
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    if (line.trim().length === 0) continue;
-    try {
-      entries.push(JSON.parse(line));
-    } catch {
-      // the appender is mid-write; the next poll sees the whole line
-    }
+/**
+ * Read rows out of the server's own database while it runs. A database that is
+ * not there yet — or busy mid-write — is just "not yet", so the callers can
+ * poll it exactly as they polled the files it replaced.
+ */
+function dbRows(sql, ...params) {
+  const file = join(dataDir, "shape.db");
+  if (!existsSync(file)) return null;
+  let db = null;
+  try {
+    db = new DatabaseSync(file);
+    return db.prepare(sql).all(...params);
+  } catch {
+    return null;
+  } finally {
+    db?.close();
   }
-  return entries;
+}
+
+/** every audit entry filed against one variation of one tenant's project, oldest first */
+function auditEntries(tenant, key, worktree) {
+  const rows = dbRows(
+    "SELECT entry FROM audit WHERE tenant = ? AND key = ? AND worktree = ? ORDER BY seq ASC",
+    tenant,
+    key,
+    worktree,
+  );
+  return rows === null ? [] : rows.map((row) => JSON.parse(row.entry));
 }
 
 /** the fake child logs to <its cwd>/fake-omp.log; each agent's target gets its own */
@@ -133,7 +156,7 @@ const targetC = await mkdtemp(join(tmpdir(), "vh-auth-c-"));
 const fakeHome = await mkdtemp(join(tmpdir(), "vh-auth-home-"));
 /** a second SHAPE_HOME, written by `shape login` and read by exactly one agent */
 const loginHome = await mkdtemp(join(tmpdir(), "vh-auth-login-"));
-/** where the server keeps graphs, revisions, its registry and the audit log */
+/** holds `shape.db`: every tenant's graphs, revisions, registry rows and audit entries */
 const dataDir = await mkdtemp(join(tmpdir(), "vh-auth-data-"));
 const tokenDir = await mkdtemp(join(tmpdir(), "vh-auth-tokens-"));
 const tokenFile = join(tokenDir, "tokens.json");
@@ -154,6 +177,17 @@ await seedWorkspace(targetA, "aa");
 await seedWorkspace(targetB, "bb");
 await seedWorkspace(targetC, "cc");
 
+/**
+ * The one variation each target has. A fresh repo nobody ran `git worktree add`
+ * in is a single worktree, and its id — what every worktree-scoped frame and
+ * every stored row is keyed by — is the realpath of its directory. It is also
+ * what the server reports as the project's cwd, which is not the spelling
+ * mkdtemp handed out on a machine whose temp dir is a symlink.
+ */
+const mainA = realpathSync(targetA);
+const mainB = realpathSync(targetB);
+const mainC = realpathSync(targetC);
+
 /** every process this smoke started, so the finally block can kill all of them */
 const spawned = [];
 /** every browser socket, closed in teardown whatever a step above did */
@@ -169,7 +203,9 @@ const browsers = [];
  * are on stderr, but `shape login` reports where it saved on stdout.
  */
 function launch(label, args, extraEnv = {}) {
-  const env = { ...process.env, SHAPE_HOME: fakeHome };
+  // SHAPE_AUTO_MAP=0 reaches the server through here: its targets have code and
+  // empty canvases, and an automatic map would deliver turns no step asked for
+  const env = { ...process.env, SHAPE_AUTO_MAP: "0", SHAPE_HOME: fakeHome };
   delete env.SHAPE_TOKEN;
   const child = spawn(process.execPath, args, {
     cwd: process.cwd(),
@@ -217,7 +253,7 @@ const agentArgs = (target, linkPort, extra = []) => [
   "--link-port",
   String(linkPort),
   "--omp",
-  "node scripts/fake-omp.mjs",
+  "node scripts/fake-omp-tui.mjs",
   ...extra,
 ];
 
@@ -266,9 +302,6 @@ const send = (wire, msg) => wire.socket.send(JSON.stringify(msg));
 const mark = (wire) => wire.frames.length;
 const frameAfter = (wire, from, predicate, label, timeoutMs = 30_000) =>
   waitFor(`${wire.label}: ${label}`, () => wire.frames.slice(from).find(predicate), timeoutMs);
-
-/** <data-dir>/tenants/<tenant>/projects/<key>/<file> — the per-tenant layout under test */
-const tenantPath = (tenant, key, file) => join(dataDir, "tenants", tenant, "projects", key, file);
 
 try {
   // --- 1. a server that refuses to start -------------------------------------
@@ -347,17 +380,20 @@ try {
   const projectAId = helloA.projectId;
   check(
     "an agent authenticated by --token greets its own tenant's browser with its one project",
-    helloA.projects.length === 1 && helloA.projects[0].cwd === targetA && helloA.session.cwd === targetA,
+    helloA.projects.length === 1 && helloA.projects[0].cwd === mainA && helloA.session.cwd === mainA,
     JSON.stringify(helloA.projects.map((p) => p.cwd)),
   );
+  // the harness runs in a variation, so what it can do is reported against that
+  // variation: the browser is told which session it drives and where it runs
+  const runningA = helloA.session.sessions.find((s) => s.worktree === mainA);
   check(
-    "an agent started without --allow-terminal advertises terminal none",
-    helloA.session.backend.capabilities.terminal === "none",
-    JSON.stringify(helloA.session.backend.capabilities),
+    "an agent started without --allow-terminal advertises terminal none on the variation it runs in",
+    runningA !== undefined && runningA.backend.capabilities.terminal === "none",
+    `${String(runningA?.worktree)}: ${JSON.stringify(runningA?.backend.capabilities ?? null)}`,
   );
 
   const ptyAt = mark(wireA);
-  send(wireA, { type: "pty_open", cols: 80, rows: 24 });
+  send(wireA, { type: "pty_open", worktree: mainA, cols: 80, rows: 24 });
   await sleep(500);
   check(
     "a pty_open against a terminal-less agent produces no pty_state",
@@ -395,13 +431,14 @@ try {
   const projectBId = helloB.projectId;
   check(
     "an agent authenticated by SHAPE_TOKEN attaches for its own tenant only",
-    helloB.projects.length === 1 && helloB.projects[0].cwd === targetB,
+    helloB.projects.length === 1 && helloB.projects[0].cwd === mainB,
     JSON.stringify(helloB.projects.map((p) => p.cwd)),
   );
+  const runningB = helloB.session.sessions.find((s) => s.worktree === mainB);
   check(
-    "an agent started with --allow-terminal advertises the backend's real terminal",
-    helloB.session.backend.capabilities.terminal === "shell",
-    JSON.stringify(helloB.session.backend.capabilities),
+    "an agent started with --allow-terminal advertises the backend's real terminal on the variation it runs in",
+    runningB !== undefined && runningB.backend.capabilities.terminal === "pane",
+    `${String(runningB?.worktree)}: ${JSON.stringify(runningB?.backend.capabilities ?? null)}`,
   );
 
   await sleep(300);
@@ -411,7 +448,7 @@ try {
   const leaked = wireA.frames.slice(leakAt).filter((f) => Array.isArray(f.projects) && f.projects.length !== 1);
   check(
     "the first tenant's project list is untouched by the second tenant's agent",
-    rejoinA.projects.length === 1 && rejoinA.projects[0].cwd === targetA && leaked.length === 0,
+    rejoinA.projects.length === 1 && rejoinA.projects[0].cwd === mainA && leaked.length === 0,
     `${JSON.stringify(rejoinA.projects.map((p) => p.cwd))}; ${leaked.length} leaked frame(s)`,
   );
 
@@ -447,31 +484,36 @@ try {
   );
   check(
     "an agent with neither --token nor SHAPE_TOKEN authenticates out of servers.json",
-    bothA.projects.some((p) => p.cwd === targetC) && bothA.projects.some((p) => p.cwd === targetA),
+    bothA.projects.some((p) => p.cwd === mainC) && bothA.projects.some((p) => p.cwd === mainA),
     JSON.stringify(bothA.projects.map((p) => p.cwd)),
   );
 
   // --- 6. the audit log of a steering delivery ------------------------------
 
+  // what these two sections are about is the database, not the first turn's
+  // shape, so both tenants ask to go straight to building: the harness stub's
+  // build bubbles are what tells the two rows apart below
   const utterance = "audit this steering: build me an auth service";
-  send(wireA, { type: "utterance", referent: null, text: utterance });
+  send(wireA, { type: "utterance", worktree: mainA, referent: null, text: utterance, productFirst: false });
   await waitFor("the steered prompt in the first tenant's harness log", () =>
-    ompFrames(ompLogIn(targetA)).find((f) => f.type === "prompt" && f.message.includes(utterance)),
+    ompFrames(ompLogIn(targetA)).find((f) => f.type === "deliver" && f.mode === "prompt" && f.body.includes(utterance)),
   );
-  const auditPath = tenantPath(TENANT_A, projectAId, "audit.jsonl");
   const delivery = await waitFor(
-    "a deliver line in the first tenant's audit log",
-    () => readAudit(auditPath).find((e) => e.kind === "deliver" && e.text === utterance) ?? null,
+    "a deliver entry in the first tenant's audit log",
+    () => auditEntries(TENANT_A, projectAId, mainA).find((e) => e.kind === "deliver" && e.text === utterance) ?? null,
     10_000,
   );
   check(
-    "a steering delivery is audited under the caller's tenant and project",
-    delivery.tenant === TENANT_A && delivery.projectId === projectAId && typeof delivery.at === "string",
+    "a steering delivery is audited under the caller's tenant, project and variation",
+    delivery.tenant === TENANT_A &&
+      delivery.projectId === projectAId &&
+      delivery.worktree === mainA &&
+      typeof delivery.at === "string",
     JSON.stringify(delivery),
   );
   const receipt = await waitFor(
     "the delivered receipt for the audited utterance",
-    () => readAudit(auditPath).find((e) => e.kind === "delivered" && e.id === delivery.id) ?? null,
+    () => auditEntries(TENANT_A, projectAId, mainA).find((e) => e.kind === "delivered" && e.id === delivery.id) ?? null,
     10_000,
   );
   check(
@@ -480,42 +522,62 @@ try {
     JSON.stringify(receipt),
   );
 
-  // --- 7. what the tenants keep on disk, side by side -----------------------
+  // --- 7. what the tenants keep in the database, side by side ---------------
 
   const utteranceB = "globex wants its own auth service";
-  send(wireB, { type: "utterance", referent: null, text: utteranceB });
+  send(wireB, { type: "utterance", worktree: mainB, referent: null, text: utteranceB, productFirst: false });
   await waitFor("the second tenant's prompt in its harness log", () =>
-    ompFrames(ompLogIn(targetB)).find((f) => f.type === "prompt" && f.message.includes(utteranceB)),
+    ompFrames(ompLogIn(targetB)).find((f) => f.type === "deliver" && f.mode === "prompt" && f.body.includes(utteranceB)),
   );
 
-  const graphA = await waitFor(
-    "the first tenant's graph under its tenant directory",
-    () => readJson(tenantPath(TENANT_A, projectAId, "graph.json")),
-    10_000,
-  );
-  const graphB = await waitFor(
-    "the second tenant's graph under its tenant directory",
-    () => readJson(tenantPath(TENANT_B, projectBId, "graph.json")),
-    10_000,
-  );
+  const graphRow = (tenant, key, worktree) => {
+    const rows = dbRows("SELECT doc FROM graphs WHERE tenant = ? AND key = ? AND worktree = ?", tenant, key, worktree);
+    return rows === null || rows.length === 0 ? null : JSON.parse(rows[0].doc);
+  };
+  // the row appears as soon as the first words are sketched onto the canvas, so
+  // what is waited for is the turn's own bubbles, not merely a row
+  const builtRow = (tenant, key, worktree) => {
+    const row = graphRow(tenant, key, worktree);
+    return row !== null && row.nodes.some((n) => n.id === "auth-service") ? row : null;
+  };
+  const graphA = await waitFor("the first tenant's graph row", () => builtRow(TENANT_A, projectAId, mainA), 10_000);
+  const graphB = await waitFor("the second tenant's graph row", () => builtRow(TENANT_B, projectBId, mainB), 10_000);
   check(
-    "each tenant's graph is stored under <data-dir>/tenants/<tenant>/projects/<key>/graph.json",
+    "each tenant's graph is a row of its own, keyed by tenant, project and variation",
     graphA.nodes.some((n) => n.id === "auth-service") && graphB.nodes.some((n) => n.id === "auth-service"),
     `${JSON.stringify(graphA.nodes.map((n) => n.id))} / ${JSON.stringify(graphB.nodes.map((n) => n.id))}`,
+  );
+  check(
+    "each row's first sketch holds the words that tenant said, not the other's",
+    graphA.nodes.find((n) => n.id === "product")?.summary === utterance &&
+      graphB.nodes.find((n) => n.id === "product")?.summary === utteranceB,
+    `${graphA.nodes.find((n) => n.id === "product")?.summary} / ${graphB.nodes.find((n) => n.id === "product")?.summary}`,
+  );
+  check(
+    "the tenant is part of a graph's key, not a filter: one tenant's project key finds nothing under the other",
+    graphRow(TENANT_B, projectAId, mainA) === null && graphRow(TENANT_A, projectBId, mainB) === null,
+  );
+  const audits = dbRows("SELECT tenant, key FROM audit");
+  check(
+    "every audit entry is filed under the tenant that owns the project it is about",
+    audits !== null &&
+      audits.some((row) => row.key === projectAId) &&
+      audits.every((row) => (row.key === projectAId ? row.tenant === TENANT_A : row.tenant !== TENANT_A)),
+    JSON.stringify(audits?.map((row) => `${row.tenant}:${row.key.slice(0, 8)}`) ?? null),
   );
 
   const registry = await waitFor(
     "all three projects in the server's registry",
     () => {
-      const rows = readJson(join(dataDir, "projects.json"));
-      return Array.isArray(rows) && rows.length === 3 ? rows : null;
+      const rows = dbRows("SELECT tenant, project FROM projects");
+      return rows !== null && rows.length === 3 ? rows.map((row) => ({ tenant: row.tenant, project: JSON.parse(row.project) })) : null;
     },
     10_000,
   );
   const tenantOf = (cwd) => registry.find((row) => row.project?.cwd === cwd)?.tenant;
   check(
     "every registry row carries the tenant that owns the project",
-    tenantOf(targetA) === TENANT_A && tenantOf(targetC) === TENANT_A && tenantOf(targetB) === TENANT_B,
+    tenantOf(mainA) === TENANT_A && tenantOf(mainC) === TENANT_A && tenantOf(mainB) === TENANT_B,
     JSON.stringify(registry.map((row) => `${row.project?.cwd ?? "?"}:${String(row.tenant)}`)),
   );
 } catch (err) {

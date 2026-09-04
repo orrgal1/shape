@@ -1,22 +1,36 @@
 /**
- * The terminal pane's other half: one pseudo-terminal per bridge, running the
- * user's login shell in whatever project the bridge currently targets.
+ * The terminal pane's other half: one pseudo-terminal per open worktree,
+ * running the user's login shell in that worktree's directory.
  *
- * Single shared terminal by design (v1): output is broadcast to every attached
- * browser and any of them can type. The alternative — a pty per socket — makes
- * "what did I just run in Shape" depend on which tab you are looking at.
+ * One shared terminal per worktree by design: output is broadcast to every
+ * attached browser and any of them can type. The alternative — a pty per
+ * socket — makes "what did I just run in Shape" depend on which tab you are
+ * looking at. The worktree is the boundary because its harness is: a variation
+ * is opened and closed with its shell.
  *
  * This module owns the child; it never touches the graph, the agent, or the
- * socket set. `broadcast` is the only way out.
+ * socket set. `broadcast` is the only way out, and every frame it sends names
+ * the worktree it came from.
  */
 
 import { spawn, type IPty } from "@lydell/node-pty";
 import type { PtyClientMsg, PtyServerMsg } from "../../../shared/src/pty.ts";
-import type { TerminalSource } from "./backend/types.ts";
+
+/**
+ * A live terminal the pane can show instead of a shell: the harness's own
+ * session, owned by the launcher that started it. `onData`/`onExit` return
+ * their unsubscribe so a closed variation leaves nothing attached.
+ */
+export interface TerminalSource {
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  onData(cb: (data: string) => void): () => void;
+  onExit(cb: (code: number | null) => void): () => void;
+}
 
 const FALLBACK_SHELL = "/bin/zsh";
 
-/** `pty_state.shell` while the pane shows a harness TUI rather than a shell */
+/** `pty_state.shell` while the pane shows the harness the user can type into */
 const AGENT_SHELL = "agent";
 
 /** a terminal smaller than this is a resize race, not a window */
@@ -45,8 +59,9 @@ function clampDim(value: unknown, fallback: number): number {
 export class PtyManager {
   readonly #broadcast: (msg: PtyServerMsg) => void;
   readonly #shell = process.env.SHELL !== undefined && process.env.SHELL.length > 0 ? process.env.SHELL : FALLBACK_SHELL;
-
-  #cwd: string;
+  /** the worktree this pane belongs to; stamped on every frame that goes out */
+  readonly #worktree: string;
+  readonly #cwd: string;
   #pty: IPty | null = null;
   /** last size the browser asked for; a fresh pty is spawned at this size */
   #cols = DEFAULT_COLS;
@@ -69,7 +84,8 @@ export class PtyManager {
   #flushing = false;
   #disposed = false;
 
-  constructor(opts: { cwd: string; broadcast: (msg: PtyServerMsg) => void }) {
+  constructor(opts: { worktree: string; cwd: string; broadcast: (msg: PtyServerMsg) => void }) {
+    this.#worktree = opts.worktree;
     this.#cwd = opts.cwd;
     this.#broadcast = opts.broadcast;
   }
@@ -80,7 +96,8 @@ export class PtyManager {
       case "pty_open":
         this.#cols = clampDim(msg.cols, this.#cols);
         this.#rows = clampDim(msg.rows, this.#rows);
-        // an attached TUI is already running: the pane joins it, nothing starts
+        // an attached harness is already running: the pane joins it mid-flight
+        // (its scrollback belongs to the program), nothing starts
         if (this.#source !== null) {
           this.#source.resize(this.#cols, this.#rows);
           this.#emitState();
@@ -127,9 +144,9 @@ export class PtyManager {
 
   /**
    * Point the pane at a harness's own terminal instead of a project shell, or
-   * back again with `null`. The adapter owns the source's child: attaching
-   * only subscribes, detaching only unsubscribes. Nothing is replayed — the
-   * pane shows the session from the moment it joins.
+   * back again with `null`. The launcher owns the source's child: attaching
+   * only subscribes, detaching only unsubscribes. The session is joined
+   * mid-flight — its scrollback belongs to the program that drew it.
    */
   attach(source: TerminalSource | null): void {
     if (this.#disposed || source === this.#source) return;
@@ -152,32 +169,12 @@ export class PtyManager {
           if (this.#source !== source) return;
           this.#sourceAlive = false;
           this.#flush();
-          this.#broadcast({ type: "pty_exit", code });
+          this.#broadcast({ type: "pty_exit", worktree: this.#worktree, code });
           this.#emitState();
         }),
       );
     }
     this.#emitState();
-  }
-
-  /**
-   * Follow a `switch_project`. The shell's cwd is a fact about the old project,
-   * so the child goes; a terminal that was on screen comes back in the new
-   * project rather than leaving an empty pane behind.
-   */
-  retarget(cwd: string): void {
-    if (this.#disposed) return;
-    this.#cwd = cwd;
-    // an attached TUI is the harness's, and the harness is being replaced by
-    // whoever called this: leave it to `attach`
-    if (this.#source !== null) {
-      this.#emitState();
-      return;
-    }
-    const wasOpen = this.#pty !== null;
-    this.#detach();
-    if (wasOpen) this.#spawn();
-    else this.#emitState();
   }
 
   dispose(): void {
@@ -223,8 +220,12 @@ export class PtyManager {
       // no error frame exists on this wire, and the pane is the right place to
       // read why it is empty
       const reason = err instanceof Error ? err.message : String(err);
-      this.#broadcast({ type: "pty_data", data: `shape: could not start ${this.#shell} in ${this.#cwd}: ${reason}\r\n` });
-      this.#broadcast({ type: "pty_exit", code: null });
+      this.#broadcast({
+        type: "pty_data",
+        worktree: this.#worktree,
+        data: `shape: could not start ${this.#shell} in ${this.#cwd}: ${reason}\r\n`,
+      });
+      this.#broadcast({ type: "pty_exit", worktree: this.#worktree, code: null });
       this.#emitState();
       return;
     }
@@ -238,11 +239,15 @@ export class PtyManager {
       setImmediate(() => this.#flush());
     });
     term.onExit(({ exitCode, signal }) => {
-      // a pty replaced by `retarget`/`dispose` is not news
+      // a pty replaced by `dispose` is not news
       if (this.#pty !== term) return;
       this.#pty = null;
       this.#flush();
-      this.#broadcast({ type: "pty_exit", code: signal !== undefined && signal !== 0 ? null : exitCode });
+      this.#broadcast({
+        type: "pty_exit",
+        worktree: this.#worktree,
+        code: signal !== undefined && signal !== 0 ? null : exitCode,
+      });
       this.#emitState();
     });
     this.#emitState();
@@ -254,12 +259,16 @@ export class PtyManager {
     const data = this.#pending.length === 1 ? this.#pending[0] : this.#pending.join("");
     this.#pending.length = 0;
     if (data === undefined || data.length === 0) return;
-    this.#broadcast({ type: "pty_data", data });
+    this.#broadcast({ type: "pty_data", worktree: this.#worktree, data });
   }
 
   #emitState(): void {
-    // an attached TUI is "open" for as long as the harness's own child lives
-    const open = this.#source !== null ? this.#sourceAlive : this.#pty !== null;
-    this.#broadcast({ type: "pty_state", open, shell: this.#source !== null ? AGENT_SHELL : this.#shell, cwd: this.#cwd });
+    const source = this.#source;
+    // an attached harness is "open" for as long as its own child lives
+    const open = source !== null ? this.#sourceAlive : this.#pty !== null;
+    // the pane says whose program it is showing: the project shell by name, or
+    // the harness the launcher started in this worktree
+    const shell = source === null ? this.#shell : AGENT_SHELL;
+    this.#broadcast({ type: "pty_state", worktree: this.#worktree, open, shell, cwd: this.#cwd });
   }
 }

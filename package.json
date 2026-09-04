@@ -12,6 +12,8 @@
     "login": "pnpm --filter @shape/bridge login",
     "smoke:auth": "pnpm --filter @shape/bridge smoke:auth",
     "smoke:remote": "pnpm --filter @shape/bridge smoke:remote",
+    "smoke:wire": "pnpm --filter @shape/bridge smoke:wire",
+    "smoke:herdr": "pnpm --filter @shape/bridge smoke:herdr",
     "web": "pnpm --filter @shape/web dev",
     "smoke:shared": "pnpm --filter @shape/shared smoke",
     "link:mcp": "node packages/link/src/mcp.ts"

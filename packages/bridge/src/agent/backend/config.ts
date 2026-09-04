@@ -1,22 +1,26 @@
 /**
- * Backend selection config: `~/.shape/config.json` (SHAPE_HOME overrides the
- * home dir, as in recents.ts), then `<target>/.shape/config.json` per project,
- * then CLI flags. Missing files are not an error; malformed ones are — a typo
- * in a config file must not silently fall back to a different backend.
+ * Which harness a project runs, and how to run it: `~/.shape/config.json`
+ * (SHAPE_HOME overrides the home dir, as in recents.ts), then
+ * `<target>/.shape/config.json` per project. Missing files are not an error;
+ * malformed ones are — a typo in a config file must not silently start a
+ * different harness.
  *
  *   { "backend": "omp", "backends": { "omp": { "command": ["omp"] } } }
+ *
+ * Nothing here is required. A project that never chose falls through to omp,
+ * the harness Shape supports for now, rather than coming up with no session
+ * at all (see `resolveBackend`).
  */
 
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { existsSync } from "node:fs";
+import type { HarnessId } from "../../../../shared/src/index.ts";
 
 export interface BackendSettings {
   /** argv of the harness CLI; argv[0] is the executable. Absent ⇒ the adapter's default. */
   command?: string[];
-  /** adapter-specific mode (claude: "headless" | "tui") */
-  mode?: string;
   /** extra argv the adapter appends to `command` */
   args?: string[];
   /** harness permission mode, passed through to the adapter */
@@ -24,12 +28,13 @@ export interface BackendSettings {
 }
 
 export interface ShapeConfig {
-  /** id of the backend to drive */
-  backend: string;
+  /**
+   * The harness the config files name, project file first. `null` when neither
+   * said anything, which is not a failure — it is a question for the user.
+   */
+  backend: string | null;
   backends: Record<string, BackendSettings>;
 }
-
-export const DEFAULT_CONFIG: ShapeConfig = { backend: "omp", backends: { omp: { command: ["omp"] } } };
 
 /** `null` when the file is absent; throws (naming the file) when it is broken. */
 async function readConfigFile(file: string): Promise<Partial<ShapeConfig> | null> {
@@ -80,13 +85,12 @@ async function readConfigFile(file: string): Promise<Partial<ShapeConfig> | null
         }
         settings.args = args as string[];
       }
-      for (const key of ["mode", "permissionMode"] as const) {
-        if (!(key in entry)) continue;
-        const value = entry[key];
+      if ("permissionMode" in entry) {
+        const value = entry.permissionMode;
         if (typeof value !== "string" || value.trim().length === 0) {
-          throw new Error(`config file ${file}: backends.${id}.${key} must be a non-empty string`);
+          throw new Error(`config file ${file}: backends.${id}.permissionMode must be a non-empty string`);
         }
-        settings[key] = value.trim();
+        settings.permissionMode = value.trim();
       }
       backends[id] = settings;
     }
@@ -98,7 +102,7 @@ async function readConfigFile(file: string): Promise<Partial<ShapeConfig> | null
 /**
  * Script arguments in a command are resolved against the bridge's own cwd, not
  * the target project's — the child runs with cwd = target dir, so a relative
- * `scripts/fake-omp.mjs` would otherwise miss.
+ * `scripts/fake-omp-tui.mjs` would otherwise miss.
  */
 function resolveCommand(command: string[]): string[] {
   return command.map((token, idx) => {
@@ -120,9 +124,7 @@ function mergeLayer(base: ShapeConfig, layer: Partial<ShapeConfig> | null): Shap
 export interface ConfigOverrides {
   /** target project dir, for `<cwd>/.shape/config.json` */
   cwd: string;
-  /** CLI `--backend <id>`, or the harness id an `adopt` names; beats both config files */
-  backend?: string | undefined;
-  /** CLI `--omp "<cmd ...>"`; replaces the omp adapter's command */
+  /** CLI `--omp "<cmd ...>"`; the executable and leading args of the omp adapter */
   ompCommand?: string[] | undefined;
 }
 
@@ -131,10 +133,9 @@ export async function loadShapeConfig(overrides: ConfigOverrides): Promise<Shape
   // SHAPE_HOME overrides the home dir (tests), as in recents.ts
   const userFile = join(process.env.SHAPE_HOME ?? homedir(), ".shape", "config.json");
   const projectFile = join(overrides.cwd, ".shape", "config.json");
-  let config = mergeLayer(DEFAULT_CONFIG, await readConfigFile(userFile));
+  let config = mergeLayer({ backend: null, backends: {} }, await readConfigFile(userFile));
   if (projectFile !== userFile) config = mergeLayer(config, await readConfigFile(projectFile));
 
-  if (overrides.backend !== undefined) config = { ...config, backend: overrides.backend };
   if (overrides.ompCommand !== undefined) {
     const omp = { ...config.backends.omp, command: overrides.ompCommand };
     config = { ...config, backends: { ...config.backends, omp } };
@@ -145,4 +146,53 @@ export async function loadShapeConfig(overrides: ConfigOverrides): Promise<Shape
     resolved[id] = entry.command === undefined ? { ...entry } : { ...entry, command: resolveCommand(entry.command) };
   }
   return { backend: config.backend, backends: resolved };
+}
+
+/**
+ * Which harness to start in one worktree, in the order the user would expect
+ * to be obeyed:
+ *
+ * 1. `explicit` — what this open ASKED for (the start card, an adopt). The
+ *    most recent instruction always wins.
+ * 2. the config files, project before home: a project that wrote down its
+ *    choice must keep it even on a machine whose flags say otherwise.
+ * 3. `cli` — `--backend`, the operator's default for the whole process.
+ * 4. the only harness installed. With exactly one there is nothing to ask.
+ * 5. omp, the harness Shape supports for now. Nothing chose and the machine
+ *    is ambiguous (or bare): a session still starts, because a project with
+ *    no session is a project the user cannot say anything to.
+ */
+export function resolveBackend(opts: {
+  explicit?: string | undefined;
+  config: ShapeConfig;
+  cli?: string | undefined;
+  detected: readonly HarnessId[];
+}): string {
+  if (opts.explicit !== undefined && opts.explicit.length > 0) return opts.explicit;
+  if (opts.config.backend !== null) return opts.config.backend;
+  if (opts.cli !== undefined && opts.cli.length > 0) return opts.cli;
+  return opts.detected.length === 1 ? (opts.detected[0] ?? "omp") : "omp";
+}
+
+/**
+ * Write the project's choice to `<cwd>/.shape/config.json` — "remember this
+ * for this project" on the start card. Merged into whatever is already in the
+ * file, key by key, because that file is the user's: a `backends` block, a
+ * comment-shaped key, anything they put there survives.
+ */
+export async function rememberBackend(cwd: string, backend: string): Promise<void> {
+  const dir = join(cwd, ".shape");
+  const file = join(dir, "config.json");
+  let existing: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      existing = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // absent or unreadable: the choice is still worth recording, and a broken
+    // file has already been reported by `loadShapeConfig`
+  }
+  await mkdir(dir, { recursive: true });
+  await writeFile(file, `${JSON.stringify({ ...existing, backend }, null, 2)}\n`, "utf8");
 }

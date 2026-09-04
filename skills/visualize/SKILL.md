@@ -55,9 +55,10 @@ ln -s "$PWD/skills/visualize" ~/.claude/skills/
        cwd:"$HARNESS" ready:{log: "Local:.*5173"}
    ```
 
-4. **Onboarding survey.** Skip this step if the repo is already mapped —
-   `.shape/graph.json` exists in the target with a non-empty `nodes`
-   array (`jq -e '.nodes | length > 0' "$target/.shape/graph.json"`);
+4. **Onboarding survey.** Skip this step if the repo is already mapped — after the
+   retarget in step 2, ask the bridge rather than the filesystem (canvas state lives
+   in `~/.shape/shape.db`, never in the repo):
+   `node "$HARNESS/packages/bridge/scripts/ctl.mjs" status | jq -e '.nodes > 0'`;
    then retargeting (step 2) is enough. Otherwise trigger the survey:
    ```bash
    node "$HARNESS/packages/bridge/scripts/ctl.mjs" onboard

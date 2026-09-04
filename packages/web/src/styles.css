@@ -38,6 +38,28 @@
   --capability: #3fd0c9;
   --unrealized: #e46ad0;
 
+  /* --- infra layer: one hue for "where this runs and what it leans on". Cooler
+     and heavier than a capability's teal on purpose — infrastructure is the
+     ground the project stands on, not a promise it makes. --- */
+  --infra: #8f9bd8;
+
+  /* --- correctness layer: one hue for "what proves this works". A cool lime, next
+     to the `built` green a reader already reads as finished but never the same
+     colour — finished and attested are the two claims this layer keeps
+     apart. --- */
+  --correctness: #a6c85c;
+
+  /* --- variations: one colour per open worktree, assigned by id order and
+     stable for as long as the repo has that checkout. These are hues, not
+     meanings — a variation is not a phase, a layer or a verdict — so they sit
+     outside every other palette here. --- */
+  --wt-0: #5fa8fa;
+  --wt-1: #3fd0c9;
+  --wt-2: #f2b03c;
+  --wt-3: #a98bf5;
+  --wt-4: #4bcf85;
+  --wt-5: #e46ad0;
+
   /* --- relation strokes --- */
   --edge-depends: #7f8ea6;
   --edge-relates: #5d6879;
@@ -474,6 +496,50 @@ button {
 .project-path:focus {
   outline: none;
   border-color: color-mix(in oklab, var(--focus) 45%, var(--line-strong));
+}
+
+/* the create form is a folder + a name, then the path it adds up to, then the
+   publishing options */
+.project-create {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.project-create-where {
+  display: flex;
+  gap: var(--s2);
+}
+
+/* the folder is a path and gets the room; the name is one short segment */
+.project-create-where .project-path {
+  flex: 2;
+}
+
+.project-create-where .project-new-name {
+  flex: 1;
+}
+
+.project-create-preview {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--t-sm);
+  overflow-wrap: anywhere;
+}
+
+.project-create-opt {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  color: var(--text-dim);
+  font-size: var(--t-sm);
+  cursor: pointer;
+}
+
+.project-create-vis {
+  display: flex;
+  gap: var(--s4);
+  padding-left: var(--s4);
 }
 
 .project-error {
@@ -916,7 +982,10 @@ button {
   color: color-mix(in oklab, var(--accent) 60%, var(--text));
 }
 
+/* the path shrinks before anything else in the foot: an ellipsised path still
+   reads, a chip broken across two lines does not */
 .bubble-refs {
+  min-width: 0;
   font-family: var(--font-mono);
   font-size: var(--t-xs);
   color: var(--text-faint);
@@ -1198,22 +1267,50 @@ button {
   opacity: 0.55;
 }
 
+/* the first line: an optional sigil saying what kind of thing was found, then
+   the name of it. The sigil is the only colour a ghost carries — it is what
+   tells a database apart from a pipeline at a glance */
 .ghost-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
   font-family: var(--font-mono);
   font-size: var(--t-sm);
   color: var(--text-dim);
+}
+
+.ghost-label .kind-sigil {
+  width: 12px;
+  height: 12px;
+  color: color-mix(in oklab, var(--infra) 62%, var(--text-faint));
+}
+
+.ghost-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ghost-dir {
-  font-family: var(--font-mono);
+/* the second line: a path in mono, or one plain-English sentence about what was
+   found, which wraps to two lines rather than being cut mid-word */
+.ghost-note {
   font-size: var(--t-xs);
   color: var(--text-faint);
   overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  line-height: 1.35;
+}
+
+.ghost-note[data-mono="true"] {
+  font-family: var(--font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
 }
 
 .react-flow__node-ghost,
@@ -1653,6 +1750,25 @@ button {
   background: currentColor;
 }
 
+/* Same pill, but it does something rather than showing something: it carries
+   the drift hue, because what it offers is the answer to a drifted map, and it
+   goes quiet while the harness is already working. */
+.toggle-act {
+  border-color: color-mix(in oklab, var(--drift) 40%, var(--line-strong));
+  color: color-mix(in oklab, var(--drift) 70%, var(--text-dim));
+}
+
+.toggle-act:hover:enabled {
+  border-color: var(--drift);
+  color: var(--drift);
+}
+
+.toggle-act:disabled {
+  border-color: var(--line);
+  color: var(--text-faint);
+  cursor: default;
+}
+
 .errors {
   display: flex;
   flex-direction: column;
@@ -1689,6 +1805,20 @@ button {
 
 .error-dismiss:hover {
   color: var(--text);
+}
+
+/* The quiet counterpart of an error: something happened, just not on this
+   screen. It says so for two seconds and takes itself away — there is nothing
+   to decide, and nothing to dismiss. */
+.notice {
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-2);
+  color: var(--text-dim);
+  font-size: var(--t-sm);
+  animation: rise var(--dur) var(--ease);
 }
 
 /* --- legend: teaches the color system without a manual --- */
@@ -1751,6 +1881,58 @@ button {
   pointer-events: none;
 }
 
+/* The compact readings: something is already drawn on this canvas — the reality
+   strip — and the card is a caption for it, not a page of its own.
+
+   With no bubbles laid out, the strip is the only content the framing has, so
+   the viewport centres that column: a card at `top: 50%` lands on top of the
+   very evidence it is talking about. Two moves keep it clear. Down, into the
+   bottom-left band the fit padding reserves above the stage floor — riding the
+   same lift the now-pill takes, and then clearing the pill itself, so the stack
+   from the floor up is dock, zoom controls, pill, card. Narrow: an extracted
+   column is 330px wide at the widest zoom and centred on the stage, so its left
+   edge never comes closer than 165px to the middle, and the card stops short of
+   that — with a floor, so a very narrow stage gets readable text rather than a
+   sliver. */
+.empty-compact {
+  top: auto;
+  bottom: calc(var(--dock-h, 96px) + var(--s5) + var(--s3) + 38px + 30px);
+  left: var(--s5);
+  transform: none;
+  max-width: min(300px, max(200px, calc(50% - 190px)));
+}
+
+.empty-compact .empty-body {
+  font-size: var(--t-sm);
+}
+
+.empty-compact-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  margin-top: var(--s4);
+  pointer-events: auto;
+}
+
+/* the product-first choice folded onto the row: its help sentence is the title,
+   because two lines of help would make the compact card the splash again */
+.empty-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--t-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.empty-pick input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--focus);
+  cursor: pointer;
+}
+
 .empty-kicker {
   font-family: var(--font-mono);
   font-size: var(--t-xs);
@@ -1774,6 +1956,37 @@ button {
   color: var(--text-dim);
 }
 
+/* product-first choice (ProductFirst): the one thing on the empty state that
+   takes a click, so it opts back into pointer events the panel gives up */
+.empty-choice {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0 var(--s2);
+  margin-top: var(--s4);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.empty-choice input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--focus);
+  cursor: pointer;
+}
+
+.empty-choice-label {
+  font-size: var(--t-md);
+  color: var(--text);
+}
+
+.empty-choice-help {
+  grid-column: 2;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
 kbd {
   display: inline-block;
   padding: 1px 5px;
@@ -1790,12 +2003,11 @@ kbd {
    steering bar
    ========================================================================== */
 
+/* The bar is placed by `.steer-dock` (see "next + autonomy"), which stacks the
+   end-of-turn card on top of it; `position: relative` is what the armed outline
+   below is drawn against. */
 .steer {
-  position: absolute;
-  z-index: 8;
-  right: var(--s5);
-  bottom: var(--s5);
-  left: var(--s5);
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--s3);
@@ -1886,14 +2098,25 @@ kbd {
 
 .steer-input {
   flex: 1;
-  min-width: 0;
-  height: 28px;
+  /* the chips and hint around it can squeeze a flex child to nothing; a
+     narrow window still gets a readable box that wraps on words */
+  min-width: 12ch;
+  /* one line tall at rest; the script sets the height to fit, up to five lines */
+  --steer-line: 22px;
+  min-height: var(--steer-line);
+  max-height: calc(var(--steer-line) * 5);
+  padding: 3px 0;
   border: 0;
   background: none;
   color: var(--text);
   font-family: var(--font-ui);
   font-size: var(--t-lg);
+  line-height: var(--steer-line);
   letter-spacing: -0.005em;
+  resize: none;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
 }
 
 .steer-input::placeholder {
@@ -3012,10 +3235,13 @@ kbd {
 }
 
 /* ==========================================================================
-   view switch — canvas or terminal (header)
+   layer switch — which reading of the project is on the canvas (header)
+
+   It was once shared with a canvas-or-terminal switch that no longer exists, so
+   it carries its own name now.
    ========================================================================== */
 
-.view-switch {
+.layer-switch {
   display: inline-flex;
   align-items: center;
   padding: 2px;
@@ -3025,7 +3251,7 @@ kbd {
   background: var(--surface);
 }
 
-.view-tab {
+.layer-tab {
   height: 20px;
   padding: 0 10px;
   border-radius: var(--r-pill);
@@ -3039,30 +3265,95 @@ kbd {
     background var(--dur-fast) var(--ease);
 }
 
-.view-tab:hover {
+.layer-tab:hover {
   color: var(--text-dim);
 }
 
-.view-tab[aria-pressed="true"] {
+.layer-tab[aria-pressed="true"] {
   background: var(--surface-3);
   color: var(--text);
 }
 
 /* ==========================================================================
-   terminal pane — the project's shell, over the canvas
+   go to terminal — the way over to where the session really runs (header)
+
+   Not a view switch: the canvas is never traded for a terminal. This is a door,
+   so it looks like the other header controls rather than like a tab, and it
+   greys out (rather than disappearing) when the variation has no session — the
+   reader learns the door exists before they have anything to go through it to.
    ========================================================================== */
 
-/* Covers the stage rather than sharing it: the canvas keeps its own measured
-   box (React Flow sizes itself from the container), and the pane clears the
-   header above and the steering bar below instead of hiding either. */
+.go-terminal {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: var(--t-xs);
+  white-space: nowrap;
+  transition:
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+
+.go-terminal:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+}
+
+.go-terminal:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+/* which variation's terminal, in the same pill the variations menu uses */
+.go-terminal-branch {
+  padding: 1px var(--s2);
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+}
+
+/* ==========================================================================
+   terminal drawer — the session's own terminal, over the bottom of the canvas
+   ========================================================================== */
+
+/* A drawer, not a view: it takes the lower half of the stage and leaves the
+   canvas, the header and the breadcrumb above it visible, so the reader can see
+   what they are coming back to. It clears the steering dock, whose height the
+   dock itself publishes as `--dock-h`. */
 .term {
   position: absolute;
-  inset: 0;
-  z-index: 5;
-  /* opaque: a bubble's edge peeking out from behind a shell is just noise */
-  background: var(--bg);
+  z-index: 7;
+  right: var(--s4);
+  left: var(--s4);
+  bottom: calc(var(--dock-h, 88px) + var(--s4));
+  height: min(46vh, 460px);
   flex-direction: column;
-  padding: 52px var(--s4) 88px;
+  padding: var(--s3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg);
+  /* opaque: a bubble's edge showing through a shell is just noise */
+  background: var(--bg);
+  box-shadow: var(--shadow-3);
+  animation: term-in var(--dur) var(--ease);
+}
+
+/* it comes up from where the dock is, which is where the click that opened it
+   was aimed */
+@keyframes term-in {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
 }
 
 .term-head {
@@ -3097,6 +3388,28 @@ kbd {
 .term-hint {
   flex: none;
   color: var(--text-faint);
+  font-size: var(--t-xs);
+}
+
+/* the other way out, for a reader who never learns a key */
+.term-close {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  color: var(--text-faint);
+  font-size: var(--t-lg);
+  line-height: 1;
+  transition:
+    color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+
+.term-close:hover {
+  background: var(--surface-3);
+  color: var(--text);
 }
 
 .term-body {
@@ -3210,6 +3523,46 @@ kbd {
   color: color-mix(in oklab, var(--unrealized) 76%, var(--text));
 }
 
+/* The quieter half of the same claim: a bubble nothing on another layer points
+   at (user decision 2026-09-04 — cross-layer connection is the default, so the
+   silence is drawn rather than left to be noticed). Deliberately in the
+   register of the hollow shield and not of the unrealized glow above: an
+   unconnected bubble is a fact about the graph, not a promise somebody broke.
+   Each side is marked in its own hue, so the mark says which half is silent. */
+
+/* Ground nothing stands on, and a check that checks nothing: the frame goes
+   dashed in the bubble's own layer hue, one notch up from the mix that layer
+   draws every card with, so the dash reads as meant rather than as a rendering
+   accident. Neither gap is ever raised on any other layer; the layer is named
+   anyway, because the hue has to outrank the layer's own border colour further
+   down this file. `data-gaps` is a space-separated list, which is what `~=` is
+   for. */
+.bubble[data-gaps~="hosts-nothing"],
+.bubble[data-gaps~="attests-nothing"] {
+  border-style: dashed;
+}
+
+.bubble[data-layer="infra"][data-gaps~="hosts-nothing"] {
+  border-color: color-mix(in oklab, var(--infra) 52%, var(--line-strong));
+}
+
+.bubble[data-layer="correctness"][data-gaps~="attests-nothing"] {
+  border-color: color-mix(in oklab, var(--correctness) 52%, var(--line-strong));
+}
+
+/* A part no capability says it is for, or one no infrastructure runs: a short
+   dashed rule at the head of the foot row, which is already where the card
+   says what it IS connected to — the "serves 1" badge and the cross-layer
+   doors. It takes its place in the row rather than floating over the card: the
+   bottom-left corner belongs to the variation pips. */
+.bubble[data-gaps~="unserved"] .bubble-foot::before,
+.bubble[data-gaps~="unhosted"] .bubble-foot::before {
+  content: "";
+  flex: none;
+  width: 12px;
+  border-top: 1px dashed color-mix(in oklab, var(--unrealized) 34%, var(--line-strong));
+}
+
 /* the cross-layer door, in the foot rather than under the card: the drill chip
    already owns the bottom edge, and these two go in different directions */
 .built-by {
@@ -3312,4 +3665,1558 @@ kbd {
   font-size: var(--t-sm);
   line-height: 1.5;
   color: var(--text-dim);
+}
+
+/* The "not connected" block: the same claim as the note above, read in every
+   direction the canvas can read it, and quieter for it — this is the rail
+   saying which link is missing, not an alarm. The heading borrows the
+   unrealized hue at a lower mix so the two blocks read as one family. */
+.tl-title-gap {
+  color: color-mix(in oklab, var(--unrealized) 42%, var(--text-dim));
+}
+
+.tl-gaps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+/* two facts per row, stacked: what is missing, then the link that closes it —
+   the rail is too narrow to put a name and a sentence on one line */
+.tl-gap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--s2) var(--s3);
+  border-left: 2px solid color-mix(in oklab, var(--unrealized) 34%, transparent);
+  background: color-mix(in oklab, var(--unrealized) 5%, transparent);
+}
+
+.tl-gap-name {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  color: color-mix(in oklab, var(--unrealized) 52%, var(--text-dim));
+}
+
+.tl-gap-say {
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* ==========================================================================
+   INFRA LAYER
+
+   The third reading: where the parts run and what they lean on. Its card
+   shares geometry with the other two — layout places boxes and must not learn
+   about layers — so the distinction is again hue plus a sigil. Unlike the
+   product layer, the sigil is per bubble: a database and a build pipeline are
+   genuinely different kinds of thing, which is the whole point of the layer.
+   ========================================================================== */
+
+.bubble[data-layer="infra"] {
+  border-color: color-mix(in oklab, var(--infra) 34%, var(--line-strong));
+  background: color-mix(in oklab, var(--infra) 5%, var(--surface));
+}
+
+.bubble[data-layer="infra"]::before {
+  background: linear-gradient(180deg, color-mix(in oklab, var(--infra) 14%, transparent), transparent 62%);
+}
+
+.bubble[data-layer="infra"]:hover {
+  border-color: color-mix(in oklab, var(--infra) 58%, var(--line-strong));
+}
+
+.bubble[data-layer="infra"] .kind-sigil {
+  color: color-mix(in oklab, var(--infra) 72%, var(--text));
+}
+
+/* the door onto the build side, read from the infrastructure end: same shape as
+   "built by", its own hue, because it goes to the same place from elsewhere */
+.runs-parts {
+  flex: none;
+  white-space: nowrap;
+  border-color: color-mix(in oklab, var(--infra) 42%, var(--line-strong));
+  background: color-mix(in oklab, var(--infra) 12%, var(--surface-3));
+  color: color-mix(in oklab, var(--infra) 62%, var(--text));
+}
+
+.runs-parts:hover {
+  background: color-mix(in oklab, var(--infra) 26%, var(--surface-3));
+  border-color: color-mix(in oklab, var(--infra) 78%, var(--line-strong));
+  color: var(--text);
+}
+
+.bubble[data-layer="infra"] .drill-chip {
+  color: color-mix(in oklab, var(--infra) 60%, var(--text-dim));
+}
+
+/* the "running on" layer: not a bubble of its own either, so its card says
+   which piece of infrastructure it is answering for — in that layer's hue,
+   not the product layer's */
+.focus-card[data-hosts="true"] {
+  border-color: color-mix(in oklab, var(--infra) 32%, var(--line-strong));
+  background: color-mix(in oklab, var(--infra) 6%, var(--surface-2));
+}
+
+/* --- the mechanical inside of a leaf --- */
+
+/* A drill onto code rather than onto bubbles: mono, so the chip itself says the
+   next layer is machine-read. It is still the same door in the same place. */
+.drill-chip[data-mechanical="true"] {
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+}
+
+.tl-inside-note {
+  margin: 0 0 var(--s2);
+  font-size: var(--t-xs);
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.tl-inside {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* Two lines rather than one: the name is what a reader is looking for, and a
+   rail this narrow cannot hold a name and a full path side by side without
+   truncating the name — which is the one part that must not be cut. */
+.tl-inside-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  padding: 4px var(--s2);
+  border-radius: var(--r-sm);
+  background: color-mix(in oklab, var(--surface-3) 55%, transparent);
+  font-size: var(--t-sm);
+}
+
+.tl-inside-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+/* class or fn, in the width of the wider word so the names line up */
+.tl-inside-kind {
+  flex: none;
+  width: 3.2em;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.04em;
+  color: color-mix(in oklab, var(--infra) 60%, var(--text-faint));
+}
+
+.tl-inside-name {
+  min-width: 0;
+  font-family: var(--font-mono);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* what the module means to the outside, said once and quietly */
+.tl-inside-export {
+  flex: none;
+  margin-left: auto;
+  padding: 0 5px;
+  border: 1px solid color-mix(in oklab, var(--infra) 30%, var(--line-strong));
+  border-radius: var(--r-pill);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: color-mix(in oklab, var(--infra) 55%, var(--text-dim));
+}
+
+.tl-inside-where {
+  padding-left: 3.2em;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   CORRECTNESS LAYER
+
+   The fourth reading: what proves the parts work. Its own hue for the same
+   reason the other two have one — layout places boxes and must not learn about
+   layers, so a layer is told apart by colour plus a sigil. The hue is a cool
+   lime: adjacent to the `built` green a reader already reads as "done", but
+   never the same colour, because "finished" and "attested" are exactly the two
+   claims this layer exists to keep apart.
+   ========================================================================== */
+
+.bubble[data-layer="correctness"] {
+  border-color: color-mix(in oklab, var(--correctness) 34%, var(--line-strong));
+  background: color-mix(in oklab, var(--correctness) 5%, var(--surface));
+}
+
+.bubble[data-layer="correctness"]::before {
+  background: linear-gradient(180deg, color-mix(in oklab, var(--correctness) 14%, transparent), transparent 62%);
+}
+
+.bubble[data-layer="correctness"]:hover {
+  border-color: color-mix(in oklab, var(--correctness) 58%, var(--line-strong));
+}
+
+.bubble[data-layer="correctness"] .kind-sigil {
+  color: color-mix(in oklab, var(--correctness) 74%, var(--text));
+}
+
+.bubble[data-layer="correctness"] .drill-chip {
+  color: color-mix(in oklab, var(--correctness) 60%, var(--text-dim));
+}
+
+/* the third door onto the build side, read from the verification end */
+.verifies-parts {
+  flex: none;
+  white-space: nowrap;
+  border-color: color-mix(in oklab, var(--correctness) 42%, var(--line-strong));
+  background: color-mix(in oklab, var(--correctness) 12%, var(--surface-3));
+  color: color-mix(in oklab, var(--correctness) 68%, var(--text));
+}
+
+.verifies-parts:hover {
+  background: color-mix(in oklab, var(--correctness) 26%, var(--surface-3));
+  border-color: color-mix(in oklab, var(--correctness) 78%, var(--line-strong));
+  color: var(--text);
+}
+
+/* the "attested by" layer: its card says which verification it answers for */
+.focus-card[data-verifies="true"] {
+  border-color: color-mix(in oklab, var(--correctness) 32%, var(--line-strong));
+  background: color-mix(in oklab, var(--correctness) 6%, var(--surface-2));
+}
+
+/* --- the meta row, now that it carries one more mark ---
+
+   Up to six things can share this row: the phase word, the shield, a badge or
+   three, a code path and the cross-layer chip. On a narrow card they do not all
+   fit, and the row still has to end at the card's edge — before this it simply
+   drew past it, over the canvas — so which one gives way is stated here rather
+   than left to flexbox to decide by accident. The chip is a click target and
+   the phase word and its shield are the reading, so all three keep their size;
+   what shortens is a badge, whose whole text the side panel repeats anyway. */
+.bubble-foot {
+  overflow: hidden;
+}
+
+.bubble-foot > .bubble-phase,
+.bubble-foot > .built-by {
+  flex: none;
+}
+
+/* a block rather than the badge's usual inline-flex: `text-overflow` only
+   applies to a block container, and the row is exactly where one is needed */
+.bubble-foot > .badge {
+  display: block;
+  min-width: 0;
+  line-height: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* except the one badge that is a warning: it shrinks a fraction as fast as the
+   softer ones, so a card runs out of room for "build" and "serves 1" long
+   before it runs out of room for "1 failed inside" */
+.bubble-foot > .badge-failed {
+  flex-shrink: 0.25;
+}
+
+/* --- the shield: whether anything attests a bubble ---
+
+   It sits in the meta row next to the phase word, at the size of that word, so
+   it never competes with the phase dot for the head or with the drift glow for
+   the frame. Hollow is deliberately quiet: an unattested part is a fact, not an
+   alarm — the loud version of that claim is `unrealized`, which is about a
+   promise nobody kept, and this is not. */
+.verify-shield {
+  flex: none;
+  display: inline-flex;
+  width: 11px;
+  height: 11px;
+  color: color-mix(in oklab, var(--correctness) 40%, var(--text-faint));
+}
+
+.verify-shield svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.verify-shield .sigil-fill {
+  fill: currentColor;
+  stroke: none;
+}
+
+.verify-shield[data-state="verified"] {
+  color: color-mix(in oklab, var(--correctness) 78%, var(--text));
+}
+
+.verify-shield[data-state="partial"] {
+  color: color-mix(in oklab, var(--correctness) 62%, var(--text-dim));
+}
+
+/* --- the panel's two verification readings --- */
+
+/* extracted verification: evidence, not a link, so it is a row rather than a
+   chip — three lines, because the label, what it means and where it was read
+   from are three different facts and the rail is too narrow to share one */
+.tl-covering {
+  margin: var(--s2) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tl-covering-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  padding: 4px var(--s2);
+  border-left: 2px solid color-mix(in oklab, var(--correctness) 35%, transparent);
+  border-radius: var(--r-sm);
+  background: color-mix(in oklab, var(--surface-3) 55%, transparent);
+  font-size: var(--t-sm);
+}
+
+.tl-covering-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.tl-covering-kind {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.04em;
+  color: color-mix(in oklab, var(--correctness) 62%, var(--text-faint));
+}
+
+.tl-covering-label {
+  min-width: 0;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-covering-note {
+  font-size: var(--t-xs);
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.tl-covering-where {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* the capability rollup: one sentence, in the hue of the verdict it carries */
+.tl-verified {
+  margin: 0 0 var(--s2);
+  padding: var(--s2) var(--s3);
+  border-left: 2px solid color-mix(in oklab, var(--correctness) 55%, transparent);
+  background: color-mix(in oklab, var(--correctness) 8%, transparent);
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.tl-verified[data-state="unverified"] {
+  border-left-color: color-mix(in oklab, var(--text-faint) 60%, transparent);
+  background: color-mix(in oklab, var(--surface-3) 55%, transparent);
+}
+
+/* ==========================================================================
+   liveness: drafts, breathing, and the "now" pill
+   ========================================================================== */
+
+/* How finished a bubble LOOKS is its phase. The agent sketches a whole layer in
+   one call and refines it over the next few minutes, so an `idea` has to read
+   as a draft the moment it lands: dashed edge, words at two-thirds strength,
+   its hue kept in full so the layer still reads at a glance. A `concept` has
+   been thought about once and firms up. From `component` on, a bubble is a
+   claim rather than a sketch and is drawn at full strength. */
+.bubble[data-phase="idea"] {
+  border-style: dashed;
+}
+
+.bubble-label,
+.bubble-summary {
+  transition: opacity var(--dur) var(--ease);
+}
+
+.bubble[data-phase="idea"] .bubble-label,
+.bubble[data-phase="idea"] .bubble-summary {
+  opacity: 0.6;
+}
+
+.bubble[data-phase="concept"] .bubble-label,
+.bubble[data-phase="concept"] .bubble-summary {
+  opacity: 0.8;
+}
+
+/* Being built is the one phase that is happening right now, so the card itself
+   breathes and not only its dot — slowly, because it may hold that state for
+   minutes and a fast pulse would read as an alarm. */
+.bubble[data-phase="building"]::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  background: none;
+  pointer-events: none;
+  animation: build-glow 3.4s var(--ease) infinite;
+}
+
+@keyframes build-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 20%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--accent) 45%, transparent),
+      0 0 20px 2px color-mix(in oklab, var(--accent) 32%, transparent);
+  }
+}
+
+/* The agent is working and has not said where yet. One bubble breathes so the
+   canvas is never still while a turn is running — the one the reader is
+   already looking at, so the breath answers "is it alive" without claiming
+   anything about where the work landed. */
+.bubble[data-thinking="true"]::after,
+.focus-card[data-thinking="true"]::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  background: none;
+  pointer-events: none;
+  animation: pulse-ring 2.6s var(--ease) infinite;
+}
+
+.focus-card[data-thinking="true"] {
+  position: relative;
+}
+
+/* What the agent is doing this second, in the corner of the canvas: the last
+   tool line, in the terminal's own typeface, small enough to ignore. It fades
+   rather than blinking, and never covers the controls above it. */
+.now-pill {
+  position: absolute;
+  left: var(--s4);
+  /* clears the zoom controls, which are themselves lifted over the steering bar */
+  bottom: 128px;
+  display: flex;
+  align-items: baseline;
+  max-width: min(46ch, 60%);
+  padding: 5px var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--surface-3) 88%, transparent);
+  box-shadow: var(--shadow-1);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px);
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+
+.now-pill[data-on="true"] {
+  opacity: 1;
+  transform: none;
+}
+
+.now-pill-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* three dots typed out and wiped, rather than a spinner: the pill is a line of
+   text, and a line of text says it is still going by carrying on */
+.now-pill-dots {
+  display: inline-block;
+  width: 1.7ch;
+  overflow: hidden;
+  white-space: pre;
+  animation: now-dots 1.2s steps(4, end) infinite;
+}
+
+.now-pill-dots::after {
+  content: "...";
+}
+
+@keyframes now-dots {
+  from {
+    width: 0;
+  }
+  to {
+    width: 1.7ch;
+  }
+}
+
+/* The same rule the rest of the canvas follows: state without motion. The
+   breath becomes a static ring, the glow a static edge, the dots three dots. */
+@media (prefers-reduced-motion: reduce) {
+  .bubble[data-phase="building"]::after {
+    animation: none;
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 45%, transparent);
+  }
+
+  .bubble[data-thinking="true"]::after,
+  .focus-card[data-thinking="true"]::after {
+    animation: none;
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 28%, transparent);
+  }
+
+  .now-pill {
+    transition: none;
+  }
+
+  .now-pill-dots {
+    animation: none;
+    width: 1.7ch;
+  }
+}
+
+/* ==========================================================================
+   variations on one canvas — pips, rings, the filter, the steering target
+   ========================================================================== */
+
+/* Where else a bubble lives: one dot per variation that has it, in that
+   variation's colour. Filled means the same bubble; hollow means that variation
+   says something else about it, which is what the side panel's "where" section
+   spells out. */
+.bubble-pips {
+  position: absolute;
+  left: var(--s3);
+  bottom: 5px;
+  display: flex;
+  gap: 3px;
+  pointer-events: none;
+}
+
+.bubble-pip {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--wt);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--wt) 40%, transparent);
+}
+
+.bubble-pip[data-differs="true"] {
+  background: color-mix(in oklab, var(--wt) 18%, transparent);
+  border: 1px solid var(--wt);
+  width: 7px;
+  height: 7px;
+}
+
+/* one ring per variation working inside this bubble, in its own colour: two
+   branches touching the same part have to read as two */
+.activity-ring-branch {
+  box-shadow: 0 0 0 0 color-mix(in oklab, var(--wt) 55%, transparent);
+  animation: pulse-ring-branch 1.9s var(--ease) infinite;
+}
+
+@keyframes pulse-ring-branch {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--wt) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 12px color-mix(in oklab, var(--wt) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--wt) 0%, transparent);
+  }
+}
+
+.variation-swatch {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--wt);
+}
+
+.variation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.variation-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.variation-pick {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 6px var(--s2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.variation-pick:hover {
+  background: var(--surface-3);
+}
+
+.variation-live {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+}
+
+.variation-live .dot {
+  background: var(--text-faint);
+}
+
+.variation-live[data-on="true"] {
+  color: var(--phase-built);
+}
+
+.variation-live[data-on="true"] .dot {
+  background: var(--phase-built);
+}
+
+.variation-act {
+  flex: none;
+  padding: 4px var(--s2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: var(--t-xs);
+  cursor: pointer;
+}
+
+.variation-act:hover {
+  border-color: var(--focus);
+  color: var(--text);
+}
+
+.variation-all {
+  margin-top: var(--s2);
+  width: 100%;
+}
+
+/* Which variation the sentence goes to. It sits between the referent chip and
+   the input because that is the order the sentence is read in: this thing, on
+   this branch, says what. */
+.steer-target {
+  position: relative;
+  flex: none;
+}
+
+.steer-target-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px var(--s2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: var(--t-xs);
+  cursor: pointer;
+}
+
+.steer-target[data-live="false"] .steer-target-chip {
+  border-color: color-mix(in oklab, var(--phase-failed) 45%, var(--line-strong));
+  color: color-mix(in oklab, var(--phase-failed) 45%, var(--text-dim));
+}
+
+.steer-target-chip:disabled {
+  cursor: default;
+}
+
+.steer-target-key {
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.steer-target-name {
+  color: var(--text);
+}
+
+.steer-target-menu {
+  position: absolute;
+  bottom: calc(100% + var(--s2));
+  left: 0;
+  width: 260px;
+}
+
+/* what the same bubble says in the other variations, when they disagree */
+.tl-where {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.tl-where-row {
+  display: grid;
+  grid-template-columns: minmax(80px, auto) auto;
+  align-items: baseline;
+  gap: 2px var(--s2);
+}
+
+.tl-where-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+}
+
+.tl-where-phase {
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.tl-where-status {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+}
+
+.tl-where-row[data-absent="true"] .tl-where-status {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* one line per working variation: the pill grows downward rather than
+   truncating two branches into one unreadable line */
+.now-pill[data-lines="2"],
+.now-pill[data-lines="3"],
+.now-pill[data-lines="4"] {
+  align-items: flex-start;
+  border-radius: var(--r-md);
+}
+
+.now-pill-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.term-branch {
+  flex: none;
+  padding: 2px var(--s2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  font-size: var(--t-xs);
+  color: var(--text-dim);
+}
+
+/* ==========================================================================
+   motion v2 — the canvas reads as alive
+
+   A turn can go a minute between writes to the graph, and a still picture of a
+   running agent is indistinguishable from a hung one. Everything below is that
+   gap filled in: work travels along the lines it is travelling along, a card
+   being worked in pulses twice over and breathes, a card that lands arrives, a
+   line of words that changes says so, and while the agent has not said where it
+   is working the whole layer washes gently instead of one card doing it alone.
+
+   Rules of the house, unchanged: nothing here animates a node's position or
+   size (React Flow measures those to route its edges) and nothing here runs in
+   JavaScript. Every motion has a still equivalent under
+   `prefers-reduced-motion`, at the bottom of this block.
+   ========================================================================== */
+
+/* --- the wash behind the graph: something is happening, somewhere ---
+   Two slow radial washes drifting behind the dot grid while any variation on
+   screen is mid-turn. It sits below the viewport's stacking level and answers
+   to no pointer, so it can never be in the way. Paused, not merely
+   transparent, when nothing is running: an idle canvas should cost nothing. */
+.canvas-ambience {
+  position: absolute;
+  inset: -25%;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0;
+  background:
+    radial-gradient(34% 40% at 34% 38%, color-mix(in oklab, var(--wt-0) 15%, transparent), transparent 72%),
+    radial-gradient(30% 36% at 66% 64%, color-mix(in oklab, var(--phase-building) 11%, transparent), transparent 72%);
+  transition: opacity 900ms var(--ease);
+  animation: ambience-drift 26s ease-in-out infinite alternate;
+  animation-play-state: paused;
+  will-change: transform;
+}
+
+.canvas-ambience[data-on="true"] {
+  opacity: 1;
+  animation-play-state: running;
+}
+
+@keyframes ambience-drift {
+  from {
+    transform: translate3d(-2.5%, -1.5%, 0) scale(1);
+  }
+  to {
+    transform: translate3d(2.5%, 1.5%, 0) scale(1.08);
+  }
+}
+
+/* --- lines: work travels along them ---
+   A relation with a live end flows source to target, which is the direction the
+   relation itself reads in. The dash period and the travelled distance are kept
+   in step per kind (`--flow` is two whole periods) so the loop never jumps. */
+.react-flow__edge.rel-live .rel-path {
+  --flow: 24px;
+  stroke-dasharray: 6 6;
+  animation: edge-flow 1.1s linear infinite;
+}
+
+.react-flow__edge.rel-live.rel-depends .rel-path {
+  --flow: 28px;
+  stroke-dasharray: 8 6;
+  animation-duration: 900ms;
+}
+
+.react-flow__edge.rel-live.rel-dataflow .rel-path {
+  --flow: 24px;
+  stroke-dasharray: 7 5;
+  animation-duration: 560ms;
+}
+
+/* `relates` says two things are related, not which way round, so a live one
+   pulses in place rather than pointing anywhere */
+.react-flow__edge.rel-live.rel-relates .rel-path {
+  stroke-dasharray: 2 5;
+  animation: edge-glimmer 2.2s ease-in-out infinite;
+}
+
+@keyframes edge-flow {
+  to {
+    stroke-dashoffset: calc(-1 * var(--flow));
+  }
+}
+
+@keyframes edge-glimmer {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* arriving somewhere is the loud half of travelling: a line into the bubble the
+   agent is inside takes that variation's own colour and glows */
+.react-flow__edge.rel-into-live .rel-path {
+  stroke: color-mix(in oklab, var(--wt) 70%, var(--line-strong));
+  filter: drop-shadow(0 0 4px color-mix(in oklab, var(--wt) 55%, transparent));
+}
+
+/* --- the card being worked in: two rings, a breath, a dot with news --- */
+
+/* One pulse reads as a blip; two overlapping ones read as something that keeps
+   going. `--ring-delay` is set per ring in BubbleNode, so a second variation's
+   pair is offset from the first's rather than beating in time with it. */
+.bubble .activity-ring {
+  --ring-tone: var(--accent);
+  box-shadow: 0 0 0 0 color-mix(in oklab, var(--ring-tone) 60%, transparent);
+  animation: ring-out 2.2s var(--ease) var(--ring-delay, 0ms) infinite;
+}
+
+.bubble .activity-ring-branch {
+  --ring-tone: var(--wt);
+}
+
+.bubble .activity-ring-echo {
+  opacity: 0.5;
+  animation-duration: 2.7s;
+}
+
+@keyframes ring-out {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--ring-tone) 60%, transparent);
+  }
+  62% {
+    box-shadow: 0 0 0 15px color-mix(in oklab, var(--ring-tone) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--ring-tone) 0%, transparent);
+  }
+}
+
+/* A card with work in it breathes: a percent and a half, slower than a resting
+   pulse. Transform only — the layout's own numbers are untouched, so no edge
+   moves off its anchor. */
+.bubble[data-active="true"] {
+  animation: card-breathe 3.4s ease-in-out infinite;
+}
+
+/* the arrival choreography owns the first 300ms; the breath picks up after it */
+.bubble[data-active="true"][data-motion="enter"] {
+  animation:
+    bubble-enter 300ms var(--ease) both,
+    card-breathe 3.4s ease-in-out 300ms infinite;
+}
+
+/* selection is the louder claim about a card, so it keeps its own ring */
+.bubble[data-active="true"]:not([data-selected="true"]) {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--accent) 32%, transparent),
+    0 0 28px -10px color-mix(in oklab, var(--accent) 60%, transparent),
+    var(--shadow-1);
+}
+
+@keyframes card-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.015);
+  }
+}
+
+/* A phase change is the one thing a card can say about itself that a reader
+   must not miss, so the dot rings out once when it happens. BubbleNode gives
+   the dot a new key on the change; a remount is what restarts this. The last
+   keyframe is the dot's own resting look, so nothing is left behind. */
+.bubble .phase-dot {
+  animation: dot-ripple 820ms var(--ease) both;
+}
+
+.bubble[data-phase="building"] .phase-dot {
+  animation:
+    breathe 1.6s var(--ease) infinite,
+    dot-ripple 820ms var(--ease) both;
+}
+
+@keyframes dot-ripple {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 75%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 10px color-mix(in oklab, var(--accent) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 22%, transparent);
+  }
+}
+
+/* --- arrival and departure --- */
+
+/* a new part sends one ring outward as it rises, so it reads as arriving rather
+   than as having always been there */
+.bubble-ripple {
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  border: 1px solid color-mix(in oklab, var(--accent) 70%, transparent);
+  pointer-events: none;
+  animation: ripple-out 720ms var(--ease) both;
+}
+
+@keyframes ripple-out {
+  from {
+    opacity: 0.9;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.16);
+  }
+}
+
+/* and one that left dissolves inward: gone, not merely faded */
+.bubble[data-motion="leave"] {
+  animation: bubble-dissolve 260ms var(--ease) both;
+}
+
+@keyframes bubble-dissolve {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.84);
+  }
+}
+
+/* --- words: a line that changes says so ---
+   `filter: opacity()` rather than `opacity`, because the phase dimming already
+   owns this element's opacity and a fade must not brighten a draft on its way
+   past. Each paragraph is keyed by its own words in BubbleNode. */
+.bubble-summary {
+  animation: words-in 320ms var(--ease);
+}
+
+.bubble-summary.bubble-status {
+  animation: status-in 340ms var(--ease);
+}
+
+@keyframes words-in {
+  from {
+    filter: opacity(0);
+  }
+  to {
+    filter: opacity(1);
+  }
+}
+
+@keyframes status-in {
+  from {
+    filter: opacity(0);
+    transform: translateY(5px);
+  }
+  to {
+    filter: opacity(1);
+    transform: none;
+  }
+}
+
+/* --- nothing lit yet: the whole layer, not one card ---
+   The focus card's halo swings wide enough to see from across the room, and
+   every bubble on the layer washes its own phase hue in and out, staggered by
+   its place in the layer so the canvas ripples rather than flashing. */
+.bubble[data-thinking="true"]::after,
+.focus-card[data-thinking="true"]::after {
+  animation: halo-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes halo-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 22%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 7px color-mix(in oklab, var(--accent) 6%, transparent),
+      0 0 30px -4px color-mix(in oklab, var(--accent) 50%, transparent);
+  }
+}
+
+.bubble[data-pondering="true"]::before {
+  animation: alive-wash 3.6s ease-in-out calc(var(--order, 0) * 260ms) infinite;
+}
+
+@keyframes alive-wash {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* --- the "now" pill: a shimmer while it runs, a push when it changes ---
+   The pill is a line of text, so it says it is still going the way text does:
+   a highlight travelling across the words. A new line comes up from below and
+   the line it replaces keeps rising out of the pill's clipped top, which is
+   what makes the change read as a stack rather than a swap. */
+
+/* The dock below the canvas grows and shrinks with the turn's card, and the
+   shell publishes its measured height as `--dock-h`. The pill rides the same
+   lift the zoom controls take (dock height plus the dock's own bottom inset)
+   and then clears the controls row itself, so it never ends up underneath
+   either of them however tall the dock gets. */
+.now-pill {
+  bottom: calc(var(--dock-h, 96px) + var(--s5) + var(--s3) + 38px);
+}
+
+.now-pill-slot {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+
+.now-pill-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.now-pill[data-on="true"] .now-pill-text {
+  background-image: linear-gradient(100deg, var(--text-dim) 22%, var(--focus) 42%, var(--text-dim) 62%);
+  background-size: 240% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation:
+    line-in 380ms var(--ease) both,
+    now-shimmer 3.4s linear infinite;
+}
+
+/* The outgoing line needs no timer to clean up after it: it ends invisible and
+   above the clip, and the next change replaces it outright. */
+.now-pill .now-pill-text.now-pill-gone {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  animation: line-out 460ms var(--ease) both;
+}
+
+@keyframes line-in {
+  from {
+    opacity: 0;
+    transform: translateY(9px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes line-out {
+  from {
+    opacity: 1;
+    transform: translateY(100%);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(15%);
+  }
+}
+
+@keyframes now-shimmer {
+  from {
+    background-position: 130% 0;
+  }
+  to {
+    background-position: -30% 0;
+  }
+}
+
+/* --- state without motion: every liveness cue above, held still --- */
+@media (prefers-reduced-motion: reduce) {
+  .canvas-ambience {
+    animation: none;
+    transition: none;
+  }
+
+  .react-flow__edge.rel-live .rel-path,
+  .react-flow__edge.rel-live.rel-depends .rel-path,
+  .react-flow__edge.rel-live.rel-dataflow .rel-path,
+  .react-flow__edge.rel-live.rel-relates .rel-path {
+    animation: none;
+    opacity: 1;
+  }
+
+  /* one ring, standing still, says the same thing the pair says */
+  .bubble .activity-ring {
+    animation: none;
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring-tone) 30%, transparent);
+  }
+
+  .bubble .activity-ring-echo {
+    display: none;
+  }
+
+  .bubble[data-active="true"],
+  .bubble[data-active="true"][data-motion="enter"],
+  .bubble[data-motion="leave"],
+  .bubble .phase-dot,
+  .bubble[data-phase="building"] .phase-dot,
+  .bubble-summary,
+  .bubble-summary.bubble-status,
+  .bubble[data-pondering="true"]::before {
+    animation: none;
+  }
+
+  .bubble[data-motion="leave"] {
+    opacity: 0;
+  }
+
+  .bubble-ripple {
+    display: none;
+  }
+
+  .bubble[data-thinking="true"]::after,
+  .focus-card[data-thinking="true"]::after {
+    animation: none;
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 28%, transparent);
+  }
+
+  .now-pill[data-on="true"] .now-pill-text {
+    animation: none;
+    background-image: none;
+    color: var(--text-dim);
+  }
+
+  .now-pill .now-pill-text.now-pill-gone {
+    display: none;
+  }
+}
+
+/* ==========================================================================
+   next + autonomy — the call to action a turn ends on, and the toggle that
+   answers it for you
+   ========================================================================== */
+
+/* The card and the bar are one stack pinned to the bottom of the stage. The
+   bar used to be pinned on its own; the dock owns the placement now so the card
+   rides on top of a bar that grows with a dictated sentence. */
+.steer-dock {
+  position: absolute;
+  z-index: 8;
+  right: var(--s5);
+  bottom: var(--s5);
+  left: var(--s5);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s2);
+}
+
+/* Where the turn left things. Same surface as the bar, one shade lighter on the
+   left edge: it reads as the sentence the bar is answering. */
+.next-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--line-strong);
+  border-left: 2px solid color-mix(in oklab, var(--capability) 70%, var(--line-strong));
+  border-radius: var(--r-md);
+  background: color-mix(in oklab, var(--surface-2) 94%, transparent);
+  box-shadow: var(--shadow-2);
+  animation: next-in var(--dur) var(--ease) both;
+}
+
+/* a new card arrives from under the bar, so the eye is already there */
+@keyframes next-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.next-summary {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  color: var(--text);
+  font-size: var(--t-lg);
+  line-height: 1.35;
+}
+
+/* whose turn ended, when more than one variation is on the canvas */
+.next-branch {
+  flex: none;
+  padding: 2px var(--s2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  color: var(--text-dim);
+  font-size: var(--t-xs);
+}
+
+/* the one thing only the user can settle: it gets the accent, the choices are
+   merely convenient */
+.next-question {
+  margin: 0;
+  padding-left: var(--s3);
+  border-left: 2px solid color-mix(in oklab, var(--phase-building) 70%, transparent);
+  color: color-mix(in oklab, var(--phase-building) 30%, var(--text));
+  font-size: var(--t-md);
+  line-height: 1.4;
+}
+
+.next-choices {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.next-choice {
+  padding: 6px var(--s3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--t-md);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+/* the agent puts what it recommends first, and the card says so */
+.next-choice[data-lead="true"] {
+  border-color: color-mix(in oklab, var(--capability) 55%, var(--line-strong));
+  background: color-mix(in oklab, var(--capability) 14%, var(--surface-3));
+}
+
+.next-choice:hover {
+  border-color: var(--focus);
+  transform: translateY(-1px);
+}
+
+.next-choice:active {
+  transform: translateY(0);
+}
+
+.next-hint,
+.next-done {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+
+/* Hand the wheel over. On, this is the loudest thing in the bar on purpose: an
+   agent deciding for itself is something the reader must never discover by
+   accident. */
+.steer-auto {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px var(--s2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: var(--t-xs);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.steer-auto:hover:not(:disabled) {
+  border-color: var(--focus);
+  color: var(--text);
+}
+
+.steer-auto:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.steer-auto[data-on="true"] {
+  border-color: color-mix(in oklab, var(--phase-built) 55%, var(--line-strong));
+  background: color-mix(in oklab, var(--phase-built) 14%, var(--surface-2));
+  color: color-mix(in oklab, var(--phase-built) 30%, var(--text));
+  animation: auto-breathe 2.4s var(--ease) infinite;
+}
+
+.steer-auto-beat {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--phase-built);
+  animation: auto-beat 1.6s var(--ease) infinite;
+}
+
+@keyframes auto-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--phase-built) 40%, transparent);
+  }
+  55% {
+    box-shadow: 0 0 0 6px color-mix(in oklab, var(--phase-built) 0%, transparent);
+  }
+}
+
+@keyframes auto-beat {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  55% {
+    opacity: 0.45;
+    transform: scale(0.75);
+  }
+}
+
+/* ==========================================================================
+   start a session — what stands where the end-of-turn card would be when
+   nothing is running in the variation being steered
+
+   Same surface and same place as the card it replaces: the dock is where the
+   thing to do next lives, and with no harness in this checkout the thing to do
+   next is to start one.
+   ========================================================================== */
+
+.start-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--line-strong);
+  border-left: 2px solid color-mix(in oklab, var(--phase-built) 70%, var(--line-strong));
+  border-radius: var(--r-md);
+  background: color-mix(in oklab, var(--surface-2) 94%, transparent);
+  box-shadow: var(--shadow-2);
+  animation: next-in var(--dur) var(--ease) both;
+  text-align: left;
+}
+
+.start-title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--t-lg);
+  line-height: 1.35;
+}
+
+/* what is actually installed; nothing else is offered, because nothing else
+   could be started */
+.start-picks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.start-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px var(--s3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  color: var(--text-dim);
+  font-size: var(--t-sm);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.start-pick:hover {
+  border-color: var(--focus);
+  color: var(--text);
+}
+
+.start-pick input {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--focus);
+}
+
+.start-pick:has(input:checked) {
+  border-color: color-mix(in oklab, var(--phase-built) 55%, var(--line-strong));
+  background: color-mix(in oklab, var(--phase-built) 14%, var(--surface-3));
+  color: var(--text);
+}
+
+/* a machine with no coding agent on it cannot be talked around; say what to do */
+.start-none {
+  margin: 0;
+  color: color-mix(in oklab, var(--phase-failed) 30%, var(--text-dim));
+  font-size: var(--t-sm);
+  line-height: 1.5;
+}
+
+.start-opt {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 6px var(--s2);
+  cursor: pointer;
+}
+
+.start-opt input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--focus);
+}
+
+.start-opt-label {
+  font-size: var(--t-md);
+  color: var(--text);
+}
+
+.start-help {
+  grid-column: 2;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.start-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+/* where the session will actually run — the one fact the card cannot leave out */
+.start-where {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .next-card,
+  .start-card,
+  .term {
+    animation: none;
+  }
+
+  .next-choice:hover {
+    transform: none;
+  }
+
+  .steer-auto[data-on="true"],
+  .steer-auto-beat {
+    animation: none;
+  }
 }

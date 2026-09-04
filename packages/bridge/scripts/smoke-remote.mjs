@@ -10,11 +10,11 @@
  *   agent SIGTERM             — session/projects flip to disconnected, utterance refused
  *   agent restart             — the room outlives the agent and re-greets it
  *   a second agent            — two projects, select_project joins the other one
- *   remote storage            — a graph per project and a registry under --data-dir
+ *   remote storage            — a graph row per variation and a registry in <data-dir>/shape.db
  *   server restart            — the rooms come back; live agents re-bind them
  *   agentless restore         — restored rooms are read-only, and still diffable
  *
- * The harness on both agents is scripts/fake-omp.mjs, so nothing real is
+ * The harness on both agents is scripts/fake-omp-tui.mjs, so nothing real is
  * spawned; each target project gets its own log, which is what proves which
  * process served a turn.
  *
@@ -22,10 +22,11 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import WebSocket from "ws";
 
 const PORT = Number(process.env.SMOKE_REMOTE_PORT ?? 4412);
@@ -35,6 +36,13 @@ const LINK_PORT_B = PORT + 2;
 const SERVER_URL = `ws://127.0.0.1:${PORT}`;
 /** an agent's reconnect backoff tops out at 8 s: a restart must be re-bound inside this */
 const RECONNECT_MS = 10_000;
+
+// Every bridge/agent below inherits this environment: a smoke must not depend
+// on what is installed on the machine running it. The launcher is Shape's own
+// pty (never a herdr tab in the developer's terminal), and detection reports
+// exactly one harness — `omp`, which `--omp` points at the fake.
+process.env.SHAPE_LAUNCHER = "pty";
+process.env.SHAPE_FORCE_HARNESSES = "omp";
 
 const results = [];
 let failed = 0;
@@ -65,13 +73,22 @@ function ompFrames(path) {
     .map((line) => JSON.parse(line));
 }
 
-/** parse a file the server writes under us; a half-written read is just "not yet" */
-function readJson(path) {
-  if (!existsSync(path)) return null;
+/**
+ * Read rows out of the server's own database while it runs. A database that is
+ * not there yet — or busy mid-write — is just "not yet", so the callers can
+ * poll it exactly as they polled the files it replaced.
+ */
+function dbRows(sql, ...params) {
+  const file = join(dataDir, "shape.db");
+  if (!existsSync(file)) return null;
+  let db = null;
   try {
-    return JSON.parse(readFileSync(path, "utf8"));
+    db = new DatabaseSync(file);
+    return db.prepare(sql).all(...params);
   } catch {
     return null;
+  } finally {
+    db?.close();
   }
 }
 
@@ -104,10 +121,20 @@ async function seedWorkspace(dir, scope) {
 const targetA = await mkdtemp(join(tmpdir(), "vh-remote-a-"));
 const targetB = await mkdtemp(join(tmpdir(), "vh-remote-b-"));
 const fakeHome = await mkdtemp(join(tmpdir(), "vh-remote-home-"));
-/** where a remote server keeps graphs, revisions and its project registry */
+/** holds `shape.db`: every project's graph, its revisions and the project registry */
 const dataDir = await mkdtemp(join(tmpdir(), "vh-remote-data-"));
 await seedWorkspace(targetA, "ra");
 await seedWorkspace(targetB, "rb");
+
+/**
+ * The one variation each target has. A fresh repo nobody ran `git worktree add`
+ * in is a single worktree, and its id — what every worktree-scoped frame and
+ * every stored row is keyed by — is the realpath of its directory. It is also
+ * what the server reports as the project's cwd, which is not the spelling
+ * mkdtemp handed out on a machine whose temp dir is a symlink.
+ */
+const mainA = realpathSync(targetA);
+const mainB = realpathSync(targetB);
 
 const frames = [];
 /** every process this smoke started, so the finally block can kill all of them */
@@ -120,11 +147,15 @@ let socket = null;
  * Returns a handle whose `log` accumulates the child's stderr — the banners the
  * steps wait on. cwd stays packages/bridge: relative `--omp` tokens are resolved
  * against the agent process's cwd, not the target's.
+ *
+ * SHAPE_AUTO_MAP=0 goes to every child: the server is the one that reads it, and
+ * the targets below are seeded WITH code and an empty canvas — a room that maps
+ * them by itself would deliver turns none of these steps asked for.
  */
 function launch(label, args, extraEnv = {}) {
   const child = spawn(process.execPath, args, {
     cwd: process.cwd(),
-    env: { ...process.env, SHAPE_HOME: fakeHome, ...extraEnv },
+    env: { ...process.env, SHAPE_AUTO_MAP: "0", SHAPE_HOME: fakeHome, ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const handle = { label, child, log: "" };
@@ -159,7 +190,7 @@ const agentArgs = (target, linkPort) => [
   "--link-port",
   String(linkPort),
   "--omp",
-  "node scripts/fake-omp.mjs",
+  "node scripts/fake-omp-tui.mjs",
 ];
 
 /**
@@ -228,7 +259,7 @@ try {
   );
   check(
     "hello lists exactly the one project the agent attached",
-    Array.isArray(hello.projects) && hello.projects.length === 1 && hello.projects[0].cwd === targetA,
+    Array.isArray(hello.projects) && hello.projects.length === 1 && hello.projects[0].cwd === mainA,
     JSON.stringify(hello.projects ?? null),
   );
   check(
@@ -236,29 +267,35 @@ try {
     typeof hello.projectId === "string" && hello.projectId === hello.projects[0]?.projectId,
     `${String(hello.projectId)} vs ${String(hello.projects?.[0]?.projectId)}`,
   );
-  check("hello serves the remote agent's target as the session cwd", hello.session.cwd === targetA, hello.session.cwd);
+  check(
+    "hello serves the remote agent's target as the session cwd and its first variation",
+    hello.session.cwd === mainA && hello.session.worktrees[0]?.path === mainA,
+    `${hello.session.cwd} / ${JSON.stringify(hello.session.worktrees)}`,
+  );
   check(
     "hello carries the reality layer extracted from the target workspace",
-    hello.graph.reality.nodes.map((n) => n.id).sort().join(",") === "r:@ra/auth,r:@ra/db",
-    JSON.stringify(hello.graph.reality.nodes.map((n) => n.id)),
+    hello.graphs[mainA].reality.nodes.map((n) => n.id).sort().join(",") === "r:@ra/auth,r:@ra/db",
+    JSON.stringify(hello.graphs[mainA].reality.nodes.map((n) => n.id)),
   );
 
   // --- 3. an utterance travels browser -> server -> agent -> harness ---------
 
   const utteranceAt = mark();
-  send({ type: "utterance", referent: null, text: "build me an auth service" });
+  // the fake harness answers with a build-layer canvas call; this smoke is
+  // about the wire, not the product-first turn, so that turn is opted out
+  send({ type: "utterance", worktree: mainA, referent: null, text: "build me an auth service", productFirst: false });
   const prompt = await waitFor("prompt in the remote harness log", () =>
-    ompFrames(ompLogIn(targetA)).find((f) => f.type === "prompt" && f.message.includes("build me an auth service")),
+    ompFrames(ompLogIn(targetA)).find((f) => f.type === "deliver" && f.mode === "prompt" && f.body.includes("build me an auth service")),
   );
-  check("an utterance crosses the server-agent socket into the harness as a prompt", prompt.type === "prompt");
+  check("an utterance crosses the server-agent socket into the harness as a prompt", prompt.mode === "prompt");
   check(
     "the first delivery to a fresh harness process carries the canvas preamble",
-    prompt.message.includes("<canvas-harness>"),
-    prompt.message.slice(0, 60),
+    prompt.body.includes("<canvas-harness>"),
+    prompt.body.slice(0, 60),
   );
   const userLine = await frameAfter(
     utteranceAt,
-    (f) => f.type === "transcript" && f.role === "user" && f.text === "build me an auth service",
+    (f) => f.type === "transcript" && f.worktree === mainA && f.role === "user" && f.text === "build me an auth service",
     "user transcript line",
   );
   check("the utterance is echoed back to the browser as a user transcript line", userLine !== undefined);
@@ -267,7 +304,7 @@ try {
 
   const graph = await frameAfter(
     utteranceAt,
-    (f) => f.type === "graph" && f.graph.nodes.some((n) => n.id === "auth-service"),
+    (f) => f.type === "graph" && f.worktree === mainA && f.graph.nodes.some((n) => n.id === "auth-service"),
     "graph frame carrying the canvas call",
   );
   check(
@@ -277,13 +314,13 @@ try {
   );
   const toolResult = await waitFor("canvas result in the harness log", () =>
     ompFrames(ompLogIn(targetA)).find(
-      (f) => f.type === "host_tool_result" && f.result.content[0].text.startsWith("applied 3 op(s);"),
+      (f) => f.type === "canvas_result" && f.text.startsWith("applied 3 op(s);"),
     ),
   );
   check(
     "the canvas result is returned across the link to the harness",
-    toolResult.result.isError !== true,
-    toolResult.result.content[0].text.split("\n")[0],
+    toolResult.isError !== true,
+    toolResult.text.split("\n")[0],
   );
 
   // --- 5. the agent goes away: the room stays, read-only ---------------------
@@ -297,22 +334,22 @@ try {
   );
   check(
     "killing the agent tells the browser the session lost its agent",
-    disconnected.session.cwd === targetA,
+    disconnected.session.cwd === mainA,
     disconnected.session.cwd,
   );
   const offline = await frameAfter(
     goneAt,
-    (f) => f.type === "projects" && f.projects.some((p) => p.cwd === targetA),
+    (f) => f.type === "projects" && f.projects.some((p) => p.cwd === mainA),
     "projects frame after the agent left",
   );
   check(
     "a departed agent leaves its project listed as offline",
-    offline.projects.find((p) => p.cwd === targetA)?.agentConnected === false,
+    offline.projects.find((p) => p.cwd === mainA)?.agentConnected === false,
     JSON.stringify(offline.projects),
   );
 
   const refusedAt = mark();
-  send({ type: "utterance", referent: null, text: "anyone home?" });
+  send({ type: "utterance", worktree: mainA, referent: null, text: "anyone home?" });
   const refused = await frameAfter(refusedAt, (f) => f.type === "error", "error for the agentless utterance");
   check(
     "an utterance with no agent attached is refused by name",
@@ -330,13 +367,13 @@ try {
     (f) => f.type === "hello" && f.session.agentConnected === true,
     "hello after the re-attach",
   );
-  check("restarting the agent re-attaches to the room it left behind", rehello.session.cwd === targetA, rehello.session.cwd);
+  check("restarting the agent re-attaches to the room it left behind", rehello.session.cwd === mainA, rehello.session.cwd);
 
-  send({ type: "utterance", referent: null, text: "second life auth service" });
+  send({ type: "utterance", worktree: mainA, referent: null, text: "second life auth service" });
   const rePrompt = await waitFor("prompt in the restarted harness log", () => {
     const log = ompFrames(ompLogIn(targetA));
     const lastStart = log.map((f) => f.type).lastIndexOf("__start");
-    const at = log.findIndex((f, i) => i > lastStart && f.type === "prompt" && f.message.includes("second life"));
+    const at = log.findIndex((f, i) => i > lastStart && f.type === "deliver" && f.body.includes("second life"));
     return at === -1 ? null : { log, lastStart, prompt: log[at] };
   });
   const starts = rePrompt.log.filter((f) => f.type === "__start");
@@ -371,7 +408,7 @@ try {
   );
   check(
     "the room outlives its agent across a second restart",
-    thirdHello.session.cwd === targetA && thirdHello.projects.some((p) => p.cwd === targetA && p.agentConnected === true),
+    thirdHello.session.cwd === mainA && thirdHello.projects.some((p) => p.cwd === mainA && p.agentConnected === true),
     JSON.stringify(thirdHello.projects),
   );
 
@@ -385,17 +422,17 @@ try {
   );
   check(
     "a second agent on the same server adds its project to the list",
-    both.projects.some((p) => p.cwd === targetA) && both.projects.some((p) => p.cwd === targetB),
+    both.projects.some((p) => p.cwd === mainA) && both.projects.some((p) => p.cwd === mainB),
     JSON.stringify(both.projects.map((p) => p.cwd)),
   );
 
   const selectAt = mark();
-  const projectB = both.projects.find((p) => p.cwd === targetB);
+  const projectB = both.projects.find((p) => p.cwd === mainB);
   send({ type: "select_project", projectId: projectB.projectId });
   const helloB = await frameAfter(selectAt, (f) => f.type === "hello", "hello for the selected project");
   check(
     "select_project moves this socket to the other project's room",
-    helloB.session.cwd === targetB && helloB.projectId === projectB.projectId,
+    helloB.session.cwd === mainB && helloB.projectId === projectB.projectId,
     `${helloB.session.cwd} / ${String(helloB.projectId)}`,
   );
 
@@ -408,14 +445,20 @@ try {
     unknown.message,
   );
 
-  // --- 9. what a remote server keeps on disk --------------------------------
+  // --- 9. what a remote server keeps in its database ------------------------
 
   const projectAId = hello.projectId;
   // an unauthenticated server files everything under the implicit `local` tenant
-  const graphPath = join(dataDir, "tenants", "local", "projects", projectAId, "graph.json");
-  const storedGraph = await waitFor("the first project's graph under the data dir", () => readJson(graphPath), 10_000);
+  const graphRow = await waitFor(
+    "the first project's graph row in the server's database",
+    () =>
+      dbRows("SELECT doc FROM graphs WHERE tenant = ? AND key = ? AND worktree = ?", "local", projectAId, mainA)?.[0] ??
+      null,
+    10_000,
+  );
+  const storedGraph = JSON.parse(graphRow.doc);
   check(
-    "a remote server keeps each project's graph at <data-dir>/tenants/local/projects/<projectId>/graph.json",
+    "a remote server keeps each variation's graph in <data-dir>/shape.db, keyed by tenant, project and variation",
     storedGraph.nodes.some((n) => n.id === "auth-service") &&
       storedGraph.edges.some((e) => e.id === "auth-service--user-db"),
     JSON.stringify(storedGraph.nodes.map((n) => n.id)),
@@ -424,23 +467,28 @@ try {
   const registry = await waitFor(
     "both projects in the server's registry",
     () => {
-      const rows = readJson(join(dataDir, "projects.json"));
-      return Array.isArray(rows) && rows.length === 2 ? rows : null;
+      const rows = dbRows("SELECT tenant, key, project, sessions, worktrees, last_seen FROM projects");
+      return rows !== null && rows.length === 2
+        ? rows.map((row) => ({ ...row, project: JSON.parse(row.project), sessions: JSON.parse(row.sessions) }))
+        : null;
     },
     10_000,
   );
   check(
     "the registry names both attached projects by cwd",
-    [targetA, targetB].every((cwd) => registry.some((row) => row.project?.cwd === cwd)),
+    [mainA, mainB].every((cwd) => registry.some((row) => row.project?.cwd === cwd)),
     JSON.stringify(registry.map((row) => row.project?.cwd ?? null)),
   );
   check(
     "registry rows are stored projects, not browser summaries",
     registry.every(
       (row) =>
-        !("agentConnected" in row) && !("agentConnected" in (row.session ?? {})) && typeof row.lastSeen === "string",
+        !("agentConnected" in row.project) &&
+        Array.isArray(row.sessions) &&
+        row.sessions.every((s) => typeof s.worktree === "string" && !("agentConnected" in s)) &&
+        typeof row.last_seen === "string",
     ),
-    JSON.stringify(registry.map((row) => Object.keys(row))),
+    JSON.stringify(registry.map((row) => Object.keys(row.project))),
   );
 
   // --- 10. the server restarts while both agents are still up ---------------
@@ -468,11 +516,11 @@ try {
   );
   check(
     "the live agents reconnect and re-bind the rooms the restart restored",
-    reattached.some((p) => p.cwd === targetA) && reattached.some((p) => p.cwd === targetB),
+    reattached.some((p) => p.cwd === mainA) && reattached.some((p) => p.cwd === mainB),
     JSON.stringify(reattached.map((p) => `${p.cwd}:${String(p.agentConnected)}`)),
   );
 
-  const restoredA = reattached.find((p) => p.cwd === targetA);
+  const restoredA = reattached.find((p) => p.cwd === mainA);
   const restoredAt = mark();
   send({ type: "select_project", projectId: restoredA.projectId });
   const helloRestored = await frameAfter(
@@ -483,9 +531,9 @@ try {
   check(
     "a restored room keeps its project key and serves the graph the old server persisted",
     restoredA.projectId === projectAId &&
-      helloRestored.graph.nodes.some((n) => n.id === "auth-service") &&
+      helloRestored.graphs[mainA].nodes.some((n) => n.id === "auth-service") &&
       helloRestored.session.agentConnected === true,
-    `${restoredA.projectId} vs ${projectAId}; ${JSON.stringify(helloRestored.graph.nodes.map((n) => n.id))}`,
+    `${restoredA.projectId} vs ${projectAId}; ${JSON.stringify(helloRestored.graphs[mainA]?.nodes.map((n) => n.id))}`,
   );
 
   // --- 11. the same rooms with no agent anywhere ----------------------------
@@ -506,11 +554,11 @@ try {
     "both projects come back agentless after a restart with no agents",
     aloneHello.projects.length === 2 &&
       aloneHello.projects.every((p) => p.agentConnected === false) &&
-      [targetA, targetB].every((cwd) => aloneHello.projects.some((p) => p.cwd === cwd)),
+      [mainA, mainB].every((cwd) => aloneHello.projects.some((p) => p.cwd === cwd)),
     JSON.stringify(aloneHello.projects.map((p) => `${p.cwd}:${String(p.agentConnected)}`)),
   );
 
-  const agentlessIdA = aloneHello.projects.find((p) => p.cwd === targetA)?.projectId;
+  const agentlessIdA = aloneHello.projects.find((p) => p.cwd === mainA)?.projectId;
   const joinAt = mark();
   send({ type: "select_project", projectId: agentlessIdA });
   const agentlessA = await frameAfter(
@@ -520,7 +568,7 @@ try {
   );
 
   const refusedAloneAt = mark();
-  send({ type: "utterance", referent: null, text: "anyone survived the restart?" });
+  send({ type: "utterance", worktree: mainA, referent: null, text: "anyone survived the restart?" });
   const refusedAlone = await frameAfter(
     refusedAloneAt,
     (f) => f.type === "error",
@@ -532,21 +580,21 @@ try {
     refusedAlone.message,
   );
 
-  // the snapshots are the room's, not the agent's: two of them must still diff
-  const revs = (agentlessA.revisions ?? []).map((r) => r.rev).sort((a, b) => a - b);
+  // the snapshots are the variation's, not the agent's: two of them must still diff
+  const revs = (agentlessA.revisions[mainA] ?? []).map((r) => r.rev).sort((a, b) => a - b);
   const diffAt = mark();
-  if (revs.length >= 2) send({ type: "diff", revA: revs[0], revB: revs[1] });
+  if (revs.length >= 2) send({ type: "diff", worktree: mainA, revA: revs[0], revB: revs[1] });
   const delta =
     revs.length < 2
       ? null
       : await frameAfter(
           diffAt,
-          (f) => f.type === "delta" && f.delta.revA === revs[0] && f.delta.revB === revs[1],
+          (f) => f.type === "delta" && f.worktree === mainA && f.delta.revA === revs[0] && f.delta.revB === revs[1],
           "delta over the restored revisions",
           5_000,
         ).catch(() => null);
   check(
-    "diff over a restored room's two oldest revisions is answered from the snapshots on disk",
+    "diff over a restored room's two oldest revisions is answered from the stored snapshots",
     delta !== null,
     `revisions=${revs.join(",")}`,
   );

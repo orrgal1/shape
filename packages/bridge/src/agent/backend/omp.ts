@@ -1,263 +1,250 @@
 /**
- * omp adapter: `omp --mode rpc` over JSONL (rpc.md protocol v1) behind the
- * Backend seam. Everything omp-frame-shaped lives here — lifecycle frames,
- * text-delta coalescing, the host tool round-trip, argument projection.
+ * omp adapter: the real interactive TUI, in a real terminal, with Shape's
+ * extension loaded into it.
+ *
+ * `omp --extension <packages/link/src/omp-extension.ts>` is the whole
+ * integration. The extension dials the loopback link (`SHAPE_LINK`), greets
+ * with `hello`, registers the canvas tool, forwards every omp event as an
+ * `AgentEvent`, and turns the frames this adapter sends — `deliver`, `abort`,
+ * `autonomous` — into session actions. So this file holds almost no protocol:
+ * it composes an argv, waits for the greeting, and speaks the link.
+ *
+ * Two things do not ride the link, by omp's own design: the approval mode
+ * (only `--approval-mode` at launch changes it) and the session to resume
+ * (`--resume`). Both are therefore argv, decided once when the session starts.
  */
 
-import { RpcClient } from "../rpc.ts";
-import type { RpcFrame } from "../rpc.ts";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { BackendCapabilities } from "../../../../shared/src/index.ts";
-import type { Backend, BackendEvents, BackendState } from "./types.ts";
+import type { LinkServerMsg } from "../../../../shared/src/link.ts";
+import type { LinkHello } from "../external.ts";
+import type { Launched } from "../launcher/types.ts";
+import type { Backend, BackendEvents, BackendStart } from "./types.ts";
 
+/**
+ * The extension's path, not its import: the bridge must run against a checkout
+ * where packages/link is present but not built or importable from here, and
+ * omp loads a `.ts` file directly.
+ * `<repo>/packages/bridge/src/agent/backend/omp.ts` -> repo.
+ */
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "..");
+const OMP_EXTENSION = join(REPO_ROOT, "packages", "link", "src", "omp-extension.ts");
+
+/**
+ * How long a launched omp gets to greet. Generous because this covers the TUI
+ * coming up, the extension loading and the socket dialling on a cold machine;
+ * past it, something is wrong that waiting will not fix.
+ */
+const HELLO_TIMEOUT_MS = 60_000;
+
+/** a `deliver` the session never acknowledged is a delivery nobody can trust */
+const DELIVER_TIMEOUT_MS = 30_000;
+
+/**
+ * What omp can do before it has said so. `hello.capabilities` refines
+ * `steerMidTurn`/`hostTool` — a build with no `sendUserMessage` cannot steer,
+ * and one where the tool failed to register has no canvas — and the launcher
+ * decides where the terminal is.
+ */
 const CAPABILITIES: BackendCapabilities = {
   steerMidTurn: true,
   hostTool: true,
   events: "native",
   resume: true,
-  terminal: "shell",
+  terminal: "pane",
 };
-
-/** Path-ish tokens out of a tool's (truncated) argument projection. */
-function argPaths(args: unknown): string[] {
-  if (args === null || typeof args !== "object") return [];
-  const tokens: string[] = [];
-  for (const value of Object.values(args)) {
-    if (typeof value !== "string") continue;
-    for (const token of value.split(/[\s'"`,;:()]+/)) {
-      if (token.length > 0) tokens.push(token);
-    }
-  }
-  return tokens;
-}
-
-function primaryArg(args: unknown): string {
-  if (args === null || typeof args !== "object") return "";
-  for (const key of ["path", "file", "command", "pattern", "query", "url"]) {
-    if (key in args) {
-      const value: unknown = Reflect.get(args, key);
-      if (typeof value === "string") return value.length > 120 ? `${value.slice(0, 117)}...` : value;
-    }
-  }
-  return "";
-}
 
 export class OmpBackend implements Backend {
   readonly id = "omp";
-  readonly label = "omp";
-  readonly capabilities = CAPABILITIES;
+  readonly label = "oh-my-pi";
+
+  /** the executable and its leading args (`--omp "<cmd ...>"`), argv[0] first */
   readonly #command: string[];
-  #rpc: RpcClient | null = null;
+  #capabilities: BackendCapabilities = CAPABILITIES;
   #events: BackendEvents | null = null;
-  /** text deltas of the message in flight; flushed on message_end/turn_end */
-  #assistant = "";
+  #launched: Launched | null = null;
+  /** the greeted link client's own channel: how this adapter talks to omp */
+  #send: ((msg: LinkServerMsg) => void) | null = null;
+  #sessionId: string | null = null;
+  #model: { provider: string; id: string } | null = null;
+  #autonomous = false;
+  #disposed = false;
+  /** resolved by the first `hello`; `start` returns on it */
+  #greeted: PromiseWithResolvers<void> | null = null;
+  #deliverSeq = 0;
+  /** `deliver` ids waiting for their receipt */
+  readonly #inflight = new Map<string, { settle: () => void; fail: (err: Error) => void }>();
 
   constructor(opts: { command: string[] }) {
-    const command = [...opts.command];
-    if (!command.includes("--mode")) command.push("--mode", "rpc");
-    this.#command = command;
+    if (opts.command.length === 0) throw new Error('backend "omp" has no command');
+    this.#command = [...opts.command];
   }
 
-  async start(opts: {
-    cwd: string;
-    events: BackendEvents;
-    canvasTool: { description: string; schema: object };
-    resumeSessionId?: string;
-    bridgeUrl: string;
-  }): Promise<void> {
-    const events = opts.events;
-    this.#events = events;
-    // `--resume <id>` composes with `--mode rpc` (verified against omp 18.1.2:
-    // the resumed session's own id and message count come back from get_state),
-    // and an id already on the command line wins over the one we were handed.
-    const command = [...this.#command];
-    if (
-      opts.resumeSessionId !== undefined &&
-      !command.includes("--resume") &&
-      !command.includes("-r")
-    ) {
-      command.push("--resume", opts.resumeSessionId);
+  get capabilities(): BackendCapabilities {
+    return this.#capabilities;
+  }
+
+  /** The argv a launch runs. Exposed so a smoke can assert the launch line. */
+  argv(opts: { autonomous: boolean; resumeSessionId?: string | undefined }): string[] {
+    const argv = [...this.#command, "--extension", OMP_EXTENSION];
+    // the ONLY way to change omp's approval gate is at launch
+    if (opts.autonomous) argv.push("--approval-mode", "yolo");
+    if (opts.resumeSessionId !== undefined && opts.resumeSessionId.length > 0) {
+      argv.push("--resume", opts.resumeSessionId);
     }
-    const rpc = new RpcClient({
-      command,
+    return argv;
+  }
+
+  async start(opts: BackendStart): Promise<Launched> {
+    this.#events = opts.events;
+    this.#autonomous = opts.autonomous;
+    this.#capabilities = { ...CAPABILITIES, terminal: opts.launcher.terminal };
+    const greeted = Promise.withResolvers<void>();
+    this.#greeted = greeted;
+
+    const launched = await opts.launcher.launch({
       cwd: opts.cwd,
-      onEvent: (frame) => this.#onFrame(frame),
-      onStderr: (text) => process.stderr.write(text),
-      onExit: (code, signal) => events.onExit(`omp exited (code=${code} signal=${signal})`),
+      worktree: opts.worktree,
+      project: opts.project,
+      kind: "omp",
+      argv: this.argv({ autonomous: opts.autonomous, ...(opts.resumeSessionId === undefined ? {} : { resumeSessionId: opts.resumeSessionId }) }),
+      env: { SHAPE_LINK: opts.linkUrl, SHAPE_WORKTREE: opts.worktree },
+      label: `shape ${opts.cwd.split("/").pop() ?? "session"}`,
     });
-    this.#rpc = rpc;
-
-    const ready = await rpc.ready;
-    console.error(`[bridge] omp ready (protocol ${String(ready.protocolVersion ?? "?")})`);
-
-    const tools = await rpc.request({
-      type: "set_host_tools",
-      tools: [
-        {
-          name: "canvas",
-          label: "Canvas",
-          description: opts.canvasTool.description,
-          parameters: opts.canvasTool.schema,
-          loadMode: "essential",
-        },
-      ],
+    this.#launched = launched;
+    // a TUI that dies before greeting (a bad flag, no auth) must not be waited
+    // out for a minute
+    const offExit = launched.onExit((code) => {
+      greeted.reject(new Error(`omp exited before it connected to Shape (code=${String(code)})`));
+      this.#events?.onExit(`omp exited (code=${String(code)})`);
     });
-    if (!tools.success) throw new Error(`set_host_tools failed: ${tools.error ?? "unknown"}`);
-    console.error("[bridge] registered host tool: canvas");
+    const timer = setTimeout(() => {
+      greeted.reject(
+        new Error(
+          `omp did not connect to Shape within ${String(HELLO_TIMEOUT_MS / 1000)}s — is the extension at ${OMP_EXTENSION} loading?`,
+        ),
+      );
+    }, HELLO_TIMEOUT_MS);
 
-    // A session that is already mid-turn when we attach must not look idle.
-    const data = await this.#getState();
-    if (data !== null && typeof data === "object") {
-      if ("isCompacting" in data && data.isCompacting === true) events.onAgentState("compacting");
-      else if ("isStreaming" in data && data.isStreaming === true) events.onAgentState("streaming");
+    try {
+      await greeted.promise;
+    } catch (err) {
+      offExit();
+      clearTimeout(timer);
+      // the session is unusable and nobody asked for a terminal full of it
+      await launched.kill().catch(() => undefined);
+      this.#launched = null;
+      throw err;
     }
+    clearTimeout(timer);
+    return launched;
   }
 
-  async state(): Promise<BackendState> {
-    const data = await this.#getState();
-    const state: BackendState = { streaming: false, sessionId: null, sessionName: null, model: null };
-    if (data === null || typeof data !== "object") return state;
-    if ("isStreaming" in data && data.isStreaming === true) state.streaming = true;
-    if ("sessionId" in data && typeof data.sessionId === "string") state.sessionId = data.sessionId;
-    if ("sessionName" in data && typeof data.sessionName === "string") state.sessionName = data.sessionName;
-    if ("model" in data && data.model !== null && typeof data.model === "object") {
-      const model = data.model;
-      if ("provider" in model && typeof model.provider === "string" && "id" in model && typeof model.id === "string") {
-        state.model = { provider: model.provider, id: model.id };
-      }
-    }
-    return state;
+  session(): { sessionId: string | null; model: { provider: string; id: string } | null } {
+    return { sessionId: this.#sessionId, model: this.#model };
   }
 
+  /**
+   * Put an utterance into the session and wait for the extension's receipt:
+   * only then has omp really taken it (a prompt while the session is mid-turn
+   * comes back `queued`). The id is the adapter's own — the room's deliver id
+   * is a different namespace and the link never sees it.
+   */
   async send(message: string, mode: "prompt" | "steer"): Promise<void> {
-    const res = await this.#live().request({ type: mode, message });
-    if (!res.success) throw new Error(`${mode} failed: ${res.error ?? "unknown"}`);
+    const send = this.#send;
+    if (send === null) throw new Error("the omp session is not connected to Shape");
+    const id = `d-${String(++this.#deliverSeq)}`;
+    const { promise, resolve: settle, reject: fail } = Promise.withResolvers<void>();
+    const timer = setTimeout(() => {
+      this.#inflight.delete(id);
+      fail(new Error(`the omp session did not acknowledge the message within ${String(DELIVER_TIMEOUT_MS / 1000)}s`));
+    }, DELIVER_TIMEOUT_MS);
+    this.#inflight.set(id, {
+      settle: () => {
+        clearTimeout(timer);
+        settle();
+      },
+      fail: (err) => {
+        clearTimeout(timer);
+        fail(err);
+      },
+    });
+    send({ type: "deliver", id, body: message, mode });
+    await promise;
   }
 
   async abort(): Promise<void> {
-    const res = await this.#live().request({ type: "abort" });
-    if (!res.success) throw new Error(`abort failed: ${res.error ?? "unknown"}`);
+    const send = this.#send;
+    if (send === null) throw new Error("the omp session is not connected to Shape");
+    send({ type: "abort" });
   }
 
-  /** Expected shutdown: stop whatever turn is running, then close stdin. */
+  /**
+   * Best effort by omp's own contract: the extension's `tool_call` hook can
+   * allow a call, but the TUI's approval gate is a separate stage that only
+   * `--approval-mode` at launch opens. A session started with autonomous off
+   * therefore still asks the user, and this tells the extension to stop adding
+   * its own opinion on top.
+   */
+  async setAutonomous(on: boolean): Promise<void> {
+    this.#autonomous = on;
+    this.#send?.({ type: "autonomous", on });
+  }
+
   async dispose(): Promise<void> {
-    const rpc = this.#rpc;
-    this.#rpc = null;
+    this.#disposed = true;
+    const launched = this.#launched;
+    this.#launched = null;
+    this.#send = null;
     this.#events = null;
-    if (rpc === null) return;
-    rpc.send({ type: "abort" });
-    await rpc.dispose();
-  }
-
-  #live(): RpcClient {
-    const rpc = this.#rpc;
-    if (rpc === null) throw new Error("omp is not running");
-    return rpc;
-  }
-
-  async #getState(): Promise<unknown> {
-    const res = await this.#live().request({ type: "get_state" });
-    if (!res.success) throw new Error(`get_state failed: ${res.error ?? "unknown"}`);
-    return res.data;
-  }
-
-  // -------------------------------------------------------------------------
-  // omp frames -> BackendEvents
-  // -------------------------------------------------------------------------
-
-  #onFrame(frame: RpcFrame): void {
-    const events = this.#events;
-    if (events === null) return;
-    switch (frame.type) {
-      case "agent_start":
-        events.onAgentState("streaming");
-        return;
-      case "agent_end":
-        // a non-terminal agent_end is a sub-agent finishing, not the turn
-        if (frame.isTerminal !== false) events.onAgentState("idle");
-        return;
-      case "auto_compaction_start":
-        events.onAgentState("compacting");
-        return;
-      case "auto_compaction_end":
-        events.onAgentState("streaming");
-        return;
-      case "message_update":
-        this.#onDelta(frame.assistantMessageEvent);
-        return;
-      case "message_end":
-        this.#flushAssistant(events);
-        return;
-      case "turn_end":
-        this.#flushAssistant(events);
-        events.onTurnEnd();
-        return;
-      case "tool_execution_start": {
-        const args = "args" in frame ? frame.args : frame.input;
-        events.onToolStart({
-          name: typeof frame.toolName === "string" ? frame.toolName : "tool",
-          paths: argPaths(args),
-          summary: primaryArg(args),
-        });
-        return;
-      }
-      case "tool_execution_end":
-        events.onToolEnd({
-          name: typeof frame.toolName === "string" ? frame.toolName : "tool",
-          isError: frame.isError === true,
-        });
-        return;
-      case "host_tool_call":
-        void this.#onHostToolCall(frame, events);
-        return;
-      case "extension_error":
-        events.onError(`extension error: ${String(frame.error ?? "unknown")}`);
-        return;
-      case "bridge_parse_error":
-        console.error(`[bridge] unparseable omp frame: ${String(frame.line)}`);
-        return;
-      default:
-        return;
-    }
-  }
-
-  #onDelta(event: unknown): void {
-    if (event === null || typeof event !== "object") return;
-    if (!("type" in event) || event.type !== "text_delta") return;
-    if (!("delta" in event) || typeof event.delta !== "string") return;
-    this.#assistant += event.delta;
-  }
-
-  #flushAssistant(events: BackendEvents): void {
-    const text = this.#assistant.trim();
-    this.#assistant = "";
-    if (text.length > 0) events.onAssistantText(text);
-  }
-
-  async #onHostToolCall(frame: RpcFrame, events: BackendEvents): Promise<void> {
-    const id = frame.id;
-    if (typeof id !== "string") return;
-
-    if (frame.toolName !== "canvas") {
-      this.#rpc?.send({
-        type: "host_tool_result",
-        id,
-        isError: true,
-        result: { content: [{ type: "text", text: `unknown host tool "${String(frame.toolName)}"` }] },
-      });
-      return;
-    }
-
-    let outcome: { text: string; isError: boolean };
-    try {
-      outcome = await events.onCanvasCall(frame.arguments);
-    } catch (err) {
-      outcome = { text: `canvas call failed: ${String(err)}`, isError: true };
-    }
-    this.#rpc?.send({
-      type: "host_tool_result",
-      id,
-      ...(outcome.isError ? { isError: true } : {}),
-      result: { content: [{ type: "text", text: outcome.text }] },
+    const inflight = [...this.#inflight.values()];
+    this.#inflight.clear();
+    for (const entry of inflight) entry.fail(new Error("the omp session was closed"));
+    if (launched === null) return;
+    await launched.kill().catch((err: unknown) => {
+      console.error(`[bridge] could not close the omp session: ${err instanceof Error ? err.message : String(err)}`);
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // the loopback link: the harness itself talking
+  // -------------------------------------------------------------------------
+
+  /**
+   * omp greeted us. This is what "the session started" means for this adapter:
+   * the session id and model are known, the extension's real capabilities
+   * replace the assumed ones, and the socket it greeted on is the channel
+   * every later `deliver` goes out on (a reconnect re-greets and replaces it).
+   */
+  onHello(hello: LinkHello, send: (msg: LinkServerMsg) => void): void {
+    if (this.#disposed) return;
+    this.#send = send;
+    this.#sessionId = hello.sessionId;
+    this.#model = hello.model;
+    this.#capabilities = {
+      ...this.#capabilities,
+      steerMidTurn: hello.capabilities.steer,
+      hostTool: hello.capabilities.tool,
+    };
+    this.#greeted?.resolve();
+    this.#greeted = null;
+    // the launch flag opened the gate; this tells the extension to stop
+    // second-guessing each call while it is open
+    if (this.#autonomous) send({ type: "autonomous", on: true });
+  }
+
+  onDelivered(receipt: { id: string; mode: "prompt" | "steer"; queued: boolean }): void {
+    const entry = this.#inflight.get(receipt.id);
+    if (entry === undefined) return;
+    this.#inflight.delete(receipt.id);
+    entry.settle();
+  }
+
+  /** The session ended on its own (the user quit the TUI, omp shut down). */
+  onBye(reason: string): void {
+    if (this.#disposed) return;
+    this.#send = null;
+    this.#events?.onExit(`the omp session ended: ${reason}`);
   }
 }

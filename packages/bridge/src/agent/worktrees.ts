@@ -1,12 +1,19 @@
 /**
- * Git worktrees (CONTRACTS.md § Worktrees): each worktree of the target's repo is
- * an architecture variation with its own canvas state. Detection is read-only;
- * toggling a worktree is just `switch_project` to its path.
+ * Git worktrees (CONTRACTS.md § Worktrees on one canvas): every worktree of the
+ * target's repo is an architecture variation with its own canvas state, and all
+ * of them live on one canvas because they share one project key.
+ *
+ * This module is the producer of the two identities everything else keys on:
+ * the worktree id (the realpath of a worktree directory) and the repo identity
+ * (the common dir the project key is derived from, plus the main worktree the
+ * project is labelled and stored under). Detection is read-only.
  */
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { hostname } from "node:os";
+import { join, resolve } from "node:path";
 import type { WorktreeInfo } from "../../../shared/src/index.ts";
 
 const EXCLUDE_LINE = ".shape/";
@@ -66,8 +73,12 @@ function parsePorcelain(stdout: string): Stanza[] {
 }
 
 /**
- * Worktrees of the target's repo, with `current` on the one the bridge targets
- * (the deepest worktree containing the target dir). `[]` for non-git targets.
+ * Every worktree of the target's repo, in git's own order — the main worktree
+ * (the one owning the common dir) first. `[]` for non-git targets.
+ *
+ * `id` is the realpath of the worktree directory: the same directory reached
+ * through a symlink, a relative path or `/private/var` vs `/var` has to be ONE
+ * worktree, or its canvas would be stored twice.
  */
 export async function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
   const stdout = await git(cwd, ["worktree", "list", "--porcelain"]);
@@ -76,25 +87,71 @@ export async function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
   const stanzas = parsePorcelain(stdout);
   if (stanzas.length === 0) return [];
 
-  const target = await realpathOr(resolve(cwd));
   const resolved = await Promise.all(stanzas.map((s) => realpathOr(s.path)));
 
-  let currentIndex = -1;
-  let bestLength = -1;
-  resolved.forEach((path, index) => {
-    const contains = path === target || target.startsWith(`${path}${sep}`);
-    if (contains && path.length > bestLength) {
-      bestLength = path.length;
-      currentIndex = index;
-    }
-  });
-
   return stanzas.map((stanza, index) => ({
+    id: resolved[index] ?? stanza.path,
     path: resolved[index] ?? stanza.path,
     branch: stanza.branch,
     head: stanza.head,
-    current: index === currentIndex,
   }));
+}
+
+/** What one repo is, whichever of its worktrees the agent was pointed at. */
+export interface RepoIdentity {
+  /**
+   * Realpath of the repository's common dir (the `.git` of the main worktree).
+   * Every worktree of the repo reports the same one, which is why the project
+   * key is derived from it. Null for a non-git target.
+   */
+  commonDir: string | null;
+  /**
+   * Realpath of the main worktree — the project's `cwd`, its label and the
+   * primary copy when the canvas merges variations. For a non-git target it is
+   * just the target directory.
+   */
+  main: string;
+}
+
+/**
+ * Resolve the repo `cwd` belongs to. Git reports the common dir relative to
+ * the worktree for a plain checkout and absolute for a linked one, so it is
+ * resolved against `cwd` either way; the main worktree is the first entry git
+ * lists, which is the one that owns that common dir.
+ */
+export async function repoIdentity(cwd: string): Promise<RepoIdentity> {
+  const target = await realpathOr(resolve(cwd));
+  const raw = await git(cwd, ["rev-parse", "--git-common-dir"]);
+  const trimmed = raw === null ? "" : raw.trim();
+  if (trimmed.length === 0) return { commonDir: null, main: target };
+
+  const commonDir = await realpathOr(resolve(cwd, trimmed));
+  const worktrees = await listWorktrees(cwd);
+  const main = worktrees[0]?.id;
+  return { commonDir, main: main ?? target };
+}
+
+/**
+ * The project key: sha256 of this machine's name and the repo's common dir, so
+ * every worktree of one repo lands on one canvas and two checkouts at the same
+ * path on two laptops stay two projects. A non-git target has no common dir and
+ * is keyed by its own directory instead.
+ */
+export function projectKey(identity: RepoIdentity): string {
+  return createHash("sha256")
+    .update(`${hostname()}:${identity.commonDir ?? identity.main}`)
+    .digest("hex");
+}
+
+/**
+ * The key a Shape from before `repoIdentity` existed would have derived for the
+ * worktree at `path`: machine + the DIRECTORY, one project per checkout. Kept
+ * verbatim because every canvas drawn before the common-dir key is stored under
+ * one of these, and the server adopts them onto `projectKey` (CONTRACTS.md
+ * § Worktrees on one canvas). `path` is already a worktree id, i.e. a realpath.
+ */
+export function legacyProjectKey(path: string): string {
+  return createHash("sha256").update(`${hostname()}:${path}`).digest("hex");
 }
 
 /**

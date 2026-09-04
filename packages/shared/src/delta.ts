@@ -40,7 +40,13 @@ export function canonicalJson(value: unknown): string {
   return scalar === undefined ? "null" : scalar;
 }
 
-function canonicalNode(node: IntentNode): IntentNode {
+/**
+ * Canonical copy of one node. Exported because the web canvas merges the same
+ * node across worktrees and has to answer "is this the same bubble here as
+ * there": that question is exactly this canonicalization, and a second, nearly
+ * identical one in the client would be a second answer to it.
+ */
+export function canonicalNode(node: IntentNode): IntentNode {
   const out: IntentNode = {
     id: node.id,
     parentId: node.parentId ?? null,
@@ -51,10 +57,13 @@ function canonicalNode(node: IntentNode): IntentNode {
   if (node.status !== undefined) out.status = node.status;
   if (node.modelRole !== undefined) out.modelRole = node.modelRole;
   if (node.codeRefs !== undefined) out.codeRefs = [...node.codeRefs].sort(codepointOrder);
-  // "build" is the default layer, so canonical form spells out only "product":
-  // a node written before layers existed must snapshot identically to one marked build.
-  if (node.layer === "product") out.layer = "product";
+  // "build" is the default layer, so canonical form spells out only the other
+  // three: a node written before layers existed must snapshot identically to one
+  // marked build.
+  if (node.layer === "product" || node.layer === "infra" || node.layer === "correctness") out.layer = node.layer;
   if (node.layer === "product" && node.realizes !== undefined) out.realizes = [...node.realizes].sort(codepointOrder);
+  if (node.layer === "infra" && node.hosts !== undefined) out.hosts = [...node.hosts].sort(codepointOrder);
+  if (node.layer === "correctness" && node.verifies !== undefined) out.verifies = [...node.verifies].sort(codepointOrder);
   return out;
 }
 
@@ -71,9 +80,9 @@ function canonicalEdge(edge: GraphEdge): GraphEdge {
 
 /**
  * Deep canonical copy of a doc's intent layer: nodes and edges sorted by id,
- * stable key order per object, undefined optionals omitted, `codeRefs` and
- * `realizes` sorted, and the default "build" layer left implicit.
- * `at` defaults to now.
+ * stable key order per object, undefined optionals omitted, `codeRefs`,
+ * `realizes`, `hosts` and `verifies` sorted, and the default "build" layer left
+ * implicit.
  */
 export function snapshotGraph(doc: Pick<GraphDoc, "rev" | "nodes" | "edges">, at?: string): GraphSnapshot {
   return {

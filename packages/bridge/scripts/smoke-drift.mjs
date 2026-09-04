@@ -7,6 +7,9 @@
  * 9 reality packages, 17 reality edges). Its stored `drift` is what the old
  * per-descendant rule produced, so it doubles as the "before" number.
  *
+ * Four sections: the real playground graph, undeclared dependencies, phantom
+ * dependencies, and refs naming a part inside a file (29 checks in total).
+ *
  * Usage (from packages/bridge): node scripts/smoke-drift.mjs
  */
 
@@ -236,6 +239,70 @@ const d8 = computeDrift(
   noRealityEdge,
 );
 check("reverse rule stays quiet before building", noteCount(d8) === 0, JSON.stringify(d8));
+
+// ---------------------------------------------------------------------------
+// 4. Synthetic: a ref into a file whose part is gone
+// ---------------------------------------------------------------------------
+
+/** a reality layer that read exactly one file, and found these parts in it */
+const withSymbols = (names) => ({
+  ...syntheticReality,
+  edges: [],
+  symbols: names.map((name, i) => ({
+    id: `s:apps/api/src/room.ts#${name}`,
+    file: "apps/api/src/room.ts",
+    name,
+    kind: "function",
+    exported: true,
+    line: 10 + i,
+    pkg: "r:@x/api",
+  })),
+  infra: [],
+});
+
+const symbolClaim = (ref, phase = "built") => ({
+  nodes: [node("the-service", null, "built", ["apps/api"]), node("the-room", "the-service", phase, [ref])],
+  edges: [],
+});
+
+const gone = computeDrift(symbolClaim("apps/api/src/room.ts#Room"), withSymbols(["openRoom"]));
+check(
+  "a ref naming a part the file no longer declares yields one note, on the claiming bubble",
+  noteCount(gone) === 1 &&
+    (gone["the-room"] ?? [""])[0] ===
+      "names a part of the code that is no longer there: Room in apps/api/src/room.ts",
+  JSON.stringify(gone),
+);
+const present = computeDrift(symbolClaim("apps/api/src/room.ts#Room"), withSymbols(["Room", "openRoom"]));
+check(
+  "the note disappears once the part is back in the file",
+  noteCount(present) === 0,
+  JSON.stringify(present),
+);
+const unread = computeDrift(symbolClaim("apps/api/src/other.ts#Room"), withSymbols(["openRoom"]));
+check(
+  "a file reality never read says nothing either way: no note",
+  noteCount(unread) === 0,
+  JSON.stringify(unread),
+);
+const early = computeDrift(symbolClaim("apps/api/src/room.ts#Room", "concept"), withSymbols(["openRoom"]));
+check(
+  "a part that is not built yet is not drift",
+  noteCount(early) === 0,
+  JSON.stringify(early),
+);
+const plainPath = computeDrift(symbolClaim("apps/api/src/room.ts"), withSymbols(["openRoom"]));
+check(
+  "a plain path ref is never judged against the parts of a file",
+  noteCount(plainPath) === 0,
+  JSON.stringify(plainPath),
+);
+const noSymbols = computeDrift(symbolClaim("apps/api/src/room.ts#Room"), { ...syntheticReality, edges: [] });
+check(
+  "a reality layer from a bridge that never read parts produces no symbol notes",
+  noteCount(noSymbols) === 0,
+  JSON.stringify(noSymbols),
+);
 
 // ---------------------------------------------------------------------------
 

@@ -5,17 +5,28 @@
  */
 import {
   PHASES,
+  capabilityVerification,
+  hostsOf,
   layerOf,
-  productRootOf,
+  linkGapsOf,
   realizersOf,
+  runsOnOf,
   servesOf,
+  verifiedOf,
+  verificationOf,
+  verifiersOf,
   type GraphDoc,
   type GraphEdge,
   type IntentNode,
   type Layer,
+  type LinkGap,
   type Phase,
+  type RealitySymbol,
+  type RealityVerification,
+  type WorktreeInfo,
 } from "../../shared/src/index.ts";
-import type { TranscriptEntry } from "./store.ts";
+import { coveringVerification, symbolsInside } from "./layer.ts";
+import { branchOf, toneOf, type TranscriptEntry } from "./store.ts";
 
 /** transcript lines shown per subject before older ones are dropped */
 const RELEVANT_LINES = 4;
@@ -78,7 +89,51 @@ export interface NodeTldr {
    */
   realizers: NeighbourLink[];
   serves: NeighbourLink[];
-  /** a capability past `concept` with nothing realizing it */
+  /**
+   * Where this bubble runs, whichever end is selected: for a build bubble the
+   * infrastructure its own `hosts` links name (its ancestors' included); for a
+   * capability the same list rolled up through everything that realizes it,
+   * because "where does this promise run" is a question about its build side;
+   * for a piece of infrastructure, the parts that run on it.
+   */
+  runsOn: NeighbourLink[];
+  /**
+   * What attests this bubble, read from whichever end is selected. On a build
+   * bubble: the verifications whose `verifies` names it or an ancestor — the
+   * authored half. On a verification: the parts it attests, which is the same
+   * link read backwards. Only one of the two is ever populated.
+   */
+  verifiers: NeighbourLink[];
+  verifies: NeighbourLink[];
+  /**
+   * The mechanical half, build bubbles only: extracted verification whose
+   * `covers` reaches this bubble's own or an ancestor's code. Nobody wrote these
+   * down, so they are not chips to follow — they are evidence, listed with the
+   * files they were read from.
+   */
+  covering: readonly RealityVerification[];
+  /**
+   * A capability's verification rolled up over its realizers, and — when that
+   * is not "verified" — exactly which of them nothing attests, because "partly
+   * verified" is only useful if it says which part is missing. "none" means the
+   * capability names no build bubble at all, which `unrealized` already covers.
+   */
+  verification: "verified" | "partial" | "unverified" | "none";
+  unverifiedParts: NeighbourLink[];
+  /**
+   * The mechanical inside of a leaf build bubble: every class and function of
+   * its own code that no bubble has claimed, in full. The canvas caps what it
+   * draws; the panel is where the whole list belongs.
+   */
+  inside: readonly RealitySymbol[];
+  /**
+   * What this bubble should be connected to across the layers and is not, in
+   * `linkGapsOf`'s order. The panel spends a row on each one that is not
+   * `unrealized`, saying which link would close it — the loud one keeps the
+   * block it already has.
+   */
+  gaps: readonly LinkGap[];
+  /** a capability past `concept` with nothing realizing it; read out of `gaps` */
   unrealized: boolean;
   drift: readonly string[];
   lines: TranscriptEntry[];
@@ -91,6 +146,61 @@ export interface EdgeTldr {
   /** drift notes on either endpoint — the pair is what the user is steering */
   drift: { nodeId: string; note: string }[];
   lines: TranscriptEntry[];
+}
+
+/** what one bubble says in one variation, for the side panel's "where" section */
+export interface WherePlace {
+  worktree: string;
+  /** what a person calls the variation: its branch */
+  branch: string;
+  /** colour slot, so the row agrees with the pip on the bubble */
+  tone: number;
+  /** this variation has the bubble at all */
+  present: boolean;
+  phase: Phase | null;
+  status: string | null;
+}
+
+export interface WhereInput {
+  /** every variation's canvas, keyed by worktree id */
+  graphs: Record<string, GraphDoc>;
+  worktrees: readonly WorktreeInfo[];
+  /** the variations on the canvas, or null for all of them */
+  filter: ReadonlySet<string> | null;
+  /** every variation's id in colour order */
+  worktreeIds: readonly string[];
+  nodeId: string;
+}
+
+/**
+ * Where one bubble stands, variation by variation — but only when they do not
+ * all say the same thing. A canvas merging three branches that agree about a
+ * bubble has nothing to report about it: the pips already say it is in all
+ * three, and a section repeating "building" three times would be noise. A
+ * different phase, a different status, or a variation that does not have the
+ * bubble at all is the case this section exists for.
+ */
+export function nodeWhere({ graphs, worktrees, filter, worktreeIds, nodeId }: WhereInput): WherePlace[] {
+  const shown = worktrees.filter((entry) => filter === null || filter.has(entry.id));
+  if (shown.length < 2) return [];
+  const places: WherePlace[] = [];
+  for (const entry of shown) {
+    const node = graphs[entry.id]?.nodes.find((item) => item.id === nodeId);
+    places.push({
+      worktree: entry.id,
+      branch: branchOf(worktrees, entry.id),
+      tone: toneOf(worktreeIds, entry.id),
+      present: node !== undefined,
+      phase: node?.phase ?? null,
+      status: node?.status ?? null,
+    });
+  }
+  const first = places[0];
+  if (first === undefined) return [];
+  const agree = places.every(
+    (place) => place.present === first.present && place.phase === first.phase && place.status === first.status,
+  );
+  return agree ? [] : places;
 }
 
 function link(node: IntentNode): NeighbourLink {
@@ -209,9 +319,10 @@ export function nodeTldr(
     });
   }
 
-  // The cross-layer link is read from the selected end only: a capability lists
-  // what makes it real, a build bubble lists what it is part of. Both lists come
-  // from the same `realizes` field — there is no second relation to keep in step.
+  // The cross-layer links are read from the selected end only: a capability
+  // lists what makes it real, a build bubble lists what it is part of. Both
+  // lists come from the same `realizes` field — there is no second relation to
+  // keep in step.
   const layer = layerOf(node);
   const realizers: NeighbourLink[] = [];
   const serves: NeighbourLink[] = [];
@@ -227,6 +338,58 @@ export function nodeTldr(
     }
   }
 
+  /**
+   * Where it runs. A capability owns no code, so it can only answer through the
+   * build bubbles that realize it — the same rollup the product layer uses for
+   * activity and drift, deduped because two realizers commonly share one host.
+   */
+  const runsOn: NeighbourLink[] = [];
+  const seenHost = new Set<string>();
+  const addHost = (infra: IntentNode): void => {
+    if (seenHost.has(infra.id)) return;
+    seenHost.add(infra.id);
+    runsOn.push(link(infra));
+  };
+  if (layer === "build") {
+    for (const infra of runsOnOf(doc, nodeId)) addHost(infra);
+  } else if (layer === "product") {
+    for (const id of realizersOf(doc, nodeId)) {
+      for (const infra of runsOnOf(doc, id)) addHost(infra);
+    }
+  } else if (layer === "infra") {
+    // read from the infrastructure end, "runs on" is "runs": the parts on it
+    for (const built of hostsOf(doc, nodeId)) addHost(built);
+  }
+
+  // What attests it, read from whichever end is selected — and on a build
+  // bubble both halves, because a filled shield the panel could not account for
+  // is worse than no shield: the authored verifications, then the extracted
+  // ones whose covers reach this bubble's code.
+  const verifiers: NeighbourLink[] = [];
+  const verifies: NeighbourLink[] = [];
+  if (layer === "build") {
+    for (const check of verifiersOf(doc, nodeId)) verifiers.push(link(check));
+  } else if (layer === "correctness") {
+    for (const part of verifiedOf(doc, nodeId)) verifies.push(link(part));
+  }
+
+  // A promise is only as attested as the parts keeping it, so a capability that
+  // is not fully verified names the parts that are missing: "partly verified"
+  // is only useful when it says which part.
+  const verification = layer === "product" ? capabilityVerification(doc, nodeId) : "none";
+  const unverifiedParts: NeighbourLink[] = [];
+  if (verification === "partial" || verification === "unverified") {
+    for (const id of realizersOf(doc, nodeId)) {
+      const built = byId.get(id);
+      if (built !== undefined && verificationOf(doc, id) === "unverified") unverifiedParts.push(link(built));
+    }
+  }
+
+  // The one reading of "what should this be connected to and is not" — the same
+  // call the canvas and the agent's tool receipt make, so all three say the
+  // same thing about the same bubble.
+  const gaps = linkGapsOf(doc, nodeId);
+
   return {
     node,
     layer,
@@ -236,13 +399,15 @@ export function nodeTldr(
     relations,
     realizers,
     serves,
-    // the product itself spans the whole build layer, so it is never asked to
-    // name realizers — only the capabilities under it make that claim
-    unrealized:
-      layer === "product" &&
-      productRootOf(doc)?.id !== nodeId &&
-      realizers.length === 0 &&
-      (node.phase === "component" || node.phase === "building" || node.phase === "built"),
+    runsOn,
+    verifiers,
+    verifies,
+    covering: coveringVerification(doc, nodeId),
+    verification,
+    unverifiedParts,
+    inside: symbolsInside(doc, nodeId),
+    gaps,
+    unrealized: gaps.includes("unrealized"),
     drift: doc.drift[nodeId] ?? [],
     lines: linesAbout(node, transcript),
   };

@@ -6,6 +6,7 @@
  * TypeScript (no enums, no namespaces) and dependency-free.
  */
 
+import type { AgentSession, WorktreeSession } from "./link.ts";
 import type { PtyClientMsg, PtyServerMsg } from "./pty.ts";
 
 export type {
@@ -16,6 +17,7 @@ export type {
   LinkClientMsg,
   LinkServerMsg,
   ServerToAgentMsg,
+  WorktreeSession,
 } from "./link.ts";
 export type { PtyClientMsg, PtyServerMsg } from "./pty.ts";
 
@@ -26,12 +28,37 @@ export type { PtyClientMsg, PtyServerMsg } from "./pty.ts";
 export type Phase = "idea" | "concept" | "component" | "building" | "built" | "failed";
 export type EdgeKind = "depends" | "dataflow" | "relates";
 export type ModelRole = "explore" | "build" | "small";
-export type NodeKind = "ui" | "service" | "api" | "store" | "queue" | "external" | "security";
+export type NodeKind =
+  | "ui"
+  | "service"
+  | "api"
+  | "store"
+  | "queue"
+  | "external"
+  | "security"
+  /** these five read as infrastructure, but any layer may use any kind */
+  | "host"
+  | "database"
+  | "cache"
+  | "cdn"
+  | "ci"
+  /** an automated test suite */
+  | "test"
+  /** an end-to-end or smoke script */
+  | "smoke"
+  /** a static check such as a typecheck or a lint pass */
+  | "check"
+  /** human or manual verification: a checklist, a screenshot review */
+  | "review"
+  /** production monitoring or alerts */
+  | "monitor";
 /**
- * Which half of the canvas a bubble lives on. "product" bubbles are the
- * capabilities a person gets; "build" bubbles are the parts that exist as code.
+ * Which part of the canvas a bubble lives on. "product" bubbles are the
+ * capabilities a person gets; "build" bubbles are the parts that exist as code;
+ * "infra" bubbles are where the code runs and what it leans on outside itself;
+ * "correctness" bubbles are what proves the code correct.
  */
-export type Layer = "product" | "build";
+export type Layer = "product" | "build" | "infra" | "correctness";
 
 export interface IntentNode {
   /** slug: ^[a-z0-9][a-z0-9-]*$ */
@@ -54,6 +81,10 @@ export interface IntentNode {
   layer?: Layer;
   /** product nodes only: ids of BUILD nodes that make this capability real (sorted in canonical form) */
   realizes?: string[];
+  /** infra nodes only: ids of BUILD nodes that run on / use this piece of infrastructure (sorted in canonical form) */
+  hosts?: string[];
+  /** correctness nodes only: ids of BUILD nodes this verification attests (sorted in canonical form) */
+  verifies?: string[];
 }
 
 export interface GraphEdge {
@@ -80,9 +111,68 @@ export interface RealityEdge {
   target: string;
 }
 
+/**
+ * One top-level class or function the bridge found in the code — the mechanical
+ * "inside" of a leaf build bubble, addressable as the `${file}#${name}` codeRef
+ * a child bubble uses to claim it.
+ */
+export interface RealitySymbol {
+  /** `s:${file}#${name}` */
+  id: string;
+  /** workspace-relative file it is declared in */
+  file: string;
+  name: string;
+  kind: "class" | "function";
+  exported: boolean;
+  /** 1-based declaration line */
+  line: number;
+  /** reality package id (`r:${pkgName}`) the file belongs to, null outside every package */
+  pkg: string | null;
+}
+
+/**
+ * One piece of infrastructure the bridge read out of configuration — a
+ * database, a host, a pipeline. Claimed once some infra bubble's `codeRefs`
+ * cover one of its `evidence` files; unclaimed ones render as ghosts.
+ */
+export interface RealityInfra {
+  /** `i:${slug}` */
+  id: string;
+  label: string;
+  kind: NodeKind;
+  /** workspace-relative config files it was read from */
+  evidence: string[];
+  /** one plain-English line, e.g. "a Postgres database from docker-compose.yml" */
+  hint: string;
+}
+
+/**
+ * One piece of verification the bridge found in the code — a test suite, a
+ * smoke script, a static check, a pipeline. Claimed once some correctness
+ * bubble's `codeRefs` cover one of its `evidence` files, exactly as an infra
+ * item is; `covers` is the other half, the root-relative files and directories
+ * the verification actually exercises, which is how a build bubble that no
+ * correctness bubble names can still read as verified.
+ */
+export interface RealityVerification {
+  /** `v:${slug}` */
+  id: string;
+  label: string;
+  kind: NodeKind;
+  /** workspace-relative files it was read from (the test files, the config, the workflow) */
+  evidence: string[];
+  /** one plain-English line, e.g. "34 test files under packages/bridge" */
+  hint: string;
+  /** workspace-relative files/dirs the verification exercises */
+  covers: string[];
+}
+
 export interface RealityLayer {
   nodes: RealityNode[];
   edges: RealityEdge[];
+  symbols: RealitySymbol[];
+  infra: RealityInfra[];
+  verification: RealityVerification[];
   /** ISO timestamp, null before first extraction */
   extractedAt: string | null;
   /** git HEAD the layer was derived from */
@@ -98,6 +188,15 @@ export interface GraphDoc {
   edges: GraphEdge[];
   reality: RealityLayer;
   drift: DriftMap;
+  /**
+   * When this canvas was last mapped against the code, and the git HEAD it was
+   * mapped at: written by the server the moment it DELIVERS an onboarding
+   * survey or a catch-up prompt, never when such a turn ends. Delivery is the
+   * honest mark — a turn that fails, or a harness that drops mid-survey, must
+   * not leave the automatic trigger free to deliver the same prompt on every
+   * reconnect. Absent on a canvas nothing ever mapped.
+   */
+  surveyed?: { head: string | null; at: string };
 }
 
 export function emptyGraph(): GraphDoc {
@@ -105,20 +204,26 @@ export function emptyGraph(): GraphDoc {
     rev: 0,
     nodes: [],
     edges: [],
-    reality: { nodes: [], edges: [], extractedAt: null, head: null },
+    reality: { nodes: [], edges: [], symbols: [], infra: [], verification: [], extractedAt: null, head: null },
     drift: {},
   };
 }
 
 // ---------------------------------------------------------------------------
-// Layers: product (capabilities) and build (parts that exist as code)
+// Layers: product (capabilities), build (parts that exist as code),
+// infra (where it runs and what it leans on), correctness (what proves it works)
 // ---------------------------------------------------------------------------
 
-export const LAYERS: readonly Layer[] = ["product", "build"];
+export const LAYERS: readonly Layer[] = ["product", "build", "infra", "correctness"];
+
+/** a `layer` value off the wire is only a layer when it is one of the four */
+function isLayer(value: unknown): value is Layer {
+  return value === "product" || value === "build" || value === "infra" || value === "correctness";
+}
 
 /** A bubble with no `layer` is a build bubble — every graph written before layers existed. */
 export function layerOf(node: Pick<IntentNode, "layer">): Layer {
-  return node.layer === "product" ? "product" : "build";
+  return isLayer(node.layer) ? node.layer : "build";
 }
 
 /**
@@ -160,18 +265,321 @@ export function servesOf(doc: Pick<GraphDoc, "nodes">, buildId: string): string[
   const byId = new Map(doc.nodes.map((n) => [n.id, n]));
   const start = byId.get(buildId);
   if (!start || layerOf(start) !== "build") return [];
-  const chain = new Set<string>();
-  let cur: IntentNode | undefined = start;
-  while (cur && !chain.has(cur.id)) {
-    chain.add(cur.id);
-    cur = cur.parentId === null ? undefined : byId.get(cur.parentId);
-  }
+  const chain = ancestorChain(byId, start);
   const out: string[] = [];
   for (const node of doc.nodes) {
     if (layerOf(node) !== "product" || !node.realizes) continue;
     if (node.realizes.some((id) => chain.has(id))) out.push(node.id);
   }
   return out;
+}
+
+/** a node's own id plus every ancestor id, cycle-safe */
+function ancestorChain(byId: Map<string, IntentNode>, start: IntentNode): Set<string> {
+  const chain = new Set<string>();
+  let cur: IntentNode | undefined = start;
+  while (cur && !chain.has(cur.id)) {
+    chain.add(cur.id);
+    cur = cur.parentId === null ? undefined : byId.get(cur.parentId);
+  }
+  return chain;
+}
+
+/**
+ * The build bubbles that run on a piece of infrastructure: its `hosts` resolved
+ * to existing build nodes, deduped. Returns the nodes rather than ids (unlike
+ * `realizersOf`) because every caller — the "runs N parts" chip, the hosts
+ * drill, the side panel — needs the label and kind right away.
+ */
+export function hostsOf(doc: Pick<GraphDoc, "nodes">, infraId: string): IntentNode[] {
+  const node = doc.nodes.find((n) => n.id === infraId);
+  if (!node || layerOf(node) !== "infra" || !node.hosts) return [];
+  const byId = new Map(doc.nodes.map((n) => [n.id, n]));
+  const out: IntentNode[] = [];
+  for (const id of node.hosts) {
+    const target = byId.get(id);
+    if (!target || layerOf(target) !== "build") continue;
+    if (!out.includes(target)) out.push(target);
+  }
+  return out;
+}
+
+/**
+ * The infrastructure a build node runs on: infra nodes whose `hosts` names it
+ * OR any of its ancestors — infra that runs a parent runs its children, the
+ * same ancestor rule `servesOf` uses.
+ */
+export function runsOnOf(doc: Pick<GraphDoc, "nodes">, buildId: string): IntentNode[] {
+  const byId = new Map(doc.nodes.map((n) => [n.id, n]));
+  const start = byId.get(buildId);
+  if (!start || layerOf(start) !== "build") return [];
+  const chain = ancestorChain(byId, start);
+  const out: IntentNode[] = [];
+  for (const node of doc.nodes) {
+    if (layerOf(node) !== "infra" || !node.hosts) continue;
+    if (node.hosts.some((id) => chain.has(id))) out.push(node);
+  }
+  return out;
+}
+
+/**
+ * The build bubbles a verification attests: its `verifies` resolved to existing
+ * build nodes, deduped. Nodes rather than ids, for the same reason `hostsOf`
+ * returns nodes — the "verifies N parts" chip, the drill and the side panel all
+ * need the label and kind right away.
+ */
+export function verifiedOf(doc: Pick<GraphDoc, "nodes">, verifyId: string): IntentNode[] {
+  const node = doc.nodes.find((n) => n.id === verifyId);
+  if (!node || layerOf(node) !== "correctness" || !node.verifies) return [];
+  const byId = new Map(doc.nodes.map((n) => [n.id, n]));
+  const out: IntentNode[] = [];
+  for (const id of node.verifies) {
+    const target = byId.get(id);
+    if (!target || layerOf(target) !== "build") continue;
+    if (!out.includes(target)) out.push(target);
+  }
+  return out;
+}
+
+/**
+ * What attests a build node: correctness nodes whose `verifies` names it OR any
+ * of its ancestors — a check that attests a parent attests its children, the
+ * same ancestor rule `servesOf` and `runsOnOf` use.
+ */
+export function verifiersOf(doc: Pick<GraphDoc, "nodes">, buildId: string): IntentNode[] {
+  const byId = new Map(doc.nodes.map((n) => [n.id, n]));
+  const start = byId.get(buildId);
+  if (!start || layerOf(start) !== "build") return [];
+  const chain = ancestorChain(byId, start);
+  const out: IntentNode[] = [];
+  for (const node of doc.nodes) {
+    if (layerOf(node) !== "correctness" || !node.verifies) continue;
+    if (node.verifies.some((id) => chain.has(id))) out.push(node);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// codeRefs: path prefixes and symbol refs
+// ---------------------------------------------------------------------------
+
+/**
+ * A codeRef is either a path prefix ("packages/bridge") or a symbol ref
+ * ("packages/bridge/src/room.ts#Room") naming ONE top-level class or function
+ * inside that file. Returns null for a plain path ref and for a malformed one,
+ * so no caller has to split on "#" itself.
+ */
+export function symbolRefOf(ref: string): { path: string; name: string } | null {
+  const hash = ref.indexOf("#");
+  if (hash < 0) return null;
+  const path = ref.slice(0, hash);
+  const name = ref.slice(hash + 1);
+  if (path.length === 0 || name.length === 0 || name.includes("#")) return null;
+  return { path, name };
+}
+
+/**
+ * What a codeRef claims: the path, with a symbol name dropped. A `file#Name`
+ * ref claims that file, because the part it names lives in it.
+ */
+function refPath(ref: string): string {
+  const symbol = symbolRefOf(ref);
+  return (symbol === null ? ref : symbol.path).replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+/**
+ * The prefix rule, by path SEGMENT: "packages/auth" claims
+ * "packages/auth/src/index.ts" and does not claim "packages/authz".
+ */
+function inside(prefix: string, path: string): boolean {
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
+
+/**
+ * The code no bubble on this canvas claims: the reality packages nothing points
+ * at, and the files reality parsed that nothing points at either, each with the
+ * parts it declares. This is the other half of drift — drift says what the map
+ * gets WRONG, this says what the map is MISSING — and it is what the catch-up
+ * turn is composed from (bridge/src/server/onboarding.ts).
+ *
+ * A package counts as claimed the moment a codeRef touches it from either
+ * direction: a bubble owning "packages/auth" claims it, and so does a child
+ * bubble owning one part of one file inside it, because the package is then
+ * already on the canvas at some altitude. A file counts as claimed only when a
+ * codeRef is at or above it, which is the ordinary prefix rule — a bubble that
+ * owns the package owns its files, and asking the survey to map them again
+ * would be asking for depth the altitude rules already govern.
+ *
+ * Pure, and layer-blind: a path claimed by an infra or correctness bubble is
+ * claimed, since the question is whether the canvas mentions that code at all.
+ */
+export function unclaimedReality(doc: Pick<GraphDoc, "nodes" | "reality">): {
+  packages: RealityNode[];
+  files: Array<{ file: string; symbols: RealitySymbol[] }>;
+} {
+  const prefixes: string[] = [];
+  for (const node of doc.nodes) {
+    for (const ref of node.codeRefs ?? []) {
+      const path = refPath(ref);
+      if (path.length > 0) prefixes.push(path);
+    }
+  }
+  const packages = doc.reality.nodes.filter(
+    (pkg) => !prefixes.some((prefix) => inside(prefix, pkg.dir) || inside(pkg.dir, prefix)),
+  );
+  const files: Array<{ file: string; symbols: RealitySymbol[] }> = [];
+  const byFile = new Map<string, RealitySymbol[]>();
+  for (const symbol of doc.reality.symbols) {
+    if (prefixes.some((prefix) => inside(prefix, symbol.file))) continue;
+    const bucket = byFile.get(symbol.file);
+    if (bucket === undefined) {
+      const fresh = [symbol];
+      byFile.set(symbol.file, fresh);
+      files.push({ file: symbol.file, symbols: fresh });
+    } else bucket.push(symbol);
+  }
+  // one order every time, whatever order the extraction happened to be in:
+  // the catch-up prompt is compared byte for byte in the smokes
+  files.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+  return { packages, files };
+}
+
+// ---------------------------------------------------------------------------
+// Verification status: what a build bubble can show for "is this attested?"
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether anything attests a build bubble — the shield pip on the canvas, and
+ * the same answer drift and the side panel read.
+ *
+ * Two ways to be verified, and either is enough. Authored: some correctness
+ * bubble's `verifies` names this node or an ancestor of it (`verifiersOf`).
+ * Mechanical: some extracted verification `covers` a path that meets this
+ * node's own or an ancestor's `codeRefs`. "Meets" is the prefix rule in BOTH
+ * directions, because the two sides are written at different altitudes: a
+ * cover of "packages/x/src" attests a bubble that owns "packages/x/src/a.ts",
+ * and a cover of "packages/x/src/a.ts" attests a bubble that owns "packages/x".
+ */
+export function verificationOf(
+  doc: Pick<GraphDoc, "nodes" | "reality">,
+  buildId: string,
+): "verified" | "unverified" {
+  const byId = new Map(doc.nodes.map((n) => [n.id, n]));
+  const start = byId.get(buildId);
+  if (!start || layerOf(start) !== "build") return "unverified";
+  if (verifiersOf(doc, buildId).length > 0) return "verified";
+  // a symbol ref stands for its file here: a cover reaching the file reaches
+  // whatever inside it a bubble claimed
+  const refs: string[] = [];
+  for (const id of ancestorChain(byId, start)) {
+    for (const ref of byId.get(id)?.codeRefs ?? []) refs.push(symbolRefOf(ref)?.path ?? ref);
+  }
+  if (refs.length === 0) return "unverified";
+  for (const item of doc.reality.verification) {
+    for (const cover of item.covers) {
+      for (const ref of refs) {
+        if (cover === ref || cover.startsWith(`${ref}/`) || ref.startsWith(`${cover}/`)) return "verified";
+      }
+    }
+  }
+  return "unverified";
+}
+
+/**
+ * A capability's verification rolled up over its realizers, because a promise
+ * is only as attested as the parts keeping it. "none" is not a verdict: the
+ * capability names no build bubble yet, so there is nothing to roll up (the
+ * unrealized case the canvas already renders on its own).
+ */
+export function capabilityVerification(
+  doc: Pick<GraphDoc, "nodes" | "reality">,
+  productId: string,
+): "verified" | "partial" | "unverified" | "none" {
+  const realizers = realizersOf(doc, productId);
+  if (realizers.length === 0) return "none";
+  let verified = 0;
+  for (const id of realizers) if (verificationOf(doc, id) === "verified") verified++;
+  if (verified === 0) return "unverified";
+  return verified === realizers.length ? "verified" : "partial";
+}
+
+// ---------------------------------------------------------------------------
+// Link gaps: cross-layer connection is the default
+// ---------------------------------------------------------------------------
+
+/** What a bubble should be connected to and is not. */
+export type LinkGap =
+  | "unrealized"
+  | "unserved"
+  | "unhosted"
+  | "unattested"
+  | "hosts-nothing"
+  | "attests-nothing";
+
+/**
+ * The phases at which a bubble is expected to be wired. An idea or a concept
+ * may stand alone — nobody knows yet what would realize it or run it. A
+ * component, something under construction and something finished may not.
+ * `failed` is never asked: a dead end owes no links.
+ */
+export const LINKED_PHASES: readonly Phase[] = ["component", "building", "built"];
+
+/**
+ * What `id` should be connected to across the layers and is not (user decision
+ * 2026-09-04: connection is the default, not an extra — whatever can be
+ * connected to something in another layer should be). Empty for an unknown id,
+ * for a bubble too early to be asked, and for a fully connected one.
+ *
+ * A gap is only ever raised when the other side exists to link to: nobody owes
+ * infra links in a graph with no infra. The ancestor rule already lives in
+ * `servesOf` / `runsOnOf` / `verifiersOf`, so a child of a connected parent is
+ * connected and reads clean.
+ *
+ * Returned in the fixed order of the `LinkGap` union so every reader — the
+ * canvas, the side panel, the tool receipt — lists them the same way.
+ */
+export function linkGapsOf(doc: Pick<GraphDoc, "nodes" | "reality">, id: string): LinkGap[] {
+  const node = doc.nodes.find((n) => n.id === id);
+  if (!node || !LINKED_PHASES.includes(node.phase)) return [];
+  // one pass for the "is there anything on that side to link to?" questions
+  let hasBuild = false;
+  let hasInfra = false;
+  let hasNonRootProduct = false;
+  const root = productRootOf(doc);
+  for (const other of doc.nodes) {
+    switch (layerOf(other)) {
+      case "build":
+        hasBuild = true;
+        break;
+      case "infra":
+        hasInfra = true;
+        break;
+      case "product":
+        if (other.id !== root?.id) hasNonRootProduct = true;
+        break;
+    }
+  }
+  const gaps: LinkGap[] = [];
+  switch (layerOf(node)) {
+    case "product":
+      // the root spans the whole build layer by construction, so it is never
+      // asked what realizes it; every other capability is
+      if (node.id !== root?.id && realizersOf(doc, id).length === 0) gaps.push("unrealized");
+      break;
+    case "build":
+      if (hasNonRootProduct && servesOf(doc, id).length === 0) gaps.push("unserved");
+      if (hasInfra && runsOnOf(doc, id).length === 0) gaps.push("unhosted");
+      // a finished part nothing attests is a claim
+      if (node.phase === "built" && verificationOf(doc, id) === "unverified") gaps.push("unattested");
+      break;
+    case "infra":
+      if (hasBuild && hostsOf(doc, id).length === 0) gaps.push("hosts-nothing");
+      break;
+    case "correctness":
+      if (hasBuild && verifiedOf(doc, id).length === 0) gaps.push("attests-nothing");
+      break;
+  }
+  return gaps;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +617,80 @@ export interface GraphDelta {
 }
 
 // ---------------------------------------------------------------------------
+// End of turn: where things stand, and what the user can do about it
+// ---------------------------------------------------------------------------
+
+/** one one-click continuation: what the button says, and what clicking it says */
+export interface NextChoice {
+  /** the words on the button, <= NEXT_LABEL_MAX chars */
+  label: string;
+  /** the exact sentence sent to the harness when it is clicked */
+  say: string;
+}
+
+/**
+ * The call to action a turn ends on. A turn that stops with nothing on screen
+ * but a canvas leaves the user guessing what to type; this is the agent saying
+ * where things stand and offering the two or three ways on, each as a sentence
+ * the user would have had to dictate themselves.
+ *
+ * Ephemeral by design: it belongs to the turn that produced it, never to the
+ * document, so it is not in `GraphDoc`, not in a revision, and not diffable.
+ */
+export interface Next {
+  /** one sentence on where things stand, <= NEXT_SUMMARY_MAX chars */
+  summary: string;
+  /** 0 to NEXT_CHOICES_MAX ways on; none means the work is finished */
+  choices: NextChoice[];
+  /** the decision the user has to make, or null when there is none */
+  question: string | null;
+}
+
+export const NEXT_SUMMARY_MAX = 200;
+export const NEXT_LABEL_MAX = 40;
+export const NEXT_CHOICES_MAX = 4;
+
+/**
+ * Boundary validator for the `next` half of a `canvas` call: it comes off the
+ * wire from the model like the ops do. Returns the value, or the one-line
+ * reason it was refused — the caller is what turns that into a receipt.
+ */
+export function parseNext(raw: unknown): Next | string {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return "`next` must be an object";
+  if (!("summary" in raw) || typeof raw.summary !== "string" || raw.summary.trim().length === 0) {
+    return "`next.summary` must be one non-empty sentence saying where things stand";
+  }
+  if (raw.summary.length > NEXT_SUMMARY_MAX) {
+    return `\`next.summary\` must be <= ${NEXT_SUMMARY_MAX} chars, got ${raw.summary.length}`;
+  }
+  if (!("choices" in raw) || !Array.isArray(raw.choices)) return "`next.choices` must be an array of choices";
+  if (raw.choices.length > NEXT_CHOICES_MAX) {
+    return `\`next.choices\` must have at most ${NEXT_CHOICES_MAX} entries, got ${raw.choices.length}`;
+  }
+  const choices: NextChoice[] = [];
+  for (const [index, choice] of raw.choices.entries()) {
+    if (choice === null || typeof choice !== "object") return `\`next.choices[${index}]\` must be an object`;
+    if (!("label" in choice) || typeof choice.label !== "string" || choice.label.trim().length === 0) {
+      return `\`next.choices[${index}].label\` must be the words on the button`;
+    }
+    if (choice.label.length > NEXT_LABEL_MAX) {
+      return `\`next.choices[${index}].label\` must be <= ${NEXT_LABEL_MAX} chars, got ${choice.label.length}`;
+    }
+    if (!("say" in choice) || typeof choice.say !== "string" || choice.say.trim().length === 0) {
+      return `\`next.choices[${index}].say\` must be the exact sentence the click sends`;
+    }
+    choices.push({ label: choice.label, say: choice.say });
+  }
+  // absent and null are the same thing: this turn ends on no decision
+  const question = "question" in raw ? raw.question : null;
+  if (question !== null && question !== undefined && typeof question !== "string") {
+    return "`next.question` must be the decision the user has to make, or null";
+  }
+  const asked = typeof question === "string" && question.trim().length > 0 ? question : null;
+  return { summary: raw.summary, choices, question: asked };
+}
+
+// ---------------------------------------------------------------------------
 // canvas tool: mutation ops
 // ---------------------------------------------------------------------------
 
@@ -223,14 +705,62 @@ export interface CanvasArgs {
   ops: CanvasOp[];
   /** one-line rationale, echoed to the transcript panel */
   note?: string;
+  /**
+   * Where the turn leaves things and how the user carries on. Never touches the
+   * graph: the bridge takes it off the call, shows it as the turn's card, and
+   * forgets it the moment anything is said (see `Next`).
+   */
+  next?: Next;
 }
 
 export const PHASES: readonly Phase[] = ["idea", "concept", "component", "building", "built", "failed"];
 export const EDGE_KINDS: readonly EdgeKind[] = ["depends", "dataflow", "relates"];
 export const MODEL_ROLES: readonly ModelRole[] = ["explore", "build", "small"];
-export const NODE_KINDS: readonly NodeKind[] = ["ui", "service", "api", "store", "queue", "external", "security"];
+export const NODE_KINDS: readonly NodeKind[] = [
+  "ui",
+  "service",
+  "api",
+  "store",
+  "queue",
+  "external",
+  "security",
+  "host",
+  "database",
+  "cache",
+  "cdn",
+  "ci",
+  "test",
+  "smoke",
+  "check",
+  "review",
+  "monitor",
+];
 
 const NODE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * The links that point AT build nodes, in the order their receipts are checked:
+ * a build node held by more than one of them hears about the product side
+ * first, then infra, then correctness. One table, so a link cannot end up with
+ * half a guard — both the layer-flip check on `upsert_node` and the removal
+ * check on `remove_node` walk it.
+ */
+const BUILD_LINKS: readonly {
+  /** the field on the node that owns the link */
+  field: "realizes" | "hosts" | "verifies";
+  /** the only layer allowed to carry it */
+  owner: Layer;
+  /** receipt code for a build node the link still names */
+  code: string;
+  /** evidence key that lists the holders */
+  key: string;
+  /** what the holder itself is, for the fix that removes it instead */
+  holds: string;
+}[] = [
+  { field: "realizes", owner: "product", code: "op/node-realized", key: "realizedBy", holds: "capability" },
+  { field: "hosts", owner: "infra", code: "op/node-hosted", key: "hostedBy", holds: "infrastructure" },
+  { field: "verifies", owner: "correctness", code: "op/node-verified", key: "verifiedBy", holds: "verification" },
+];
 
 /**
  * Description of the `canvas` tool, shared by both channels it is exposed
@@ -242,14 +772,21 @@ export const CANVAS_TOOL_DESCRIPTION = `Maintain the visual canvas the user is w
 ops (batch, applied per-op): upsert_node, remove_node (rejected while it has children), upsert_edge, remove_edge, set_phase.
 ids are slugs: ^[a-z0-9][a-z0-9-]*$. Node summary is REQUIRED: one sentence stating what the bubble promises, <= 200 chars; a bubble that cannot be summarized in one sentence is at the wrong altitude.
 Hierarchy is parentId (null = root); edges are ONLY non-hierarchical relations (depends | dataflow | relates) — never an edge to mean "contains". A parent and both ends of an edge must be on the same layer.
-Phases: idea -> concept -> component -> building -> built | failed. Set codeRefs (workspace-relative path prefixes) once a bubble owns files.
-TWO LAYERS, set with layer on each node. layer "product" = what the person gets: the capabilities and surfaces they can name and use, no file names. layer "build" (the default when layer is omitted) = the parts that exist as code: services, stores, screens, jobs. realizes (product nodes only, up to 20 existing build node ids) is the ONLY link between the layers — it says which build bubbles make that capability real; keep it current as build bubbles appear, and give every capability at least one.
+Phases: idea -> concept -> component -> building -> built | failed. Set codeRefs (workspace-relative path prefixes) once a bubble owns files. A codeRef may also name one thing inside a file — "path/to/file.ts#Name" points at a single top-level class or function in that file, which is how a small bubble claims one part of a bigger file. One "#" only, a real path on the left and the exact name on the right.
+FOUR LAYERS, set with layer on each node. layer "product" = what the person gets: the capabilities and surfaces they can name and use, no file names. layer "build" (the default when layer is omitted) = the parts that exist as code: services, stores, screens, jobs. layer "infra" = where it runs and what it leans on outside the code. layer "correctness" = what proves it works: the tests, checks and reviews that attest a part is correct. realizes (product nodes only, up to 20 existing build node ids) is the link from product to build — it says which build bubbles make that capability real; keep it current as build bubbles appear. CONNECTING THE LAYERS IS THE DEFAULT, not an extra: a capability names what realizes it, an infra bubble names what runs on it, a check names what it attests, so every build part ends up reached by a capability, by infra, and — once it is built — by a check. A bubble past the idea stage missing one of those comes back as a link/<gap> warning naming the link to write; the op still applies, and you are expected to close the gap in the same turn.
+THE INFRA LAYER is the things the running product needs that are not code you wrote: databases, hosting, queues, third-party services, and the pipeline that builds and tests it. Give each one a plain-English bubble ("the main database", "where the app runs", "the build-and-test pipeline") with kind set to host | database | cache | cdn | queue | store | external | ci, codeRefs pointing at the configuration files that prove it exists, and hosts (up to 40 existing build node ids) naming the build bubbles that run on or use it. hosts is the link from infra to build; it belongs on infra nodes only, and infrastructure running nothing is either unlinked or not real. The infra layer has no single root bubble — a handful of top-level ones is normal.
+THE CORRECTNESS LAYER is what shows the parts are correct rather than just written: test suites, smoke or end-to-end runs, checks like typechecking and linting, review passes a person does, and monitoring that watches the thing in production. Give each one a plain-English bubble ("the protocol checks", "checks that run on every push") with kind set to test | smoke | check | review | monitor, codeRefs pointing at the files that ARE the verification, and verifies (up to 40 existing build node ids) naming the build bubbles it attests. verifies is the link from correctness to build; it belongs on correctness nodes only, and like infra this layer has no single root bubble. A finished part nothing attests is a claim, so when you finish one, add or extend what proves it and say so with verifies.
 THE PRODUCT LAYER STARTS FROM ONE BUBBLE: the product itself, the only product node with parentId null — its label is the product's name and its summary the one-sentence promise of the whole thing. Create it before anything else, then hang the 3-5 capabilities under it as its children, and deeper capabilities under those. A second top-level product bubble is rejected with op/second-root, whose evidence names the root to parent it under. The root spans the whole build layer, so realizes on it is optional; every capability below it still needs one.
 summary = the bubble's stable promise. status (optional, <= 140 chars) = what is happening in it RIGHT NOW; refresh it on bubbles you are building and omit it when done — an upsert without status clears it.
 PLAIN ENGLISH, NO JARGON: every label, summary, status, edge label and note is read by a non-programmer steering by voice — everyday words, outcomes not mechanisms, no acronyms or protocol/library/file-format names or code identifiers unless the bubble is literally about that thing. Only codeRefs stay technical.
+next (optional, and the way EVERY turn should end): { summary, choices, question } — the call to action the user reads when you stop. summary is one sentence, <= 200 chars, on where things stand. choices is 0 to 4 one-click ways on, each { label (<= 40 chars, the words on the button), say (the exact sentence sent to you when it is clicked) } — write them as the user's own words, e.g. label "Build the first screen", say "Build the first screen and show me what it looks like". question is the decision only the user can make, or null. Send an EMPTY choices array with question null only when the work is genuinely finished; a turn with no next at all gets a generic card instead of yours.
 Call this as you think and work, in the same turn your understanding changes. The result tells you what applied; rejections come back as JSON repair receipts ({code, subject, evidence, supportedFixes}) — apply a supported fix and resend just the rejected ops.`;
 
-/** JSON-Schema sent to omp via set_host_tools. */
+/**
+ * JSON-Schema of the canvas tool, exactly as every harness is handed it: the
+ * omp extension registers it inside omp, the link's MCP server serves it to
+ * Claude Code, and neither may re-describe it.
+ */
 export const CANVAS_TOOL_SCHEMA = {
   type: "object",
   properties: {
@@ -277,6 +814,18 @@ export const CANVAS_TOOL_SCHEMA = {
               codeRefs: { type: "array", items: { type: "string" } },
               layer: { type: "string", enum: [...LAYERS] },
               realizes: { type: "array", items: { type: "string" }, maxItems: 20 },
+              hosts: {
+                type: "array",
+                items: { type: "string" },
+                maxItems: 40,
+                description: "infra nodes only: ids of the build nodes that run on or use this piece of infrastructure",
+              },
+              verifies: {
+                type: "array",
+                items: { type: "string" },
+                maxItems: 40,
+                description: "correctness nodes only: ids of the build nodes this verification attests",
+              },
             },
             required: ["id", "parentId", "label", "summary", "phase"],
             additionalProperties: false,
@@ -301,6 +850,29 @@ export const CANVAS_TOOL_SCHEMA = {
       },
     },
     note: { type: "string" },
+    next: {
+      type: "object",
+      description: "how this turn ends: where things stand, the one-click ways on, and the decision the user has to make",
+      properties: {
+        summary: { type: "string", maxLength: NEXT_SUMMARY_MAX },
+        choices: {
+          type: "array",
+          maxItems: NEXT_CHOICES_MAX,
+          items: {
+            type: "object",
+            properties: {
+              label: { type: "string", maxLength: NEXT_LABEL_MAX, description: "the words on the button" },
+              say: { type: "string", description: "the exact sentence sent to you when it is clicked" },
+            },
+            required: ["label", "say"],
+            additionalProperties: false,
+          },
+        },
+        question: { type: ["string", "null"] },
+      },
+      required: ["summary", "choices"],
+      additionalProperties: false,
+    },
   },
   required: ["ops"],
   additionalProperties: false,
@@ -393,8 +965,7 @@ export function applyOps(doc: GraphDoc, ops: CanvasOp[]): ApplyResult {
         // bubble where it is, and a brand-new bubble with no `layer` is a build bubble.
         const askedLayer: unknown = n.layer;
         const prior = nodeById.get(n.id);
-        const layer: Layer =
-          askedLayer === "product" || askedLayer === "build" ? askedLayer : prior ? layerOf(prior) : "build";
+        const layer: Layer = isLayer(askedLayer) ? askedLayer : prior ? layerOf(prior) : "build";
         const parent = n.parentId === null ? null : (nodeById.get(n.parentId) ?? null);
         if (n.parentId !== null && parent === null)
           return reject("op/unknown-parent", `parent "${n.parentId}" does not exist`, {
@@ -409,7 +980,7 @@ export function applyOps(doc: GraphDoc, ops: CanvasOp[]): ApplyResult {
             ],
           });
         if (parent && layerOf(parent) !== layer)
-          return reject("op/cross-layer-parent", `parent "${n.parentId}" is on the other layer`, {
+          return reject("op/cross-layer-parent", `parent "${n.parentId}" is on a different layer`, {
             at: "/node/parentId",
             id: n.id,
             label: n.label,
@@ -417,7 +988,7 @@ export function applyOps(doc: GraphDoc, ops: CanvasOp[]): ApplyResult {
             fixes: [
               `pick a parent that is also on the ${layer} layer`,
               "set parentId to null to make this a root bubble",
-              "link the two layers with `realizes` on the product node instead",
+              "link layers with `realizes` on the product node, `hosts` on the infra node or `verifies` on the correctness node instead",
             ],
           });
         if (n.parentId !== null && wouldCycle(n.id, n.parentId))
@@ -459,6 +1030,22 @@ export function applyOps(doc: GraphDoc, ops: CanvasOp[]): ApplyResult {
             evidence: { length: typeof n.status === "string" ? n.status.length : 0 },
             fixes: ["set status to a string of at most 140 characters, or omit it to clear"],
           });
+        if (Array.isArray(n.codeRefs)) {
+          // a codeRef that reaches for a symbol and misses ("#Name", "file.ts#",
+          // "a#b#c") would silently claim nothing, so it comes back as a receipt
+          const badRef = n.codeRefs.find((r) => typeof r === "string" && r.includes("#") && symbolRefOf(r) === null);
+          if (typeof badRef === "string")
+            return reject("op/bad-coderefs", `codeRef "${badRef}" is neither a path nor a "<file>#<Name>" symbol ref`, {
+              at: "/node/codeRefs",
+              id: n.id,
+              label: n.label,
+              evidence: { codeRef: badRef, codeRefs: n.codeRefs },
+              fixes: [
+                'point at a file or folder, e.g. "packages/bridge/src"',
+                'name one top-level class or function after a single "#", e.g. "packages/bridge/src/room.ts#Room"',
+              ],
+            });
+        }
         if (n.realizes !== undefined) {
           const list: unknown = n.realizes;
           const bad = (message: string, evidence: Record<string, unknown>, fixes: string[]) =>
@@ -471,7 +1058,7 @@ export function applyOps(doc: GraphDoc, ops: CanvasOp[]): ApplyResult {
           if (layer !== "product")
             return bad("realizes belongs on product nodes only", { realizes: list, layer }, [
               'set layer to "product" on this node',
-              "drop realizes from this build node",
+              `drop realizes from this ${layer} node`,
             ]);
           if (list.length > 20)
             return bad("realizes lists at most 20 build nodes", { count: list.length, max: 20 }, [
@@ -492,24 +1079,104 @@ export function applyOps(doc: GraphDoc, ops: CanvasOp[]): ApplyResult {
                 "upsert the build node earlier in the same ops batch",
               ]);
             if (layerOf(target) !== "build")
-              return bad(`realizes target "${id}" is a product node, not a build node`, { nodeId: id, targetLayer: "product" }, [
+              return bad(`realizes target "${id}" is a ${layerOf(target)} node, not a build node`, { nodeId: id, targetLayer: layerOf(target) }, [
                 "point realizes at the build bubbles that make this capability real",
                 "drop that id from realizes",
               ]);
           }
         }
-        if (prior && layerOf(prior) === "build" && layer === "product") {
-          const servedProducts = doc.nodes
-            .filter((other) => layerOf(other) === "product" && other.realizes?.includes(n.id))
-            .map((other) => other.id);
-          if (servedProducts.length > 0)
-            return reject("op/node-realized", `build node "${n.id}" is still listed in another node's realizes`, {
-              at: "/node/layer",
-              id: n.id,
-              label: n.label,
-              evidence: { realizedBy: sample(servedProducts) },
-              fixes: ["drop this id from the listed product nodes' realizes first (earlier in the same batch works)"],
-            });
+        if (n.hosts !== undefined) {
+          const list: unknown = n.hosts;
+          const bad = (message: string, evidence: Record<string, unknown>, fixes: string[]) =>
+            reject("op/bad-hosts", message, { at: "/node/hosts", id: n.id, label: n.label, evidence, fixes });
+          if (!Array.isArray(list) || list.some((id) => typeof id !== "string"))
+            return bad("hosts must be an array of node ids", { hosts: list ?? null }, [
+              "pass hosts as an array of build node ids",
+              "omit hosts",
+            ]);
+          if (layer !== "infra")
+            return bad("hosts belongs on infra nodes only", { hosts: list, layer }, [
+              'set layer to "infra" on this node',
+              `drop hosts from this ${layer} node`,
+            ]);
+          if (list.length > 40)
+            return bad("hosts lists at most 40 build nodes", { count: list.length, max: 40 }, [
+              "keep the build bubbles that really run on this piece of infrastructure",
+              "point at a parent build bubble instead of each of its children",
+            ]);
+          const seen: string[] = [];
+          for (const id of list as string[]) {
+            if (seen.includes(id))
+              return bad(`hosts lists "${id}" twice`, { hosts: list, duplicate: id }, ["list each build node id once"]);
+            seen.push(id);
+            const target = nodeById.get(id);
+            if (!target)
+              return bad(`hosts target "${id}" does not exist`, { nodeId: id, knownNodeIds: sample(nodeById.keys()) }, [
+                "use an existing build node id",
+                "upsert the build node earlier in the same ops batch",
+              ]);
+            if (layerOf(target) !== "build")
+              return bad(`hosts target "${id}" is a ${layerOf(target)} node, not a build node`, { nodeId: id, targetLayer: layerOf(target) }, [
+                "point hosts at the build bubbles that run on this piece of infrastructure",
+                "drop that id from hosts",
+              ]);
+          }
+        }
+        if (n.verifies !== undefined) {
+          const list: unknown = n.verifies;
+          const bad = (message: string, evidence: Record<string, unknown>, fixes: string[]) =>
+            reject("op/bad-verifies", message, { at: "/node/verifies", id: n.id, label: n.label, evidence, fixes });
+          if (!Array.isArray(list) || list.some((id) => typeof id !== "string"))
+            return bad("verifies must be an array of node ids", { verifies: list ?? null }, [
+              "pass verifies as an array of build node ids",
+              "omit verifies",
+            ]);
+          if (layer !== "correctness")
+            return bad("verifies belongs on correctness nodes only", { verifies: list, layer }, [
+              'set layer to "correctness" on this node',
+              `drop verifies from this ${layer} node`,
+            ]);
+          if (list.length > 40)
+            return bad("verifies lists at most 40 build nodes", { count: list.length, max: 40 }, [
+              "keep the build bubbles this verification really attests",
+              "point at a parent build bubble instead of each of its children",
+            ]);
+          const seen: string[] = [];
+          for (const id of list as string[]) {
+            if (seen.includes(id))
+              return bad(`verifies lists "${id}" twice`, { verifies: list, duplicate: id }, ["list each build node id once"]);
+            seen.push(id);
+            const target = nodeById.get(id);
+            if (!target)
+              return bad(`verifies target "${id}" does not exist`, { nodeId: id, knownNodeIds: sample(nodeById.keys()) }, [
+                "use an existing build node id",
+                "upsert the build node earlier in the same ops batch",
+              ]);
+            if (layerOf(target) !== "build")
+              return bad(`verifies target "${id}" is a ${layerOf(target)} node, not a build node`, { nodeId: id, targetLayer: layerOf(target) }, [
+                "point verifies at the build bubbles this verification attests",
+                "drop that id from verifies",
+              ]);
+          }
+        }
+        // a build node other bubbles point AT cannot leave the build layer while
+        // the links still name it — whichever layer it is heading for
+        if (prior && layerOf(prior) === "build" && layer !== "build") {
+          for (const link of BUILD_LINKS) {
+            const holders = doc.nodes
+              .filter((other) => layerOf(other) === link.owner && other[link.field]?.includes(n.id))
+              .map((other) => other.id);
+            if (holders.length > 0)
+              return reject(link.code, `build node "${n.id}" is still listed in another node's ${link.field}`, {
+                at: "/node/layer",
+                id: n.id,
+                label: n.label,
+                evidence: { [link.key]: sample(holders) },
+                fixes: [
+                  `drop this id from the listed ${link.owner} nodes' ${link.field} first (earlier in the same batch works)`,
+                ],
+              });
+          }
         }
         // the product layer starts from ONE bubble: the product itself. A second
         // top-level product bubble is a capability that forgot its parent.
@@ -540,15 +1207,21 @@ export function applyOps(doc: GraphDoc, ops: CanvasOp[]): ApplyResult {
           ...(n.kind !== undefined && NODE_KINDS.includes(n.kind) ? { kind: n.kind } : {}),
           ...(Array.isArray(n.codeRefs) ? { codeRefs: n.codeRefs.filter((r) => typeof r === "string") } : {}),
           // build is the default layer, so it is stored as the absence of a marker
-          ...(layer === "product" ? { layer } : {}),
-          ...(layer === "product" && Array.isArray(n.realizes) ? { realizes: [...n.realizes] } : {}),
+          ...(layer === "build" ? {} : { layer }),
         };
+        // the cross-layer links each live on exactly one layer, and each sticks
+        // across an upsert that omits it
+        for (const link of BUILD_LINKS) {
+          const list = n[link.field];
+          if (layer === link.owner && Array.isArray(list)) clean[link.field] = [...list];
+        }
         if (prior) {
           Object.assign(prior, clean);
           // status is "what's happening NOW" — an upsert that omits it clears it
           if (clean.status === undefined) delete prior.status;
           if (clean.layer === undefined) delete prior.layer;
-          if (layer !== "product") delete prior.realizes;
+          // the cross-layer links only exist on the layer that owns them
+          for (const link of BUILD_LINKS) if (layer !== link.owner) delete prior[link.field];
         }
         else {
           doc.nodes.push(clean);
@@ -574,20 +1247,22 @@ export function applyOps(doc: GraphDoc, ops: CanvasOp[]): ApplyResult {
             evidence: { children: sample(children) },
             fixes: ["remove or re-parent the listed children first (earlier in the same batch works)"],
           });
-        const realizedBy = doc.nodes
-          .filter((other) => layerOf(other) === "product" && other.realizes?.includes(raw.id))
-          .map((other) => other.id);
-        if (realizedBy.length > 0)
-          return reject("op/node-realized", `node "${raw.id}" is still listed in another node's realizes`, {
-            at: "/id",
-            id: node.id,
-            label: node.label,
-            evidence: { realizedBy: sample(realizedBy) },
-            fixes: [
-              "drop this id from the listed product nodes' realizes first (earlier in the same batch works)",
-              "remove those product nodes instead if the capability is gone too",
-            ],
-          });
+        for (const link of BUILD_LINKS) {
+          const holders = doc.nodes
+            .filter((other) => layerOf(other) === link.owner && other[link.field]?.includes(raw.id))
+            .map((other) => other.id);
+          if (holders.length > 0)
+            return reject(link.code, `node "${raw.id}" is still listed in another node's ${link.field}`, {
+              at: "/id",
+              id: node.id,
+              label: node.label,
+              evidence: { [link.key]: sample(holders) },
+              fixes: [
+                `drop this id from the listed ${link.owner} nodes' ${link.field} first (earlier in the same batch works)`,
+                `remove those ${link.owner} nodes instead if the ${link.holds} is gone too`,
+              ],
+            });
+        }
         doc.nodes.splice(doc.nodes.indexOf(node), 1);
         nodeById.delete(raw.id);
         for (const e of [...doc.edges]) {
@@ -631,7 +1306,7 @@ export function applyOps(doc: GraphDoc, ops: CanvasOp[]): ApplyResult {
             fixes: ["use an existing node id as target", "upsert the missing node earlier in the same batch"],
           });
         if (layerOf(source) !== layerOf(target))
-          return reject("op/cross-layer-edge", "an edge cannot cross between the product and build layers", {
+          return reject("op/cross-layer-edge", "an edge cannot cross between the product, build, infra and correctness layers", {
             at: "/edge",
             id: e.id,
             evidence: {
@@ -642,7 +1317,7 @@ export function applyOps(doc: GraphDoc, ops: CanvasOp[]): ApplyResult {
             },
             fixes: [
               "connect two bubbles on the same layer",
-              "link the layers with `realizes` on the product node instead",
+              "link layers with `realizes` on the product node, `hosts` on the infra node or `verifies` on the correctness node instead",
             ],
           });
         if (e.source === e.target)
@@ -743,16 +1418,25 @@ export const LINK_WS_PATH = "/link";
 /** agents → a Shape server (remote mode) */
 export const AGENT_WS_PATH = "/agent";
 
-/** one git worktree of the current target's repository */
+/**
+ * One git worktree of the target's repository — one architecture variation,
+ * with its own canvas state and (when the user opened one) its own harness.
+ * Every worktree of a repo shares the project key, so the canvas can merge
+ * them; `id` is what tells them apart on the wire and in storage.
+ */
 export interface WorktreeInfo {
-  /** absolute worktree directory */
+  /**
+   * Stable identity of this worktree: the realpath of its directory. Symlinked
+   * and relative spellings of the same directory must be one worktree, or the
+   * same canvas would be stored twice.
+   */
+  id: string;
+  /** absolute worktree directory as git reports it */
   path: string;
   /** checked-out branch, or null when detached */
   branch: string | null;
   /** commit the worktree is at, null when unborn */
   head: string | null;
-  /** true for the worktree the bridge currently targets */
-  current: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -766,6 +1450,26 @@ export interface WorktreeInfo {
  */
 export type Harness = "omp" | "claude" | "codex" | "opencode" | "cursor";
 
+/**
+ * A harness Shape can LAUNCH, by the id the "start a session" card, the
+ * `--backend` flag and `.shape/config.json` all spell it with.
+ *
+ * Deliberately a different set from `Harness` above: that one classifies
+ * RUNNING processes for adoption (an older, smaller list that spells Cursor's
+ * CLI "cursor"), while these are the ids the launcher can start and the
+ * adapters are registered under. `harnessIdFor` in bridge agent/detect.ts maps
+ * a discovered harness onto one of these.
+ */
+export type HarnessId =
+  | "omp"
+  | "claude"
+  | "codex"
+  | "opencode"
+  | "gemini"
+  | "cursor-agent"
+  | "amp"
+  | "copilot";
+
 /** one agent session already running on this machine (bridge/src/discover.ts) */
 export interface DiscoveredSession {
   harness: Harness;
@@ -777,7 +1481,7 @@ export interface DiscoveredSession {
   startedAt: string | null;
   resumeCommand: string[] | null;
   attach: "socket" | "daemon" | "http" | "none";
-  /** omp child spawned by a Shape bridge (`omp --mode rpc` under packages/bridge). */
+  /** a harness session started BY a Shape agent (its parent is a bridge) */
   spawnedByShape: boolean;
 }
 
@@ -795,9 +1499,42 @@ export interface BackendCapabilities {
   events: "native" | "hooks" | "transcript" | "none";
   /** a previous session can be resumed */
   resume: boolean;
-  /** what a terminal pane would attach to */
-  terminal: "tui" | "shell" | "none";
+  /**
+   * Where the harness's terminal is. `external` ⇒ it runs in the user's own
+   * terminal (a herdr tab): Shape can only ask for it to be focused. `pane` ⇒
+   * Shape owns the pty, so the browser can open a drawer over the canvas and
+   * type into it. `none` ⇒ there is nothing to attach to and no way to reach
+   * it (a remote agent that was not started with `--allow-terminal`).
+   */
+  terminal: "external" | "pane" | "none";
 }
+
+/**
+ * One tool Shape found on the agent's machine — a launcher (herdr) or a coding
+ * harness (omp, claude, …). `path` is what would be executed; `version` is
+ * null when the tool answered `--version` with nothing usable, which is a
+ * detected tool all the same.
+ */
+export interface ToolInfo {
+  id: string;
+  /** what the picker shows: the tool's own name, not its path */
+  label: string;
+  path: string;
+  version: string | null;
+}
+
+/**
+ * What is installed where this project's agent runs, and how it starts things.
+ * Project-wide, not per worktree: one agent process picks one launcher and
+ * sees one PATH. `launcher` is the one it chose — herdr when it is installed
+ * and its socket answers, else Shape's own pty.
+ */
+export interface ProjectTools {
+  launcher: "herdr" | "pty";
+  launchers: ToolInfo[];
+  /** every harness detected on PATH; what the "start a session" card offers */
+  harnesses: ToolInfo[];
+ }
 
 export interface BackendInfo {
   id: string;
@@ -805,26 +1542,40 @@ export interface BackendInfo {
   capabilities: BackendCapabilities;
 }
 
+/**
+ * What the browser knows about the project as a whole. The harness facts that
+ * used to live here (session id, model, backend) are per worktree now and live
+ * in `sessions`: one project runs as many harnesses as the user opened
+ * worktrees, and none of them is "the" session.
+ */
 export interface SessionInfo {
-  sessionId: string | null;
-  sessionName: string | null;
-  model: { provider: string; id: string } | null;
+  /** the MAIN worktree's path — the project's label and its default target */
   cwd: string;
   /** target repo already contains source code (onboarding CTA gate) */
   targetHasCode: boolean;
   /**
-   * worktrees of the target's repo (`git worktree list`), each an architecture
-   * variation with its own canvas state; empty for non-git targets. Toggling =
-   * `switch_project` to a worktree's path.
+   * every worktree of the target's repo (`git worktree list`), each an
+   * architecture variation with its own canvas state; a non-git target has the
+   * single pseudo-worktree of its own directory.
    */
   worktrees: WorktreeInfo[];
-  /** the harness this session is running on, and what it can do */
-  backend: BackendInfo;
+  /**
+   * the harnesses running right now, one per worktree the user opened. A
+   * worktree with no entry here is visible on the canvas but cannot be steered
+   * until it is opened.
+   */
+  sessions: WorktreeSession[];
   /**
    * an agent is attached to this project right now. False ⇒ the canvas is
    * read-only: steering, onboarding and the terminal are refused with a reason.
    */
   agentConnected: boolean;
+  /**
+   * A new project started from the canvas can also be put on GitHub: the
+   * agent's machine has the `gh` CLI and is signed in. False ⇒ the form offers
+   * the folder only.
+   */
+  canPublish: boolean;
 }
 
 /** one project the server knows, for the picker */
@@ -846,49 +1597,145 @@ export interface Referent {
   id: string;
 }
 
+/**
+ * Bridge → browser. Every frame that is about ONE worktree names it: the
+ * canvas merges the worktrees of a repo into one view, so a graph, a state or
+ * a terminal byte that did not say where it came from could not be placed.
+ * Project-wide frames (`session`, `projects`, `sessions`, `error`) carry none.
+ */
 export type ServerMsg =
   | {
       type: "hello";
-      graph: GraphDoc;
+      /** every worktree's canvas, keyed by worktree id; the view merges them */
+      graphs: Record<string, GraphDoc>;
       session: SessionInfo;
-      agent: AgentState;
+      /** what each worktree's harness is doing; a worktree with no session has no entry */
+      agents: Record<string, AgentState>;
       recentProjects: string[];
       /** every project this server hosts; local mode has exactly one */
       projects: ProjectSummary[];
       /** the project this socket is joined to */
       projectId: string;
-      /** available snapshots, ascending by rev */
-      revisions: RevisionInfo[];
+      /** available snapshots per worktree, each ascending by rev */
+      revisions: Record<string, RevisionInfo[]>;
       /** agent sessions running on this machine, newest first; Shape's own children excluded */
       sessions: DiscoveredSession[];
+      /** the card each worktree's last turn ended on; null where there is none */
+      nexts: Record<string, Next | null>;
+      /** which worktrees are deciding for themselves right now */
+      autonomous: Record<string, boolean>;
+      /** what is installed where this project's agent runs, and how it starts a harness */
+      tools: ProjectTools;
     }
-  | { type: "graph"; graph: GraphDoc }
-  | { type: "agent"; state: AgentState }
-  /** session facts changed without the graph changing (agent attached/detached, harness session id) — no client state reset */
+  | { type: "graph"; worktree: string; graph: GraphDoc }
+  | { type: "agent"; worktree: string; state: AgentState }
+  /** session facts changed without any graph changing (agent attached/detached, worktrees appeared) — no client state reset */
   | { type: "session"; session: SessionInfo }
+  /** a harness came up in `worktree` — unsolicited, or the answer to `open_worktree` */
+  | { type: "session_started"; worktree: string; session: AgentSession; backend: BackendInfo }
+  /** that worktree's harness is gone; steering it is refused until it is opened again */
+  | { type: "session_stopped"; worktree: string; reason: string }
   /** broadcast whenever the project list changes (attach, detach) */
   | { type: "projects"; projects: ProjectSummary[] }
-  | { type: "activity"; nodeIds: string[] }
-  | { type: "transcript"; role: "assistant" | "user" | "tool"; text: string }
+  | { type: "activity"; worktree: string; nodeIds: string[] }
+  | { type: "transcript"; worktree: string; role: "assistant" | "user" | "tool"; text: string }
+  /** where that worktree's turn left things, or null once anything is said to it */
+  | { type: "next"; worktree: string; next: Next | null }
+  /** that worktree is (or is no longer) deciding for itself and carrying on */
+  | { type: "autonomous"; worktree: string; on: boolean }
   /** broadcast whenever a new snapshot is written; ascending by rev */
-  | { type: "revisions"; revisions: RevisionInfo[] }
-  /** broadcast reply to a `diff` request */
-  | { type: "delta"; delta: GraphDelta }
+  | { type: "revisions"; worktree: string; revisions: RevisionInfo[] }
+  /** broadcast reply to a `diff` request, over the worktree it asked about */
+  | { type: "delta"; worktree: string; delta: GraphDelta }
   /** broadcast answer to `discover`, and re-broadcast whenever the bridge re-scans */
   | { type: "sessions"; sessions: DiscoveredSession[] }
+  /**
+   * The pty launcher's harness wants the terminal drawer shown (or hidden):
+   * the answer to `focus_terminal` when Shape owns the pty. A harness in the
+   * user's own terminal is focused there and sends nothing here.
+   */
+  | { type: "terminal"; worktree: string; open: boolean }
+  /**
+   * The sentence being written right now, folded from the harness's text
+   * deltas — the last of it, throttled, and never stored. `null` at the end of
+   * a turn (and when the session stops): there is nothing being said.
+   */
+  | { type: "now"; worktree: string; text: string | null }
+  /**
+   * The folder the user chose in the native chooser a `pick_folder` opened, or
+   * `null` when they closed it without choosing. An answer, not news: it goes
+   * to the socket that asked and to nobody else — another browser watching the
+   * project did not open a dialog and has nothing to do with the reply.
+   */
+  | { type: "folder_picked"; path: string | null }
   | { type: "error"; message: string }
   | PtyServerMsg;
 
+/**
+ * Browser → bridge. A frame that acts on a canvas names the worktree it acts
+ * on: with several worktrees merged into one view, "the current one" is a
+ * property of the click, not of the connection.
+ */
 export type ClientMsg =
-  | { type: "utterance"; referent: Referent | null; text: string }
-  | { type: "onboard"; focus?: string }
+  | {
+      type: "utterance";
+      /** the worktree whose harness is steered; refused when it has no session */
+      worktree: string;
+      referent: Referent | null;
+      text: string;
+      /**
+       * Greenfield only: leave the first turn to the product picture (the
+       * default when absent) instead of letting the agent start building. Read
+       * only when the canvas is empty as the utterance lands.
+       */
+      productFirst?: boolean;
+    }
+  | { type: "onboard"; worktree: string; focus?: string }
+  /**
+   * Hand that worktree over to itself, or take it back: while it is on, the
+   * bridge answers the end of every turn for the user until the agent says the
+   * work is finished.
+   */
+  | { type: "set_autonomous"; worktree: string; on: boolean }
   /** ask THIS project's agent to retarget onto `path` (local mode; the agent decides) */
   | { type: "switch_project"; path: string }
+  /**
+   * Show the native folder chooser on the machine this project's agent runs
+   * on, and answer this socket with `folder_picked`. It lives over the wire
+   * because no web API hands a browser an absolute path: the folder the user
+   * points at is only a path on the machine the dialog opened on.
+   */
+  | { type: "pick_folder" }
+  /**
+   * start a brand-new project at `path`: create the folder, put it under
+   * version control, optionally publish it to GitHub, then retarget onto it
+   */
+  | { type: "create_project"; path: string; github: { visibility: "public" | "private" } | null }
   /** join another project this server hosts; answered with a fresh `hello` to this socket only */
   | { type: "select_project"; projectId: string }
-  /** compare two snapshots; `revA` = before, `revB` = after. Unknown rev → `error` frame */
-  | { type: "diff"; revA: number; revB: number }
-  | { type: "abort" }
+  /**
+   * Run a harness in the worktree at `path` — a worktree of THIS project, not a
+   * retarget. Answered with `session_started`, or an `error` frame.
+   *
+   * `backend` names the harness to start and beats every configured default;
+   * absent, the agent resolves one (project config, user config, its flag, or
+   * the single detected harness). `autonomous` starts it deciding for itself,
+   * which for most harnesses means launching with approval turned off — it can
+   * only be chosen HERE, because that is the only moment it can be passed.
+   * `remember` writes the chosen harness to `<path>/.shape/config.json`, so
+   * the next open of this project needs no card.
+   */
+  | { type: "open_worktree"; path: string; backend?: string; autonomous?: boolean; remember?: boolean }
+  /**
+   * Take the user to the harness's terminal: focused in their own terminal
+   * (herdr), or answered with a `terminal` frame that opens the drawer (pty).
+   */
+  | { type: "focus_terminal"; worktree: string }
+  /** stop the harness running in `worktree`; its canvas stays on the view */
+  | { type: "close_worktree"; worktree: string }
+  /** compare two snapshots of one worktree; `revA` = before, `revB` = after. Unknown rev → `error` frame */
+  | { type: "diff"; worktree: string; revA: number; revB: number }
+  | { type: "abort"; worktree: string }
   /** re-scan running agent sessions; answered with a `sessions` broadcast */
   | { type: "discover" }
   /** retarget this bridge onto a discovered session (by pid), resuming it when it has an id */

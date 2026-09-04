@@ -11,18 +11,20 @@
     "smoke": "node scripts/smoke.mjs",
     "smoke:claude": "node scripts/smoke-claude.mjs",
     "smoke:adopt": "node scripts/smoke-adopt.mjs",
+    "smoke:herdr": "node scripts/smoke-herdr.mjs",
     "smoke:drift": "node scripts/smoke-drift.mjs",
     "smoke:remote": "node scripts/smoke-remote.mjs",
     "smoke:auth": "node scripts/smoke-auth.mjs",
+    "smoke:wire": "node scripts/smoke-wire.mjs",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "@lydell/node-pty": "1.2.0-beta.15",
+    "typescript": "^5.7.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "@types/ws": "^8.18.0",
-    "typescript": "^5.7.0"
+    "@types/ws": "^8.18.0"
   }
 }

@@ -135,7 +135,7 @@ export function buildDeltaView(delta: GraphDelta, context: GraphDoc | null): Del
       nodes,
       edges,
       // a comparison is about what the canvas said, not about what the code does
-      reality: { nodes: [], edges: [], extractedAt: null, head: null },
+      reality: { nodes: [], edges: [], symbols: [], infra: [], verification: [], extractedAt: null, head: null },
       drift: {},
     },
     marks,

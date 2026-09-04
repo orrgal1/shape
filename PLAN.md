@@ -50,7 +50,8 @@ protocol (`ServerMsg`/`ClientMsg`), the link's `canvas_call`/`agent_event` shape
 - **Server** (`packages/server`): everything canvas-shaped. Holds N `ProjectRoom`s; each
   room has at most one connected agent and any number of browsers. Never touches a repo.
 - **Local mode** = agent + server in one process over an in-memory transport, same code
-  paths, same `.shape/` files as today. `shape` with no args stays exactly this.
+  paths, same records (in `~/.shape/shape.db`) as a remote server keeps. `shape` with no
+  args stays exactly this.
 - **On-prem / SaaS** = `shape server` somewhere, `shape agent --server wss://… --token …` next
   to each harness, browsers at the server's URL.
 
@@ -113,10 +114,15 @@ Minimal and additive:
 
 ### Storage
 
-`GraphStore`/`SnapshotStore` get a `Storage` interface: `{ loadGraph(projectId), saveGraph(projectId, doc), listRevisions, loadRevision, saveRevision, prune }`.
+`GraphStore`/`SnapshotStore` get a `Storage` interface: `{ loadGraph, saveGraph,
+listRevisions, loadRevision, saveRevision, listProjects, saveProject, appendAudit }`, every
+record keyed `(tenant, projectKey)`.
 
-- `FsStorage(root)` — local mode keeps today's layout by resolving `root = <cwd>/.shape` per project (the agent tells the server the cwd; in-process it is the same machine). On-prem uses `SHAPE_DATA_DIR/<projectId>/`.
-- `DbStorage` (SaaS) — Postgres/SQLite, same interface, one table per record type, JSON columns. Not in the first three phases.
+- `DbStorage` — LANDED 2026-09-03 as `server/sqlite.ts` (`openSqliteStorage(file)`) on Node's
+  built-in `node:sqlite`, one file, four tables, JSON payload columns, zero dependencies. It
+  is the only implementation: local mode opens `~/.shape/shape.db`, a remote server opens
+  `<data-dir>/shape.db`. The file-backed `projectDirStorage()`/`dataDirStorage(root)` of
+  Phase 2 are gone; `server/legacy.ts` imports what they wrote, once.
 
 Reality and drift are never stored (re-derivable), same as today.
 
@@ -198,6 +204,10 @@ no requests, no timers) — eviction was not needed. The client hides recents/ad
 agentless and keeps the server's project list as the way out. `pnpm smoke:remote` grew to
 32 checks: data layout, restart with agents up, restart with none.
 
+Superseded 2026-09-03 by decision 4 below: the two file-backed storages were replaced by the
+single SQLite one. Everything else in this phase — the registry, the agentless restore, the
+read-only client — stands, and `smoke:remote` still asserts it, now against database rows.
+
 Original scope: multiple agents per server, project picker in the client replacing the local
 recents pop-up when remote, `lastSeen`/`agentConnected` per project, room GC, `FsStorage`
 under a data dir, browser can watch a room whose agent is gone (history/diff only).
@@ -208,7 +218,8 @@ Landed: `server/auth.ts` (token file, `Authorization: Bearer` / `?token=` at upg
 before any socket exists), tenant-keyed rooms/lists/default room/storage
 (`<data-dir>/tenants/<tenant>/projects/<id>/`), bind guard (`refusing to listen on <host>
 without --token-file`), `shape agent --allow-terminal` (off by default: `terminal: "none"`
-advertised, `pty_*` ignored by the agent AND dropped by the server), `audit.jsonl` per room
+advertised, `pty_*` ignored by the agent AND dropped by the server), an audit trail per room
+(one JSONL file then, an `audit` table since the SQLite storage landed)
 with deliver/delivered/onboard lines, `shape login <url> <token>` → `~/.shape/servers.json`
 (0600) consulted after `--token` and `SHAPE_TOKEN`, 401 is final for the agent. The web
 client reads `?token=`/`?server=` once into localStorage. `pnpm smoke:auth` (21 checks) is the
@@ -222,8 +233,11 @@ token A cannot see token B's projects; terminal pane absent unless the agent all
 
 ### Phase 4 — SaaS
 
-`DbStorage`, users/orgs on top of tokens, hosted web build served by the server, agent
-auto-update channel. Designed but not scheduled; nothing in Phases 0–3 blocks it.
+Users/orgs on top of tokens, hosted web build served by the server, agent auto-update
+channel. `DbStorage` is done (landed 2026-09-03, see §Storage), so a hosted server already
+has the storage it needs; a Postgres implementation of the same interface is the only piece
+left when one machine stops being enough. Designed but not scheduled; nothing in Phases 0–3
+blocks it.
 
 ## Decisions taken in this plan (flag if you disagree)
 
@@ -234,8 +248,11 @@ auto-update channel. Designed but not scheduled; nothing in Phases 0–3 blocks 
    credentials out of harness config files and keeps the link endpoint loopback-only.
 3. **A switch is a new room.** Simplest model: rooms are keyed by (tenant, project key); the
    agent re-attaches. No "move an agent between rooms" op.
-4. **Local mode keeps `<cwd>/.shape/` on disk.** No migration for existing projects; the
-   storage abstraction is what lets on-prem/SaaS choose otherwise.
+4. ~~**Local mode keeps `<cwd>/.shape/` on disk.**~~ Superseded 2026-09-03: the user chose
+   SQLite everywhere, so local mode keeps its canvases in `~/.shape/shape.db` (`SHAPE_HOME`
+   and `--db` honored) and nothing but an optional `config.json` stays in the repo. The
+   per-project key preserves per-worktree canvases, and a pre-SQLite `.shape/` is imported
+   on the first attach and then removed.
 5. **Browser protocol stays; additive only.** The client work is a project picker and a
    read-only state, not a rewrite.
 

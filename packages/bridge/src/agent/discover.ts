@@ -100,7 +100,7 @@ const NON_SESSION_SUBCOMMANDS: Record<string, true> = {
 
 /**
  * Harness for a process, or null. Rules (in order):
- * - `omp` in flag form (`omp`, `omp --resume <id>`, `omp --mode rpc`); the internal
+ * - `omp` in flag form (`omp`, `omp --resume <id>`); the internal
  *   `omp browser-relay` / `omp __omp_worker_daemon_broker` helpers are subcommands, so out.
  * - `claude`, or a node process running `.../claude-code/cli.js`, `.../claude/versions/...`
  *   or `cli-wrapper.cjs`.
@@ -495,7 +495,7 @@ export async function discoverSessions(): Promise<DiscoveredSession[]> {
   }
   if (hits.length === 0) return [];
 
-  // Parents too: an `omp --mode rpc` row is only Shape's if its parent is a bridge.
+  // Parents too: a session is only Shape's own if its parent is a bridge.
   const probe = new Set<number>();
   for (const { row } of hits) {
     probe.add(row.pid);
@@ -508,7 +508,10 @@ export async function discoverSessions(): Promise<DiscoveredSession[]> {
     // A session file older than the process cannot be that process's own.
     const notBefore = row.startedAt === null ? 0 : Date.parse(row.startedAt) - START_SLACK_MS;
     const { sessionId, sessionFile } = sessionRefFor(harness, cwd, row.argv, notBefore);
-    const rpcChild = harness === "omp" && row.argv.includes("--mode") && row.argv.includes("rpc");
+    // A harness Shape launched itself is not worth offering to adopt: it is
+    // already driving this canvas. Shape starts them as real terminal
+    // sessions now, so the only thing that tells them apart is the parent.
+    const spawnedByShape = looksLikeShapeBridge(byPid.get(row.ppid), cwds.get(row.ppid) ?? null);
     return {
       harness,
       pid: row.pid,
@@ -518,8 +521,8 @@ export async function discoverSessions(): Promise<DiscoveredSession[]> {
       sessionFile,
       startedAt: row.startedAt,
       resumeCommand: resumeCommandFor(harness, sessionId),
-      attach: rpcChild ? "none" : attachFor(harness, row.pid, row.argv),
-      spawnedByShape: rpcChild && looksLikeShapeBridge(byPid.get(row.ppid), cwds.get(row.ppid) ?? null),
+      attach: attachFor(harness, row.pid, row.argv),
+      spawnedByShape,
     } satisfies DiscoveredSession;
   });
 

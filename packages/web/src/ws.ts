@@ -52,15 +52,18 @@ function bridgeUrl(): string {
  * so a terminal byte never walks through the graph parser.
  */
 function asPtyServerMsg(raw: Record<string, unknown>): PtyServerMsg | null {
+  // one terminal per variation, so a byte with no worktree cannot be placed
+  const worktree = typeof raw.worktree === "string" && raw.worktree !== "" ? raw.worktree : null;
+  if (worktree === null) return null;
   switch (raw.type) {
     case "pty_data":
-      return typeof raw.data === "string" ? { type: "pty_data", data: raw.data } : null;
+      return typeof raw.data === "string" ? { type: "pty_data", worktree, data: raw.data } : null;
     case "pty_exit":
-      if (raw.code === null) return { type: "pty_exit", code: null };
-      return typeof raw.code === "number" ? { type: "pty_exit", code: raw.code } : null;
+      if (raw.code === null) return { type: "pty_exit", worktree, code: null };
+      return typeof raw.code === "number" ? { type: "pty_exit", worktree, code: raw.code } : null;
     case "pty_state":
       if (typeof raw.open !== "boolean" || typeof raw.shell !== "string" || typeof raw.cwd !== "string") return null;
-      return { type: "pty_state", open: raw.open, shell: raw.shell, cwd: raw.cwd };
+      return { type: "pty_state", worktree, open: raw.open, shell: raw.shell, cwd: raw.cwd };
     default:
       return null;
   }

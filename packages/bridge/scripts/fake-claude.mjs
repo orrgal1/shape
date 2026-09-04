@@ -1,121 +1,99 @@
 #!/usr/bin/env node
 /**
- * Protocol stub standing in for
- * `claude -p --input-format stream-json --output-format stream-json` in bridge
- * smoke tests: same stream-json frames, no model, no network, no clock.
+ * Interactive stand-in for the `claude` TUI in bridge smoke tests: a long-lived
+ * process that sits in a terminal, reads what is typed at it, and says nothing
+ * anybody listens to. Plain Node, no deps, no model, no network.
  *
- * Every frame it receives is appended to FAKE_CLAUDE_LOG (default
- * <cwd>/fake-claude.log), starting with a `__start` record carrying the argv it
- * was launched with — that is how the smoke asserts the adapter's command line.
+ * Shape drives the real Claude Code the same way a person does — it launches it
+ * in a terminal (a herdr tab, or a pty Shape owns) and pastes into it — and
+ * hears about the session through hooks, never through this process's stdout.
+ * So that is all this fake is: a launch to assert the argv of, a paste to
+ * assert the text of, and an abort to assert the keystroke of.
  *
- * One user message produces one turn:
- *   system.init -> assistant(text + tool_use Read) -> user(tool_result) -> result
+ * Everything it sees is appended to FAKE_CLAUDE_LOG (default
+ * <cwd>/fake-claude.log), one JSON object per line:
+ *   { "type": "__start", pid, cwd, argv }   at startup
+ *   { "type": "typed", text }               a bracketed paste, markers stripped
+ *   { "type": "key", key: "escape" | "enter" | "ctrl-c" }
+ *   { "type": "__exit", pid, reason }       on SIGTERM/SIGINT
  *
- * Unlike the real CLI it also emits `system.init` once at startup, so a bridge
- * that asks for `state()` right after `start()` already knows the session.
+ * Environment:
+ *   FAKE_CLAUDE_LOG       where the log goes; default <cwd>/fake-claude.log
+ *   FAKE_CLAUDE_SESSION   the session id it prints in its banner
  */
 
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 
 const LOG = process.env.FAKE_CLAUDE_LOG ?? join(process.cwd(), "fake-claude.log");
-/** the file the fake's Read tool call claims to touch — an activity probe */
-const FILE = process.env.FAKE_CLAUDE_FILE ?? "packages/auth/src/index.ts";
 const SESSION = process.env.FAKE_CLAUDE_SESSION ?? "fake-session-0001";
-const MODEL = process.env.FAKE_CLAUDE_MODEL ?? "claude-fake-5";
-/** ms to hold a turn open before `result` — lets a test steer mid-turn */
-const TURN_HOLD_MS = Number(process.env.FAKE_CLAUDE_TURN_HOLD_MS ?? 0);
 
-function out(frame) {
-  process.stdout.write(`${JSON.stringify(frame)}\n`);
+function record(entry) {
+  appendFileSync(LOG, `${JSON.stringify(entry)}\n`);
 }
 
-function record(frame) {
-  appendFileSync(LOG, `${JSON.stringify(frame)}\n`);
-}
+record({ type: "__start", pid: process.pid, cwd: process.cwd(), argv: process.argv.slice(2) });
+// a banner, because a terminal that prints nothing looks broken to a human
+// watching it; nothing reads this
+process.stdout.write(`fake-claude ${SESSION} ready\n`);
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-let turns = 0;
-/** turns are serialized, exactly like the real CLI's sequential prompt queue */
-let queue = Promise.resolve();
-
-function init() {
-  out({
-    type: "system",
-    subtype: "init",
-    cwd: process.cwd(),
-    session_id: SESSION,
-    model: MODEL,
-    tools: ["Read", "Edit", "Bash"],
-    mcp_servers: [{ name: "shape", status: "connected" }],
-    permissionMode: "acceptEdits",
-    messaging_socket_path: `/tmp/cc-socks/${process.pid}.sock`,
-  });
-}
-
-async function runTurn(text) {
-  turns += 1;
-  const id = `toolu_fake_${turns}`;
-  init();
-  out({
-    type: "assistant",
-    message: {
-      id: `msg_fake_${turns}`,
-      role: "assistant",
-      model: MODEL,
-      content: [
-        { type: "text", text: `ack: ${text.slice(0, 200)}` },
-        { type: "tool_use", id, name: "Read", input: { file_path: FILE } },
-      ],
-    },
-    session_id: SESSION,
-  });
-  out({
-    type: "user",
-    message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "1 line", is_error: false }] },
-    session_id: SESSION,
-  });
-  if (TURN_HOLD_MS > 0) await sleep(TURN_HOLD_MS);
-  out({ type: "result", subtype: "success", result: `ack: ${text.slice(0, 200)}`, session_id: SESSION, num_turns: turns });
-}
-
-function handle(frame) {
-  record(frame);
-  if (frame.type === "control_request") {
-    // the real CLI answers every control_request; interrupt also ends the turn
-    out({ type: "control_response", response: { subtype: "success", request_id: frame.request_id, response: {} } });
-    return;
-  }
-  if (frame.type !== "user") return;
-  const content = frame.message?.content;
-  const text = typeof content === "string" ? content : JSON.stringify(content);
-  queue = queue.then(() => runTurn(text));
-}
-
+/**
+ * A pasted utterance arrives bracketed (`ESC[200~ … ESC[201~`) and is submitted
+ * with a carriage return; anything else typed is a keystroke. The buffer is
+ * kept across chunks because a paste is not guaranteed to arrive whole.
+ */
 let buf = "";
+const PASTE_START = "\u001b[200~";
+const PASTE_END = "\u001b[201~";
+
+function drain() {
+  for (;;) {
+    const start = buf.indexOf(PASTE_START);
+    if (start >= 0) {
+      const end = buf.indexOf(PASTE_END, start + PASTE_START.length);
+      // an unfinished paste waits for the rest of it
+      if (end < 0) return;
+      record({ type: "typed", text: buf.slice(start + PASTE_START.length, end) });
+      buf = buf.slice(end + PASTE_END.length);
+      continue;
+    }
+    const key = buf.indexOf("\u001b");
+    if (key >= 0) {
+      // an ESC on its own is how a turn is interrupted from a keyboard
+      record({ type: "key", key: "escape" });
+      buf = buf.slice(key + 1);
+      continue;
+    }
+    if (buf.includes("\u0003")) {
+      record({ type: "key", key: "ctrl-c" });
+      buf = buf.replaceAll("\u0003", "");
+      continue;
+    }
+    const nl = buf.search(/[\r\n]/);
+    if (nl < 0) return;
+    record({ type: "key", key: "enter" });
+    buf = buf.slice(nl + 1);
+  }
+}
+
+// A TUI reads keys, not lines: without raw mode the terminal's line discipline
+// would hold a bare ESC (which is how a turn is interrupted) until the next
+// newline, and the real thing puts its terminal in raw mode for the same reason.
+process.stdin.setRawMode?.(true);
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   buf += chunk;
-  for (;;) {
-    const nl = buf.indexOf("\n");
-    if (nl < 0) break;
-    const line = buf.slice(0, nl).trim();
-    buf = buf.slice(nl + 1);
-    if (line.length === 0) continue;
-    let frame;
-    try {
-      frame = JSON.parse(line);
-    } catch {
-      record({ type: "__unparseable", line });
-      continue;
-    }
-    handle(frame);
-  }
+  drain();
 });
-process.stdin.on("end", () => {
-  queue.then(() => process.exit(0));
-});
+// stdin closing is not a reason to leave: a TUI stays up until it is told to go
+process.stdin.on("end", () => {});
+process.stdin.resume?.();
 
-record({ type: "__start", pid: process.pid, cwd: process.cwd(), argv: process.argv.slice(2) });
-init();
+const bye = (reason) => {
+  record({ type: "__exit", pid: process.pid, reason });
+  process.exit(0);
+};
+process.on("SIGTERM", () => bye("SIGTERM"));
+process.on("SIGINT", () => bye("SIGINT"));
+// nothing else keeps this process alive: it is a terminal application waiting
+setInterval(() => {}, 1 << 30);

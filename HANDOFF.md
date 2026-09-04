@@ -213,3 +213,291 @@ interactive TUI can be driven (hub injection) so omp gets a tui mode like Claude
   fixed; verify web changes once against the live bridge, not only `?mock=`.
 - Smokes: bridge 126, shared 87, claude 42, adopt 17, drift 23. Fixtures `?mock=1` and
   `?mock=playground` carry a product root + capabilities.
+
+## 2026-09-03: SQLite everywhere + start-a-new-project flow (Opus builders, integrated + verified)
+
+- **SQLite everywhere** (user decision: including local mode). All canvas state — graph
+  docs, revision snapshots, project registry, audit — lives in one `node:sqlite` database
+  (`packages/bridge/src/server/sqlite.ts`, `openSqliteStorage(file)`; schema in
+  CONTRACTS.md §Storage, `user_version=1`, WAL). Local: `~/.shape/shape.db` (`SHAPE_HOME`,
+  `--db <file>`); remote: `<data-dir>/shape.db`. `Storage` is now a record store keyed
+  (tenant, projectKey); `GraphStore`/`SnapshotStore` are constructed over it;
+  `projectDirStorage`/`dataDirStorage` are gone. Per-worktree canvases survive because the
+  key is sha256(host + realpath(cwd)). `<repo>/.shape/` now holds only `config.json`; a
+  pre-SQLite `graph.json` + `revisions/` are imported on first attach and moved aside under
+  `.shape/imported/` (`server/legacy.ts`); a pre-SQLite `--data-dir` is imported once at
+  server start. Earlier build-log entries above that say `<target>/.shape/graph.json` are
+  history.
+- **Incident during verification:** the first `smoke:adopt` run adopted the live omp session
+  whose cwd is THIS repo; the bridge (on the smoke's throwaway DB) imported this repo's
+  `.shape/graph.json` + `revisions/` and — as the importer then deleted after import —
+  the throwaway DB took the only copy with it. This repo's own canvas is lost; re-onboard
+  it. Two fixes landed: the importer moves files aside instead of deleting, and
+  `smoke-adopt.mjs` backs up/restores the adopted project's `.shape/`.
+- **Start a new project from the canvas.** Project menu → "start a new project": folder path
+  (prefilled to the current project's parent), optional "also create it on GitHub" with
+  private/public (checkbox only when `session.canPublish`: `gh auth status` ok on the agent's
+  machine, probed once, binary `$SHAPE_GH`). Wire: browser `create_project {path, github}` →
+  room forwards `create` under the switch guard → agent (`agent/newproject.ts`) mkdir, `git
+  init -b main` unless already inside a repo, README + "Initial commit" (skipped with a
+  warning when git has no identity), `gh repo create <name> --source --remote origin
+  --<visibility> [--push]`, then the ordinary `switch_project` path and a `created` frame →
+  one transcript line ("Started X at … — new repository, published to <url>") plus one
+  `error` per warning. Only "path exists and is not a directory" rejects; everything after
+  mkdir is a warning so the user still lands in the project. `ctl.mjs create-project`.
+  Publishing is exercised only through `scripts/fake-gh.mjs`; no real GitHub repo was
+  created during verification.
+- Smokes: bridge 140 (126 + 4 legacy import + 10 new project), remote 32, auth 23, drift
+  23, claude 42, adopt 17, shared 87. Live browser check of the form against a real bridge
+  (fake omp) done: header retargets, transcript line visible, `.git` + one commit on disk.
+- **Foot-gun fixed same day** (user clicked Create on the prefilled parent folder and got
+  `~/code` git-inited and committed): the form is now folder + required project name
+  (Create disabled until the name is valid; path preview underneath), and
+  `createProject` refuses any existing non-empty folder before touching git
+  (`create_project rejected: "<path>" already has files in it — open it with "open another"
+  instead, or choose a new folder name`). Only a new or empty folder can become a project.
+  Bridge smoke 143.
+
+## 2026-09-03 (evening): product-first turn, liveness, session pane
+
+- **Bridge is run by the session now** (user request): `hub` process `bridge` (`node src/index.ts
+  --cwd <project>` from packages/bridge, port 4400), restarted after each batch lands; Vite stays
+  the user's. A restart kills the running omp child, so never restart mid-batch.
+- **Product-first greenfield turn** (`server/productturn.ts`): the first utterance on an empty
+  canvas writes a draft root at once (`product`, "Your idea", first sentence as summary, phase
+  `idea`, status "working out what this is…", activity `["product"]`), then the composed first
+  prompt makes the turn product-only and a gate rejects build-layer ops / `realizes` with
+  `product/first` until `turn_end` or the next utterance. `utterance.productFirst: false` opts
+  out (empty-state checkbox "Start with the product picture"). Web switches to PRODUCT when a
+  product node first appears; placeholder becomes `Correct the picture, or say "build it"`.
+- **Liveness**: `applyCanvasCall` returns `touched`; a canvas call sets activity to the ids it
+  wrote (file `tool_start` unions, `turn_end` clears). CSS: `idea` dashed/dim draft, `concept`
+  dim, `building` breathing border; focus card (or the lone bubble) gets `data-thinking` while
+  the agent works with nothing lit; bottom-left "now" pill shows the latest tool line.
+- **Session pane**: `BackendCapabilities.terminal` += `"session"`; omp advertises it. `SessionView`
+  (`agent/backend/sessionview.ts`) renders the rpc stream as read-only ANSI text (prompts, text
+  deltas, tool cards, results, state rules), 64 KiB ring buffer; `pty_open` on a replayable
+  source broadcasts clear + replay. Blank-terminal root cause: the client sent `pty_open` once
+  and dropped it when the socket was not open; it now re-asks on every connect.
+- **Prompt box** is a textarea: grows to 5 lines then scrolls; Enter sends, Shift+Enter newline.
+- Smokes: bridge 165, remote 32 (first utterance opts out of the product turn), auth 24, drift
+  23, claude 42, adopt 17, shared OK.
+- **Queued, contracts settled**: depth (classes/functions via the TypeScript parser, `file#Name`
+  codeRefs, leaf drill into symbols) + infra layer (`layer: "infra"`, kinds host/database/cache/
+  cdn/ci, `hosts` infra→build, mechanical extraction from compose/terraform/k8s/platform/CI/
+  deps/env) — contract at the session's `local://depth-infra-contract.md`; then worktrees merged
+  in one view with Shape running one harness per worktree (user decisions 2026-09-03).
+
+## 2026-09-03 (night): four layers — depth, infra, verify
+
+- **Shared contract** (two waves, agent://SharedContract + agent://VerifyContract): `Layer =
+  product | build | infra | verify`; `NodeKind` += host/database/cache/cdn/ci and
+  test/smoke/check/review/monitor; build-facing links `realizes` (product), `hosts` (infra),
+  `verifies` (verify) share one `BUILD_LINKS` table driving `op/bad-*` / `op/node-*` guards;
+  symbol codeRefs `file#Name` (`symbolRefOf`, `op/bad-coderefs`); helpers `hostsOf`/`runsOnOf`,
+  `verifiedOf`/`verifiersOf`, `verificationOf` (intent verifier OR a reality cover, prefix rule
+  both directions, ancestor codeRefs count) and `capabilityVerification` (rollup over
+  realizers). Reality: `symbols`, `infra`, `verification` arrays. Shared smoke 254.
+- **Bridge**: `typescript` is a runtime dependency; `agent/symbols.ts` (top-level classes/
+  functions via `ts.createSourceFile`, one read pass shared with the import scan, cap 20 000);
+  `agent/infra.ts` (compose/Dockerfile/platform files/terraform/k8s/CI/package deps/.env
+  keys, engine table, dedupe by kind+name, ≤ 80 items, nothing for non-git targets);
+  `agent/verification.ts` (test files per package + runner configs, smoke scripts, check
+  scripts, CI; `covers` = package dir + what the test files import). Gate: infra/verify need
+  codeRefs; `onboarding/unknown-symbol`. Drift rule C: vanished symbol. Survey rules 10–12;
+  preamble FOUR LAYERS + "a built bubble nothing verifies is a claim". Bridge smoke 212,
+  drift 29.
+- **Web**: four tabs (PRODUCT what people get / BUILD what it is made of / INFRA where it
+  runs / VERIFY what proves it works); drills `__hosts__:` and `__verifies__:` beside
+  `__realizes__:`; chips runs on / runs / verified by / attests; shield pip on build bubbles
+  (filled/hollow) and capabilities (filled/half/hollow); ghost columns per view (packages,
+  configuration, found-in-code, and the leaf "inside" symbol listing); fixtures carry all four
+  layers. Screenshots: /tmp/shape-webinfra-shots, /tmp/shape-webverify-shots.
+- Not yet exercised with a real model turn on a real repo (only fake omp + fixtures): re-map
+  shape-playground to see the agent produce infra/verify bubbles.
+
+## 2026-09-03 (late): every worktree on one canvas
+
+- **Identity**: project key = sha256(host + realpath(git common dir)) — all worktrees of a
+  repo share one room; worktree id = realpath of its directory; `project.cwd` = main
+  worktree. Old keys (per-directory) are adopted onto the new key on the next attach
+  (`project.legacyKeys`, `Storage.adoptLegacyKey`; a non-empty canvas already under the new
+  key wins). Found the hard way: the first restart stranded duck-counter's and
+  shape-playground's canvases under their old keys until adoption landed.
+- **Wire** (agent://WorktreeFoundations): every worktree-scoped frame carries `worktree` on
+  both links and the browser; `attach { worktrees, sessions: WorktreeSession[], realities }`;
+  `session_started`/`session_stopped`; `open_worktree`/`close_worktree`; hello carries
+  `graphs`/`agents`/`revisions` keyed by worktree. Storage `user_version` 2: graphs/revisions/
+  audit keyed (tenant, key, worktree); `smoke:wire` (200 checks) covers frames + migration.
+- **Agent** (agent://AgentRuntime): `Map<worktreeId, Harness>` — one harness (omp child, pty,
+  session view, preamble state) per opened worktree; `--cwd` opens the first; switch/create/
+  adopt inside the same repo = open that variation, another repo = full retarget. Loopback
+  link frames carry `cwd`, routed to the worktree by longest realpath prefix.
+- **Room** (agent://Room): `Map<worktreeId, WorktreeState>` (store, snapshots, activity,
+  agent state, session, gates) for every listed worktree, agentless ones read-only;
+  utterance to a worktree with no session → `no session is running on <branch> — open it
+  from the variations menu`.
+- **Web** (agent://WebMerge): `doc` = merge of the filtered variations (`mergeGraphs`,
+  primary = main worktree), branch pips per bubble (hollow = differs), activity rings per
+  branch, variations pill = filter + open/stop, steering target chip, "where" panel section,
+  per-target compare/revisions/session pane; fixtures carry two variations each.
+- Smokes: bridge 233, wire 200, remote 32, auth 24, drift 29, claude 42, adopt 17, shared
+  254; tsc clean in bridge, web, link. Live: duck-counter's 11-bubble canvas back after
+  adoption (`[bridge] adopted the canvas of … from its previous project key`).
+
+## 2026-09-04: next card, autonomous mode, motion v2, follow-the-work, correctness
+
+- **Next card** (`Next { summary, choices[≤4]{label, say}, question }`): the agent ends every
+  turn with `next` on the canvas call (validated `op/bad-next`, never stored); the room keeps it
+  per worktree, clears it on any utterance, synthesizes one at `turn_end` when missing.
+  `NextCard.tsx` in the `.steer-dock`.
+- **Autonomous** (`set_autonomous { worktree, on }`): at `turn_end` with an open choice/question
+  the room delivers `AUTO_CONTINUE_PROMPT` (transcript `autonomous:`, audit `auto`); nothing
+  when the card is empty; cap 25 per stretch then paused; product-first gate off while on.
+  Chip beside the target chip.
+- **Motion v2** (web only): edge dash flow toward the lit bubble in branch colour, staggered
+  double rings + breathing, phase-dot ripple, arrival ripple / dissolve, text slide-ins,
+  ambient wash while working, shimmering now-pill, staggered alive-wash while thinking.
+- **Follow the work**: `following()` in web store — an activity/graph frame whose ids all sit on
+  one other layer switches the view unless the user pinned a view in the last 20 s
+  (`viewPinnedAt`, stamped by every deliberate switch/drill).
+- **Rename** layer `verify` → `correctness` (tab CORRECTNESS, "what proves it works");
+  `verifies`/helpers/codes/kinds unchanged; load-time mapping in bridge `store.ts` and web
+  `parse.ts`; the wire rejects `"verify"`.
+- Smokes: bridge 255+, wire 210, remote 32, auth 24, drift 29, claude 42, adopt 17, shared 264+.
+- **Next (contract written, `local://harness-layer-contract.md`)**: Shape as a layer over the
+  real harness — launchers (herdr socket API / own pty), omp via `--extension` (canvas tool,
+  events, `sendUserMessage` steer over the loopback link), harness detection + per-project
+  chooser, "Go to terminal" replacing the Canvas|Session toggle, rpc-mode omp + the read-only
+  session view deleted. Facts: agent://OmpExtensionMap, agent://HerdrMap.
+
+## 2026-09-04: Shape as a layer over the real harness (landed)
+
+- **Launchers** (`agent/launcher/`): `herdr` (socket API — ONE request per connection, the
+  server hangs up after each answer and does not echo ids on refusals; subscriptions are the
+  only long-lived connections; `pane.agent_status_changed` needs a `pane_id`, subscribed per
+  launched pane; global `pane.exited`/`pane.closed`) and `pty` (own pty, terminal drawer in the
+  browser). Chosen at startup: herdr when detected and answering `session.snapshot`
+  (protocol 19), else pty; `SHAPE_LAUNCHER` forces.
+- **Adapters**: omp = interactive TUI + `--extension packages/link/src/omp-extension.ts`
+  (canvas tool, events incl. `text_delta`, `deliver`/`delivered` steer via
+  `pi.sendUserMessage`, `abort` → `ctx.abort()`, `autonomous` → tool_call allow), session
+  counted started on the loopback `hello`; claude = TUI through the launcher (MCP + hooks);
+  generic = any other detected harness under herdr (status from herdr, steer by typing, no
+  canvas tool). Deleted: rpc mode, `sessionview.ts`, `terminal: "session"`, claude headless.
+- **Detection** (`agent/detect.ts`): herdr + omp/claude/codex/opencode/gemini/cursor-agent/
+  amp/copilot on PATH with versions → `hello.tools`. Resolution per worktree: explicit >
+  `<cwd>/.shape/config.json` > `~/.shape/config.json` > `--backend` > exactly one detected >
+  NONE (attached, no session; the web shows the Start card: harness radio, Autonomous,
+  Remember → `open_worktree { path, backend, autonomous, remember }`).
+- **Web**: Canvas|Session toggle gone; header "Go to terminal <branch>" → `focus_terminal`
+  (herdr focuses the tab; pty opens the drawer); `now { worktree, text }` types the live
+  assistant text into the pill.
+- Proven: real omp 18.1.2 under the pty launcher (hello, deliver visible in omp's session
+  file, `now` frames, state), real herdr probe (`herdr 0.8.0 (protocol 19) will host the
+  sessions`), fakes `fake-omp-tui.mjs` / `fake-herdr.mjs` / rewritten `fake-claude.mjs`.
+  Smokes: bridge 266, wire 333, herdr 24, remote 32, auth 24, drift 29, claude 39, adopt 17,
+  shared OK, link selftest 69. NOT yet done: a real session launched into a real herdr tab
+  from the browser (the user's next click does exactly that).
+
+## 2026-09-04 (later): herdr+omp only, workspace per project, sessions on demand
+
+- **Bug**: the first real launch from the browser failed `open_worktree failed for main:
+  herdr refused: invalid_request (missing field pane_id)` — herdr 0.8.0's `AgentStartParams`
+  is `{ name, kind, pane_id, args?, timeout_ms? }`; the launcher sent `pane`/`timeout`. Fixed
+  in `launcher/herdr.ts`; `fake-herdr.mjs` now refuses the old spelling the way herdr does.
+- **Placement**: `LaunchSpec.project { path, label }` (and `BackendStart.project`, passed
+  through by every adapter; the runtime fills it from the main worktree). `HerdrLauncher`
+  keeps one herdr workspace per project (cached id → `worktree.repo_root`/`checkout_path` →
+  label → `workspace.create`, whose answer's root tab hosts the first session) and one tab
+  per variation (`tab.create { workspace_id }`; `workspace_not_found` → recreate once).
+  `HerdrRefusal` carries herdr's error code.
+- **Only herdr+omp for now**: `resolveBackend` never answers NONE — step 6 is `omp`. A
+  project attaches WITH a session (startup/switch/create/adopt); `#openHarness` returns
+  `Harness`; the "needs to know which harness" refusal is gone. pty launcher and
+  claude/generic adapters kept for the smokes and later.
+- **Typing opens a session**: room `utterance`/`onboard` use `#variationOf` (no session
+  gate; `abort`/`focus_terminal`/`set_autonomous` keep `#steerable`); the agent's `#deliver`
+  calls `#openVariation` when no harness runs there → `session_started` then `delivered`, or
+  `error open_worktree failed …` and no `delivered`. Web: steering bar/target chip offer every
+  on-canvas variation (dot off = no session, hint "starts a session on <branch>…"), empty
+  state is "Say the idea" with the StartCard as the explicit switches-first path; mock mirrors
+  the ordering. `AgentProject.backend` is null only after every harness left.
+- Smokes: bridge OK, wire 333, herdr 30, claude 39, adopt 17, remote 32, drift 29, auth 24,
+  shared OK. Live: `HerdrLauncher.launch` against real herdr 0.8.0 started omp in
+  duck-counter and closed its tab; the hub `bridge` process (restart it after bridge-side
+  changes: `hub restart bridge`) came up with `herdr started omp … in pane w1S:pA`.
+
+## 2026-09-04 (later still): Go to terminal raises the app, map goes down to functions
+
+- **Go to terminal** did nothing visible: `agent.focus` switched herdr's tab but Ghostty stayed
+  behind Chrome. `HerdrLauncher.probe()` now finds the terminal app hosting the herdr client
+  (`ps -axo pid,ppid,command` → `terminalAppOf`/`isHerdrClient`, first `.app` ancestor;
+  `SHAPE_TERMINAL_APP` overrides) and `focus()` runs `open <bundle>` (`SHAPE_OPEN` knob) after
+  the tab focus; nothing raisable ⇒ `terminal: "none"` and the button is hidden (web unchanged).
+  Live: `ctl.mjs focus-terminal` → `ok`, herdr tab flipped to `w1Z:t1`.
+- **Restart hygiene**: combined mode (`index.ts`) had no SIGINT/SIGTERM handler, so a hub
+  restart left the predecessor's omp tab in herdr and the next start died with
+  `agent_name_taken`. Now `agent.stop()` runs on both signals (tabs closed, herdr drops the
+  emptied workspace), and `launch()` retries `agent.start` past `agent_name_taken` with the
+  next `shape-<slug>-<n>` (≤ 20). Proven: two consecutive restarts, one tab each time.
+- **Finer mapping**: rule 10 of the survey is REQUIRED and the prompt carries the symbol
+  inventory (bounded 400 / 12 per file); `SOURCE_EXTS` +`.js .jsx .mjs .cjs`; preamble tells the
+  harness to keep `path#Name` children for classes/major functions it writes. Onboarding is
+  refused once a canvas has bubbles, so the live proof was an utterance to the running
+  duck-counter session: 11 → 88 bubbles, `path#Name` down to `public/app.js#viewCount`.
+- Smokes: bridge OK (+6), wire 340 (+7), herdr 31 (+1), claude 39, adopt 17, drift 29, web tsc
+  OK. Open: `api` and `server` bubbles overlap on `src/server.ts` (the model's grouping).
+
+## 2026-09-04 (evening): Open with nothing typed = native folder chooser
+
+- `ClientMsg pick_folder` → `ServerToAgent pick_folder` → agent shows the machine's chooser →
+  `AgentToServer folder_picked { path | null }` → `ServerMsg folder_picked` to the ASKING
+  browser only; the web fills the box and sends `switch_project`. Room slot + 10-min timer
+  (`#picking`, `PICK_TIMEOUT_MS`), refusals prefixed `pick_folder`. Test knob
+  `SHAPE_PICK_FOLDER` (smoke.mjs final block, 6 checks; wire +10).
+- macOS: AppleScript `choose folder` from the bridge opens BEHIND everything (osascript is a
+  UIElement; `tell me to activate` does nothing — a panel sat unseen 10 min), and going via
+  Finder needs an Automation grant (system prompt). Landed: JXA `NSOpenPanel` with
+  `setActivationPolicy(Regular)` + `activateIgnoringOtherApps(true)` — verified frontmost
+  (`lsappinfo front` = osascript). A stale panel is killed and replaced by the next ask.
+- Web: Open enabled on an empty box (`picking…` while waiting), Enter does the same, hint
+  "Open with nothing typed asks this machine for a folder"; mock refuses with its own text.
+- NOT yet proven: a human picking a folder in the real panel and the switch that follows —
+  the panel was up and frontmost twice, nobody answered within the timer. Everything up to
+  the click is covered by smokes with the stand-in command.
+- Also: `browser.relay` turned OFF in `~/.omp/agent/config.yml`; the browser rule (headless,
+  `app: { relay: false }`, never touch the user's tabs) lives in `~/.claude/CLAUDE.md`.
+
+## 2026-09-04 (last): connection is the default across the layers
+
+- **The decision**: whatever can be connected to something in another layer should be. A
+  capability names the parts that realize it, an infra bubble names what runs on it, a check
+  names what it attests, and a part should be reached by all three once it exists. Nothing in
+  the data model moved: still `realizes` / `hosts` / `verifies`, hierarchy and edges still
+  never cross layers.
+- **One reader**: `linkGapsOf(doc, id)` in shared/ answers "what is this bubble not connected
+  to" for everyone — `LinkGap` = `unrealized | unserved | unhosted | unattested |
+  hosts-nothing | attests-nothing`, asked only at `LINKED_PHASES`
+  (`component | building | built`; the web's `UNREALIZED_PHASES` moved here) and only when the
+  other side exists to link to. The product root is never asked.
+- **Receipt warnings** (`store.ts`): the canvas tool result gains a `{"warnings": [...]}` block
+  after the rejections one, `code: "link/<gap>"`, `severity: "warning"`, `subject.path` the
+  field to write (`/ops/<i>/node/realizes|hosts|verifies`, or `/ops/<i>/node` for a build-side
+  gap), `evidence: { gap }`, plain-English fixes. Computed after apply, only for the bubbles
+  the call touched, never for a call that applied nothing, and never on the product-first turn
+  (`applyCanvasCall(args, gate, { linkWarnings: false })`, passed by room `#canvasCall` off
+  `state.productTurn`). `isError` unchanged — a warning is not a refusal.
+  `CanvasToolOutcome.warnings` carries the list.
+- **Survey vetoes** (`onboarding.ts`): `onboarding/unhosted-infra` and
+  `onboarding/unattesting-correctness` beside `onboarding/unrealized-product`, same shape and
+  same same-call rule (a build bubble admitted earlier in the batch grounds them), asked only
+  when the canvas has a build layer. Rules 9, 11 and 12 now say the default outright and the
+  prompt closes on it as a checklist.
+- **Said everywhere else**: the preamble states the default and names the `link/...` warning it
+  comes back as; steering adds one `Missing link:` line per gap of the bubble the user clicked
+  (the root gets none, and a capability's own "Realized by: nothing yet" line is its
+  `unrealized`).
+- Smokes: bridge 277 (+13, `node scripts/smoke.mjs` — SMOKE OK). Watch out for a leftover
+  smoke bridge holding port 4409 from a killed run: the next run then fails with `timeout
+  waiting for bridge listening`.

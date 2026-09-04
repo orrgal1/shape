@@ -1,42 +1,50 @@
 /**
- * Backend registry. Adding a harness = one adapter module + one entry here;
- * the bridge itself stays backend-neutral.
+ * Backend registry: harness id -> adapter.
+ *
+ * Two harnesses have a real integration (omp through its extension, Claude
+ * Code through MCP + hooks); every other detected harness gets the generic
+ * adapter, which watches instead of talking. Adding an integration = one
+ * adapter module + one entry here.
  */
 
-import type { BackendSettings, ShapeConfig } from "./config.ts";
+import type { HarnessId } from "../../../../shared/src/index.ts";
+import { isHarnessId } from "../detect.ts";
 import { ClaudeBackend } from "./claude.ts";
+import type { BackendSettings, ShapeConfig } from "./config.ts";
+import { GenericBackend } from "./generic.ts";
 import { OmpBackend } from "./omp.ts";
 import type { Backend } from "./types.ts";
 
-/** default command per backend id, used when no config file names one */
-const DEFAULT_COMMANDS: Record<string, string[]> = { omp: ["omp"], claude: ["claude"] };
-
-const REGISTRY: Record<string, (command: string[], settings: BackendSettings) => Backend> = {
+/** default command per harness: its own name on PATH */
+const INTEGRATED: Record<string, (command: string[], settings: BackendSettings) => Backend> = {
   omp: (command) => new OmpBackend({ command }),
   claude: (command, settings) =>
-    new ClaudeBackend({
-      command,
-      mode: settings.mode,
-      args: settings.args,
-      permissionMode: settings.permissionMode,
-    }),
+    new ClaudeBackend({ command, args: settings.args, permissionMode: settings.permissionMode }),
 };
 
-export const KNOWN_BACKENDS: readonly string[] = Object.keys(REGISTRY);
-
+/**
+ * Every harness Shape can be asked to start. The integrated ones first,
+ * because that is the order the wire and the picker read best.
+ */
 export function createBackend(id: string, config: ShapeConfig): Backend {
-  const make = REGISTRY[id];
-  if (make === undefined) {
-    throw new Error(`unknown backend "${id}" — known ids: ${KNOWN_BACKENDS.join(", ")}`);
+  if (!isHarnessId(id)) {
+    throw new Error(`unknown harness "${id}" — Shape can start omp, claude, codex, opencode, gemini, cursor-agent, amp or copilot`);
   }
   const settings = config.backends[id] ?? {};
-  const command = settings.command ?? DEFAULT_COMMANDS[id];
-  if (command === undefined || command.length === 0) {
-    throw new Error(`backend "${id}" has no command — set backends.${id}.command in .shape/config.json`);
+  const make = INTEGRATED[id];
+  if (make === undefined) return new GenericBackend({ id });
+  // argv[0] is the executable: the harness's own name unless a config file (or
+  // `--omp`) named something else, which is how a fake harness is driven
+  const command = settings.command ?? [id];
+  if (command.length === 0) {
+    throw new Error(`harness "${id}" has no command — set backends.${id}.command in .shape/config.json`);
   }
   return make(command, settings);
 }
 
-export type { Backend, BackendEvents, BackendState, BackendToolCall, TerminalSource } from "./types.ts";
-export { loadShapeConfig } from "./config.ts";
+/** Harness ids that have an adapter of their own rather than the generic one. */
+export const INTEGRATED_HARNESSES: readonly HarnessId[] = Object.keys(INTEGRATED).filter(isHarnessId);
+
+export type { Backend, BackendEvents, BackendStart, BackendToolCall } from "./types.ts";
+export { loadShapeConfig, rememberBackend, resolveBackend } from "./config.ts";
 export type { BackendSettings, ShapeConfig } from "./config.ts";

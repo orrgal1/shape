@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Discovery/adopt smoke test. Runs the real bridge against scripts/fake-omp.mjs
+ * Discovery/adopt smoke test. Runs the real bridge against scripts/fake-omp-tui.mjs
  * in a throwaway target dir and drives the adopt wire over WebSocket:
  *
  *   hello.sessions        — the machine's running agent sessions, ours excluded
@@ -19,13 +19,20 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
 
 const PORT = Number(process.env.SMOKE_PORT ?? 4404);
+
+// Every bridge/agent below inherits this environment: a smoke must not depend
+// on what is installed on the machine running it. The launcher is Shape's own
+// pty (never a herdr tab in the developer's terminal), and detection reports
+// exactly one harness — `omp`, which `--omp` points at the fake.
+process.env.SHAPE_LAUNCHER = "pty";
+process.env.SHAPE_FORCE_HARNESSES = "omp";
 const results = [];
 let failed = 0;
 
@@ -67,9 +74,8 @@ await seedTarget(target);
 const frames = [];
 let bridge = null;
 let socket = null;
-/** cwd of the session we adopt, and whether it already had a `.shape/` */
-let adopted = null;
-let adoptedHadShape = true;
+/** a real project's pre-SQLite `.shape/`, copied aside so this run can put it back */
+let legacyShape = null;
 
 const send = (msg) => socket.send(JSON.stringify(msg));
 const nextFrame = (predicate, label, timeoutMs) => {
@@ -80,14 +86,17 @@ const nextFrame = (predicate, label, timeoutMs) => {
 try {
   bridge = spawn(
     process.execPath,
-    ["src/index.ts", "--cwd", target, "--port", String(PORT), "--omp", "node scripts/fake-omp.mjs"],
+    ["src/index.ts", "--cwd", target, "--port", String(PORT), "--omp", "node scripts/fake-omp-tui.mjs"],
     {
       cwd: process.cwd(),
       // FAKE_OMP_LOG keeps the harness log out of whatever project we adopt, and
       // SHAPE_HOME keeps recents.json out of the real home dir. HOME is NOT
       // redirected: discovery reads the harnesses' real session stores under it,
       // and a fake home would hide every session id this test is about.
-      env: { ...process.env, FAKE_OMP_LOG: fakeLog, SHAPE_HOME: fakeHome },
+      // SHAPE_AUTO_MAP=0: this project has code and an empty canvas, so a room
+      // left to itself would map it — a turn none of the adoption checks below
+      // asked for.
+      env: { ...process.env, SHAPE_AUTO_MAP: "0", FAKE_OMP_LOG: fakeLog, SHAPE_HOME: fakeHome },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -187,8 +196,11 @@ try {
     send({ type: "adopt", pid: impostor.pid });
     const noAdapter = await nextFrame((f) => f.type === "error", "no-adapter rejection", 20_000);
     check(
-      "adopt of a harness with no adapter is rejected by harness name",
-      noAdapter.message === "no Shape adapter for cursor yet",
+      // Cursor Agent is a harness Shape knows OF and cannot drive here: it has
+      // no events of its own, so herdr is what would report what it is doing.
+      // Either way the adopt is refused by name, with the reason in words.
+      "adopt of a harness Shape cannot drive here is refused by name, with the reason",
+      noAdapter.message.includes("Cursor Agent") && noAdapter.message.includes("herdr"),
       noAdapter.message,
     );
     send({ type: "discover" });
@@ -200,13 +212,17 @@ try {
 
   // --- adopt: a real interactive omp session ---------------------------------
 
-  // Prefer a resumable session in a project that already has a `.shape/`, so the
-  // check leaves no trace at all; fall back to any resumable omp session.
-  const candidates = rescan.sessions.filter(
-    (s) => s.harness === "omp" && s.sessionId !== null && s.cwd !== null && s.cwd !== target,
-  );
+  // Any resumable omp session but ours will do. Adopting one opens it as a
+  // project, which — local mode being what it is — takes over any pre-SQLite
+  // `.shape/` files it still has and then deletes them. This run's database is
+  // a throwaway, so those files are copied aside first and put back in the
+  // finally: a smoke must not cost a real project its old canvas.
   const pick =
-    candidates.find((s) => existsSync(join(s.cwd, ".shape"))) ?? candidates[0] ?? null;
+    rescan.sessions.find((s) => s.harness === "omp" && s.sessionId !== null && s.cwd !== null && s.cwd !== target) ?? null;
+  if (pick !== null && existsSync(join(pick.cwd, ".shape"))) {
+    legacyShape = { dir: join(pick.cwd, ".shape"), backup: join(fakeHome, "shape-backup") };
+    await cp(legacyShape.dir, legacyShape.backup, { recursive: true });
+  }
 
   if (pick === null) {
     check(
@@ -215,8 +231,7 @@ try {
       "no interactive omp session with a session id is running — start one and re-run",
     );
   } else {
-    adopted = pick.cwd;
-    adoptedHadShape = existsSync(join(adopted, ".shape"));
+    const adopted = pick.cwd;
     console.error(`[smoke] adopting omp pid ${pick.pid} (${pick.sessionId.slice(0, 8)}) in ${adopted}`);
     send({ type: "adopt", pid: pick.pid });
     const after = await nextFrame((f) => f.type === "hello" || f.type === "error", "adopt hello", 60_000);
@@ -226,12 +241,22 @@ try {
       after.type === "error" ? after.message : "",
     );
     if (after.type === "hello") {
-      check("adopt retargeted the bridge at the session's project", after.session.cwd === adopted, after.session.cwd);
-      check("the adopted project is driven by the omp backend", after.session.backend?.id === "omp", JSON.stringify(after.session.backend ?? null));
+      // a project is anchored on its main variation, so the cwd it is served
+      // under is that directory's realpath — the place the session was running
+      const adoptedMain = realpathSync(adopted);
+      check("adopt retargeted the bridge at the session's project", after.session.cwd === adoptedMain, after.session.cwd);
+      // the resumed harness runs in one variation: what it is and what it can
+      // do are reported against that variation, never against the project
+      const running = after.session.sessions.find((s) => s.worktree === adoptedMain);
+      check(
+        "the adopted project is driven by the omp backend in the variation it was resumed in",
+        running !== undefined && running.backend.id === "omp",
+        `${String(running?.worktree)}: ${JSON.stringify(running?.backend ?? null)}`,
+      );
       check(
         "the adopted harness reports a session (state primed after resume)",
-        after.session.sessionId !== null,
-        String(after.session.sessionId),
+        running !== undefined && running.session.sessionId !== null,
+        String(running?.session.sessionId),
       );
       // the fake logs every frame it received, tagged with the argv it was started with
       const log = existsSync(fakeLog) ? readFileSync(fakeLog, "utf8") : "";
@@ -262,10 +287,10 @@ try {
   bridge?.kill("SIGTERM");
   await sleep(300);
   bridge?.kill("SIGKILL");
-  // A project we adopted only to prove the wire must not keep a canvas it never had.
-  if (adopted !== null && !adoptedHadShape) {
-    await rm(join(adopted, ".shape"), { recursive: true, force: true });
-    console.error(`[smoke] removed the .shape/ this run created in ${adopted}`);
+  // put back whatever the adopt's one-shot import took out of a real project
+  if (legacyShape !== null) {
+    await cp(legacyShape.backup, legacyShape.dir, { recursive: true, force: true });
+    console.error(`[smoke] restored ${legacyShape.dir} as it was before the run`);
   }
   await rm(target, { recursive: true, force: true });
   await rm(fakeHome, { recursive: true, force: true });

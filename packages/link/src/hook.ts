@@ -182,7 +182,13 @@ async function eventsFor(payload: Json): Promise<AgentEvent[]> {
   }
 }
 
-async function send(events: AgentEvent[]): Promise<void> {
+/**
+ * Every frame names the directory the harness is working in. Claude Code puts
+ * it in the payload (`cwd`); anything that does not is answered with our own,
+ * which is the harness's — the hook runs as its child. Shape runs one harness
+ * per worktree and routes by this, so a hook with no cwd would be dropped.
+ */
+async function send(cwd: string, events: AgentEvent[]): Promise<void> {
   if (events.length === 0) return;
   const socket = new WebSocket(BRIDGE_URL);
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -190,7 +196,7 @@ async function send(events: AgentEvent[]): Promise<void> {
   socket.on("error", () => resolve());
   socket.on("close", () => resolve());
   socket.on("open", () => {
-    for (const event of events) socket.send(JSON.stringify({ type: "agent_event", event }));
+    for (const event of events) socket.send(JSON.stringify({ type: "agent_event", cwd, event }));
     // close() after send() flushes the queued frames first
     socket.close();
   });
@@ -207,7 +213,10 @@ try {
   let raw = "";
   for await (const chunk of process.stdin) raw += chunk;
   const payload = record(JSON.parse(raw));
-  if (payload !== null) await send(await eventsFor(payload));
+  if (payload !== null) {
+    const cwd = typeof payload.cwd === "string" && payload.cwd.length > 0 ? payload.cwd : process.cwd();
+    await send(cwd, await eventsFor(payload));
+  }
 } catch {
   // a malformed payload is not the harness's problem
 }

@@ -18,7 +18,7 @@ import type { WebSocket } from "ws";
 import { LINK_WS_PATH } from "../../../shared/src/index.ts";
 import type { LinkServerMsg } from "../../../shared/src/link.ts";
 import type { SocketServer } from "../wsserver.ts";
-import type { BackendEvents } from "./backend/types.ts";
+import type { ExternalIoOptions } from "./external.ts";
 import { ExternalIo } from "./external.ts";
 import { parseLinkMsg } from "./linkparse.ts";
 
@@ -30,10 +30,12 @@ import { parseLinkMsg } from "./linkparse.ts";
 const REFUSAL = JSON.stringify({ type: "error", message: "unparseable client message" } satisfies LinkServerMsg);
 
 export interface LoopbackLinkOptions {
-  /** forward to the server and resolve with the `canvas_result` it sends back */
-  onCanvasCall: (args: unknown) => Promise<{ text: string; isError: boolean }>;
-  /** the runtime's event sink — the same one the live backend writes to */
-  events: BackendEvents;
+  /**
+   * Which harness a caller belongs to, by the cwd it reports. The runtime owns
+   * the answer: it is the only thing that knows the repo's worktrees and which
+   * of them have a harness running.
+   */
+  route: ExternalIoOptions["route"];
 }
 
 export interface LoopbackLink {
@@ -42,11 +44,19 @@ export interface LoopbackLink {
 }
 
 export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptions): LoopbackLink {
-  const io = new ExternalIo({ applyCanvas: opts.onCanvasCall, events: opts.events });
+  const io = new ExternalIo({ route: opts.route });
   const clients = new Set<WebSocket>();
 
   sockets.mount(LINK_WS_PATH, (socket) => {
     clients.add(socket);
+    /**
+     * The cwd of the session this socket greeted for, if any. A harness that
+     * drops its socket without saying goodbye (killed, crashed, the terminal
+     * closed) has still ended its session, and the adapter has to hear about
+     * it — so a close is replayed as the `bye` it never sent. Adapters treat a
+     * second goodbye as no news.
+     */
+    let greeted: string | null = null;
     // no hello here: a link client is not a browser, it only ever gets answers
     // to what it asked
     socket.on("message", (data) => {
@@ -55,12 +65,21 @@ export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptio
         socket.send(REFUSAL);
         return;
       }
+      if (msg.type === "hello") greeted = msg.cwd;
+      if (msg.type === "bye") greeted = null;
       io.handle(msg, (out) => {
         if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(out));
       });
     });
-    socket.on("close", () => clients.delete(socket));
-    socket.on("error", () => clients.delete(socket));
+    const gone = (reason: string): void => {
+      clients.delete(socket);
+      const cwd = greeted;
+      greeted = null;
+      if (cwd === null) return;
+      io.handle({ type: "bye", cwd, reason }, () => undefined);
+    };
+    socket.on("close", () => gone("the harness closed the link"));
+    socket.on("error", () => gone("the link to the harness failed"));
   });
 
   return {

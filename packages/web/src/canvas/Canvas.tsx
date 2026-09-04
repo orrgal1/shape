@@ -12,9 +12,9 @@ import {
 } from "@xyflow/react";
 import { useEffect, useMemo } from "react";
 import { buildDeltaView } from "../deltaView.ts";
-import { selectLayer, selectReality } from "../layer.ts";
+import { selectGhosts, selectLayer } from "../layer.ts";
 import { STRIP_ID } from "../layout.ts";
-import { useApp } from "../store.ts";
+import { branchOf, NO_WORKTREES, selectThinking, toneOf, useApp } from "../store.ts";
 import { BubbleNode } from "./BubbleNode.tsx";
 import { GhostNode, StripNode } from "./GhostNode.tsx";
 import { RelationEdge } from "./RelationEdge.tsx";
@@ -33,8 +33,14 @@ const MAX_ZOOM = 1.1;
 /** one bubble on the layer may fill the page rather than sit small in the middle */
 const SOLO_MAX_ZOOM = 1.8;
 
-/** the steering bar owns the bottom of the stage; overlays sit above it */
-const MINIMAP_LIFT = 92;
+/**
+ * The dock at the bottom of the stage owns that band, and it changes height
+ * with the turn — the card carrying the next step appears and disappears, and
+ * the bar grows with a dictated sentence. The shell measures the dock and
+ * publishes its height as `--dock-h`, so the corner overlays are lifted by that
+ * plus the dock's own bottom inset rather than by a number that was true once.
+ */
+const OVERLAY_LIFT = "calc(var(--dock-h, 96px) + var(--s5) + var(--s3))";
 const MINIMAP_W = 176;
 const MINIMAP_H = 116;
 
@@ -55,7 +61,12 @@ const NO_ACTIVITY: ReadonlySet<string> = new Set<string>();
 
 export function Canvas() {
   const liveDoc = useApp((state) => state.doc);
-  const liveActivity = useApp((state) => state.activity);
+  const liveActivity = useApp((state) => state.activeNodes);
+  const activityBy = useApp((state) => state.activity);
+  const where = useApp((state) => state.where);
+  const worktreeIds = useApp((state) => state.worktreeIds);
+  const worktrees = useApp((state) => state.session?.worktrees ?? NO_WORKTREES);
+  const filter = useApp((state) => state.filter);
   const liveShowReality = useApp((state) => state.showReality);
   const liveFocus = useApp((state) => state.focus);
   const layerView = useApp((state) => state.view);
@@ -87,10 +98,11 @@ export function Canvas() {
   const doc = view === null ? liveDoc : view.doc;
   const focus = view === null ? liveFocus : null;
   const activity = view === null ? liveActivity : NO_ACTIVITY;
-  // the reality column is extracted code, which is the build layer's story: a
-  // package strip under a row of capability cards would be answering a question
-  // the product layer never asks
-  const showReality = view === null && layerView === "build" ? liveShowReality : false;
+  // The code column is evidence about the parts, so the product layer never
+  // shows one: its bubbles point at capabilities, not at packages. The build
+  // and infra layers both have something to say — packages or symbols no bubble
+  // claims there, infrastructure no bubble claims here.
+  const showReality = view === null && layerView !== "product" ? liveShowReality : false;
   const marks = view === null ? null : view.marks;
 
   // one layer, capped at five bubbles and chosen before layout runs: elk and
@@ -105,25 +117,29 @@ export function Canvas() {
     [doc, focus, activity, scopeLayer, fold],
   );
   // a package a bubble already claims is not news; ghosting it anyway is what
-  // filled half the canvas on a nine-package project
-  const reality = useMemo(() => selectReality(doc), [doc]);
+  // filled half the canvas on a nine-package project. Drilled into a leaf the
+  // same column turns into that bubble's own classes and functions, which is
+  // the one reading of the code the canvas cannot get from a bubble at all.
+  // A comparison passes no layer, which is also how the column is turned off:
+  // extracted code describes now, not a version that already happened.
+  const ghosts = useMemo(() => selectGhosts({ doc, view: scopeLayer, focus }), [doc, scopeLayer, focus]);
   // quantised so a few pixels of resize never re-run layout, while a genuinely
   // different window shape does: spread arrangements follow the aspect so a tall
   // window gets a tall triangle and a wide one a wide triangle
   const paneWidth = useStore((state) => state.width);
   const paneHeight = useStore((state) => state.height);
   const aspect = paneHeight > 0 ? Math.round((paneWidth / paneHeight) * 10) / 10 : 1.4;
-  const input = useMemo(() => ({ layer, reality, aspect }), [layer, reality, aspect]);
+  const input = useMemo(() => ({ layer, ghosts, aspect }), [layer, ghosts, aspect]);
 
-  // Framing covers exactly what is drawn. With the reality column hidden — or
+  // Framing covers exactly what is drawn. With the code column hidden — or
   // fully claimed, so there is nothing left to draw — the authored bubbles are
   // the whole picture, and boxes laid out for cards nobody renders must not pull
   // the viewport towards empty space.
   const scope = useMemo(() => {
     const ids = layer.nodes.map((entry) => entry.node.id);
-    if (!showReality || reality.nodes.length === 0) return ids;
-    return [...ids, STRIP_ID, ...reality.nodes.map((node) => node.id)];
-  }, [showReality, layer.nodes, reality.nodes]);
+    if (!showReality || ghosts.nodes.length === 0) return ids;
+    return [...ids, STRIP_ID, ...ghosts.nodes.map((item) => item.id)];
+  }, [showReality, layer.nodes, ghosts.nodes]);
 
   /**
    * Everything on screen is always framed. The viewport is not a separate
@@ -140,9 +156,82 @@ export function Canvas() {
     maxZoom: layer.nodes.length === 1 ? SOLO_MAX_ZOOM : MAX_ZOOM,
   });
 
+  /**
+   * Where the breath goes while the agent is working with nothing lit yet. A
+   * drilled-in layer answers with its focus card, which sits above the canvas
+   * and does its own breathing; here that leaves only the case where the layer
+   * IS one bubble — the product, or a lone part — and that bubble stands for
+   * the whole picture the agent is thinking about. More than one bubble and
+   * there is no honest place to put it, so nothing moves.
+   */
+  const pondering = useApp(selectThinking);
+  const lone = layer.nodes.length === 1 ? layer.nodes[0] : undefined;
+  const thinking =
+    pondering && !comparing && layer.focus === null && lone !== undefined && !lone.isMore ? lone.node.id : null;
+
+  /**
+   * Some variation on screen is mid-turn, whether or not it has said where. It
+   * drives one thing only: a very slow wash behind the graph, so a canvas with
+   * a working agent is never the same picture twice even between writes. Off
+   * the moment every variation is idle.
+   */
+  const agents = useApp((state) => state.agents);
+  const working = useMemo(() => {
+    if (comparing) return false;
+    return Object.entries(agents).some(
+      ([worktree, state]) => state !== "idle" && (filter === null || filter.has(worktree)),
+    );
+  }, [agents, comparing, filter]);
+
+  /**
+   * How the variations on screen are named and coloured, and where each merged
+   * bubble lives. A comparison is one variation's own history, so it merges
+   * nothing and draws no pips; a single variation on screen has nothing to tell
+   * apart either.
+   */
+  const shown = useMemo(
+    () => worktrees.filter((entry) => filter === null || filter.has(entry.id)),
+    [worktrees, filter],
+  );
+  const variations = useMemo(() => {
+    const looks: Record<string, { branch: string; tone: number }> = {};
+    for (const entry of shown) {
+      looks[entry.id] = { branch: branchOf(worktrees, entry.id), tone: toneOf(worktreeIds, entry.id) };
+    }
+    return { merged: !comparing && shown.length > 1, looks, where, activity: activityBy };
+  }, [comparing, shown, worktrees, worktreeIds, where, activityBy]);
+
   const { nodes, edges } = useMemo(
-    () => buildCanvas({ layer, reality, boxes, selection, hover, showReality, entering, leaving, marks }),
-    [layer, reality, boxes, selection, hover, showReality, entering, leaving, marks],
+    () =>
+      buildCanvas({
+        layer,
+        ghosts,
+        boxes,
+        selection,
+        hover,
+        showReality,
+        entering,
+        leaving,
+        marks,
+        thinking,
+        pondering: pondering && !comparing,
+        variations,
+      }),
+    [
+      layer,
+      ghosts,
+      boxes,
+      selection,
+      hover,
+      showReality,
+      entering,
+      leaving,
+      marks,
+      thinking,
+      pondering,
+      comparing,
+      variations,
+    ],
   );
 
   // the dissolve is applied to the pane, never to node positions: React Flow
@@ -211,20 +300,25 @@ export function Canvas() {
       }}
     >
       <Background variant={BackgroundVariant.Dots} gap={26} size={1} color="var(--bg-grid)" />
+      {/* The one thing on this canvas that moves without anybody writing to the
+          graph: two very slow radial washes drifting behind the dots while a
+          variation is mid-turn. It sits under the viewport's stacking level and
+          takes no pointer events, so it can never be in the way of anything. */}
+      <div className="canvas-ambience" data-on={working} aria-hidden="true" />
       {/* navigation chrome would only be noise before the first bubble exists */}
       {nodes.length === 0 ? null : (
         <>
           <Controls
             showInteractive={false}
             position="bottom-left"
-            style={{ marginBottom: MINIMAP_LIFT }}
+            style={{ marginBottom: OVERLAY_LIFT }}
             orientation="horizontal"
           />
           <MiniMap
             pannable
             zoomable
             position="bottom-right"
-            style={{ marginBottom: MINIMAP_LIFT, width: MINIMAP_W, height: MINIMAP_H }}
+            style={{ marginBottom: OVERLAY_LIFT, width: MINIMAP_W, height: MINIMAP_H }}
             nodeClassName={minimapClass}
             nodeStrokeWidth={0}
             nodeBorderRadius={4}

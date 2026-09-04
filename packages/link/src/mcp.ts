@@ -29,6 +29,14 @@ import type { LinkServerMsg } from "../../shared/src/link.ts";
 
 const BRIDGE_URL = process.env.SHAPE_BRIDGE_URL ?? `ws://127.0.0.1:${BRIDGE_PORT}${LINK_WS_PATH}`;
 
+/**
+ * The worktree this server belongs to. The harness spawns its MCP servers in
+ * its own working directory, and Shape runs one harness per worktree, so this
+ * is what tells the agent which variation's canvas a call is about. POSIX
+ * `getcwd` already returns a canonical path, which is what a worktree id is.
+ */
+const WORKING_DIR = process.cwd();
+
 /** the bridge answers a canvas call in milliseconds; this is only a deadlock guard */
 const CALL_TIMEOUT_MS = 20_000;
 
@@ -110,7 +118,7 @@ class BridgeLink {
       resolve({ text: "Shape bridge did not answer the canvas call", isError: true });
     }, CALL_TIMEOUT_MS);
     try {
-      socket.send(JSON.stringify({ type: "canvas_call", id, args }));
+      socket.send(JSON.stringify({ type: "canvas_call", cwd: WORKING_DIR, id, args }));
     } catch {
       this.#pending.delete(id);
       clearTimeout(timer);

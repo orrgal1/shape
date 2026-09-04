@@ -1,9 +1,12 @@
 /**
- * Shape's agent as its own process: the half that needs the harness, the
+ * Shape's agent as its own process: the half that needs the harnesses, the
  * target repo's filesystem, git, `ps` and a tty. It connects OUT to a Shape
  * server (`--server`) and serves the loopback link (`/link`) for
  * harness-side processes — hooks and the MCP sidecar — on 127.0.0.1 only, so
  * those never hold server credentials.
+ *
+ * One agent per REPO, one harness per worktree the user opens; `--cwd` may be
+ * any worktree of it and is the variation that gets the first harness.
  *
  * Run: node src/agent-cli.ts --server ws://host:port
  *        [--token <t>] [--allow-terminal] [--cwd <dir>] [--backend <id>]
@@ -23,12 +26,17 @@ const LINK_PORT = 4401;
 interface Cli {
   /** the Shape server's agent endpoint, already normalized */
   server: string;
+  /** `--cwd <dir>`: the worktree to open first; the project is its whole repo */
   cwd: string;
   /** loopback port for `/link` */
   linkPort: number;
-  /** `--backend <id>`: beats both config files */
+  /**
+   * `--backend <id>`: which harness to start. A project's own
+   * `.shape/config.json` beats it; with neither, and more than one harness
+   * installed, the browser asks.
+   */
   backend?: string;
-  /** `--omp "<cmd ...>"`: replaces the omp adapter's command */
+  /** `--omp "<cmd ...>"`: the omp executable and its leading args */
   ompCommand?: string[];
   /** `--token <t>`: beats `SHAPE_TOKEN` and the saved credentials */
   token?: string;
@@ -133,8 +141,8 @@ try {
     allowTerminal: cli.allowTerminal,
     sockets,
     link,
-    // the harness is this process's reason to exist: the room has already been
-    // told why (`agent_exit`), so all that is left is to go
+    // a retarget that failed has left this process with nowhere to stand;
+    // the room has already been told why, so all that is left is to go
     onExit: () => setTimeout(() => process.exit(1), 50),
   });
 

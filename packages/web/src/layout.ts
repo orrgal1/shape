@@ -1,6 +1,5 @@
 import ELK, { type ElkNode, type LayoutOptions } from "elkjs/lib/elk.bundled.js";
-import type { RealityLayer } from "../../shared/src/index.ts";
-import { LAYER_CAP, type Layer } from "./layer.ts";
+import { LAYER_CAP, type GhostColumn, type Layer } from "./layer.ts";
 import { routingCost } from "./canvas/geometry.ts";
 
 export interface Box {
@@ -11,12 +10,12 @@ export interface Box {
 }
 
 /**
- * id -> box in absolute canvas coordinates. Holds bubbles, reality ghosts, the
- * reality caption and the reality ghosts.
+ * id -> box in absolute canvas coordinates. Holds bubbles, the code-derived
+ * ghost cards and the caption above them.
  */
 export type BoxMap = Record<string, Box>;
 
-/** synthetic node id for the caption that heads the reality column */
+/** synthetic node id for the caption that heads the ghost column */
 export const STRIP_ID = "strip:reality";
 
 const NODE_W = 236;
@@ -65,7 +64,8 @@ const STRIP_OPTIONS: LayoutOptions = {
 
 export interface LayoutInput {
   layer: Layer;
-  reality: RealityLayer;
+  /** the code-derived cards beside the layer, laid out in their own column */
+  ghosts: GhostColumn;
   /** canvas width / height, quantised; spread arrangements use both axes */
   aspect: number;
 }
@@ -442,7 +442,10 @@ async function flowLayout(layer: Layer, aspect: number): Promise<BoxMap> {
   return best;
 }
 
-export async function computeLayout({ layer, reality, aspect }: LayoutInput): Promise<BoxMap> {
+/** air between two ghost cards stacked in a column, matching STRIP_OPTIONS */
+const GHOST_GAP = 22;
+
+export async function computeLayout({ layer, ghosts, aspect }: LayoutInput): Promise<BoxMap> {
   let boxes: BoxMap = {};
 
   if (layer.nodes.length > 0) {
@@ -453,7 +456,7 @@ export async function computeLayout({ layer, reality, aspect }: LayoutInput): Pr
     else boxes = await layeredLayout(layer);
   }
 
-  if (reality.nodes.length === 0) return boxes;
+  if (ghosts.nodes.length === 0) return boxes;
 
   let intentRight = 0;
   let intentTop = Number.POSITIVE_INFINITY;
@@ -465,11 +468,30 @@ export async function computeLayout({ layer, reality, aspect }: LayoutInput): Pr
   }
   if (!Number.isFinite(intentTop)) intentTop = 0;
 
+  const originX = intentRight + STRIP_GAP;
+  boxes[STRIP_ID] = { x: originX, y: intentTop - 44, w: STRIP_CAPTION_W, h: STRIP_CAPTION_H };
+
+  // A column with no relations is a list, and elk layered would spread a list
+  // sideways into a row as wide as the canvas: with no edges every card lands
+  // in the same layer. A list is stacked by hand instead — which is also what
+  // the import graph's column looks like when elk is given something to chain.
+  if (ghosts.edges.length === 0) {
+    for (const [index, item] of ghosts.nodes.entries()) {
+      boxes[item.id] = {
+        x: originX,
+        y: intentTop + index * (GHOST_H + GHOST_GAP),
+        w: GHOST_W,
+        h: GHOST_H,
+      };
+    }
+    return boxes;
+  }
+
   const stripGraph: ElkNode = {
     id: "reality",
     layoutOptions: STRIP_OPTIONS,
-    children: reality.nodes.map((node) => ({ id: node.id, width: GHOST_W, height: GHOST_H })),
-    edges: reality.edges.map((edge) => ({
+    children: ghosts.nodes.map((item) => ({ id: item.id, width: GHOST_W, height: GHOST_H })),
+    edges: ghosts.edges.map((edge) => ({
       id: edge.id,
       sources: [edge.source],
       targets: [edge.target],
@@ -477,8 +499,6 @@ export async function computeLayout({ layer, reality, aspect }: LayoutInput): Pr
   };
   const laidStrip = await elk.layout(stripGraph);
 
-  const originX = intentRight + STRIP_GAP;
-  boxes[STRIP_ID] = { x: originX, y: intentTop - 44, w: STRIP_CAPTION_W, h: STRIP_CAPTION_H };
   for (const node of laidStrip.children ?? []) {
     boxes[node.id] = {
       x: originX + (node.x ?? 0),

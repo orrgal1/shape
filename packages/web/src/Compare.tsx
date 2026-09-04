@@ -14,7 +14,7 @@
 import { Fragment, useEffect, useState } from "react";
 import type { RevisionInfo } from "../../shared/src/index.ts";
 import { useDismissable } from "./dismiss.ts";
-import { useApp } from "./store.ts";
+import { selectRevisions, selectTarget, useApp } from "./store.ts";
 import { send } from "./ws.ts";
 
 const MINUTE_MS = 60_000;
@@ -39,7 +39,13 @@ function timeAgo(at: string, now: number): string {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
-function Picker({ revisions }: { revisions: RevisionInfo[] }) {
+/**
+ * A comparison is always about ONE variation's history: the snapshot store is
+ * keyed by worktree, and "rev 12" of two branches names two different graphs.
+ * The variation is the steering target, which is the one the header pill and
+ * the steering chip already say the reader is working on.
+ */
+function Picker({ revisions, worktree }: { revisions: RevisionInfo[]; worktree: string }) {
   const beginCompare = useApp((state) => state.beginCompare);
   const waiting = useApp((state) => state.compare !== null && state.delta === null);
   const [open, setOpen] = useState(false);
@@ -65,8 +71,8 @@ function Picker({ revisions }: { revisions: RevisionInfo[] }) {
     // so the earlier of the two is always the before side.
     const revA = Math.min(beforeRev, afterRev);
     const revB = Math.max(beforeRev, afterRev);
-    beginCompare(revA, revB);
-    send({ type: "diff", revA, revB });
+    beginCompare(worktree, revA, revB);
+    send({ type: "diff", worktree, revA, revB });
     setOpen(false);
   };
 
@@ -144,7 +150,7 @@ function Picker({ revisions }: { revisions: RevisionInfo[] }) {
 
 function Summary() {
   const delta = useApp((state) => state.delta);
-  const revisions = useApp((state) => state.revisions);
+  const revisions = useApp(selectRevisions);
   const hasBackdrop = useApp((state) => state.deltaContext !== null);
   const exitCompare = useApp((state) => state.exitCompare);
   if (delta === null) return null;
@@ -219,7 +225,8 @@ function Summary() {
 }
 
 export function Compare() {
-  const revisions = useApp((state) => state.revisions);
+  const revisions = useApp(selectRevisions);
+  const target = useApp(selectTarget);
   const comparing = useApp((state) => state.delta !== null);
   const exitCompare = useApp((state) => state.exitCompare);
 
@@ -235,7 +242,8 @@ export function Compare() {
   }, [comparing, exitCompare]);
 
   if (comparing) return <Summary />;
-  // one saved version is nothing to compare against
-  if (revisions.length < 2) return null;
-  return <Picker revisions={revisions} />;
+  // one saved version is nothing to compare against, and with no variation to
+  // ask about there is nothing to compare it in
+  if (target === null || revisions.length < 2) return null;
+  return <Picker revisions={revisions} worktree={target} />;
 }

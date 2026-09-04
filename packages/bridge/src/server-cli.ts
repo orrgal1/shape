@@ -4,8 +4,9 @@
  * connects in (`src/agent-cli.ts`); local mode (`src/index.ts`) is still the
  * same server with an in-memory link instead of a socket.
  *
- * Graphs live under `--data-dir`, not in the repos: the projects are on other
- * machines. That directory is also what a restart reads its rooms back from.
+ * Every project's graph, revisions, registry row and audit line live in
+ * `<data-dir>/shape.db`, not in the repos: the projects are on other machines.
+ * That database is also what a restart reads its rooms back from.
  *
  * `--token-file` is what makes the server multi-tenant AND what makes it safe
  * to expose: without one it admits everyone as the `local` tenant, so it may
@@ -20,8 +21,9 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { AGENT_WS_PATH, BRIDGE_PORT, BRIDGE_WS_PATH } from "../../shared/src/index.ts";
 import { isLoopbackHost, loadTokenFile } from "./server/auth.ts";
+import { importLegacyDataDir } from "./server/legacy.ts";
 import { ShapeServer } from "./server/server.ts";
-import { dataDirStorage } from "./server/storage.ts";
+import { openSqliteStorage } from "./server/sqlite.ts";
 import { SocketServer } from "./wsserver.ts";
 
 interface Cli {
@@ -31,7 +33,7 @@ interface Cli {
    * server on a routable address is an open canvas and an open steer channel.
    */
   host: string;
-  /** `--data-dir`: every project's graph, revisions and registry row */
+  /** `--data-dir`: holds `shape.db`, every project's graph, revisions and registry row */
   dataDir: string;
   /** `--token-file`: `[{ token, tenant }, …]`; null ⇒ unauthenticated, one `local` tenant */
   tokenFile: string | null;
@@ -83,9 +85,13 @@ try {
   const auth = cli.tokenFile === null ? null : await loadTokenFile(cli.tokenFile);
   const sockets = new SocketServer({ port: cli.port, host: cli.host });
   await mkdir(cli.dataDir, { recursive: true });
+  const storage = openSqliteStorage(join(cli.dataDir, "shape.db"));
+  // a data dir written by a pre-SQLite server is taken over once, before any
+  // room can open on top of it
+  await importLegacyDataDir(storage, cli.dataDir);
   // mounts both paths and needs no further handle beyond the restore below:
   // agents arrive on their own
-  const server = new ShapeServer({ sockets, storage: dataDirStorage(cli.dataDir), auth });
+  const server = new ShapeServer({ sockets, storage, auth });
   // rooms are back — agentless — before the first browser or agent can arrive
   const restored = await server.restore();
   if (restored > 0) console.error(`[bridge] restored ${restored} project(s) from ${cli.dataDir}`);

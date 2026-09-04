@@ -35,7 +35,7 @@ import { WsHub } from "./ws.ts";
 
 export interface ShapeServerOptions {
   sockets: SocketServer;
-  /** where rooms keep their files, and which projects a restart reopens */
+  /** where rooms keep their records, and which projects a restart reopens */
   storage: Storage;
   /**
    * The tokens this server admits. Absent or null ⇒ unauthenticated: every
@@ -43,6 +43,12 @@ export interface ShapeServerOptions {
    * server — only ever a loopback bind (`server-cli.ts` refuses the rest).
    */
   auth?: TokenTable | null;
+  /**
+   * Take over a pre-SQLite `<cwd>/.shape/graph.json` the first time a project
+   * is opened. Local mode only: the repos a remote server's projects live in
+   * are on other machines. Default false.
+   */
+  importLegacy?: boolean;
 }
 
 export class ShapeServer {
@@ -57,10 +63,12 @@ export class ShapeServer {
   #attaching: Promise<void> = Promise.resolve();
   readonly #storage: Storage;
   readonly #auth: TokenTable | null;
+  readonly #importLegacy: boolean;
 
   constructor(opts: ShapeServerOptions) {
     this.#storage = opts.storage;
     this.#auth = opts.auth ?? null;
+    this.#importLegacy = opts.importLegacy ?? false;
     this.#hub = new WsHub({
       sockets: opts.sockets,
       authorize: (request) => this.#authorize(request),
@@ -104,7 +112,8 @@ export class ShapeServer {
    * server. Rooms come back agentless: the graph and the revisions are there to
    * read and to diff, and the agent that returns takes the ordinary re-bind
    * path. Resolves with how many rooms opened, which is what the operator is
-   * told. A storage without a registry (local mode) restores nothing.
+   * told. Only a remote server calls this: locally the agent that owns the repo
+   * is what brings a project back, so nothing is reopened behind it.
    */
   async restore(): Promise<number> {
     const rows = await this.#storage.listProjects();
@@ -212,9 +221,9 @@ export class ShapeServer {
 
   /**
    * A room's wiring: what it broadcasts reaches its own watchers, the project
-   * list is the server's to answer, and its files are wherever the storage puts
-   * them — under the tenant that owns the room. Both an attach and a restore
-   * open rooms this way.
+   * list is the server's to answer, and its records are the storage's — under
+   * the tenant that owns the room. Both an attach and a restore open rooms this
+   * way.
    */
   #newRoom(key: string, tenant: string): ProjectRoom {
     return new ProjectRoom({
@@ -223,6 +232,7 @@ export class ShapeServer {
       onProjectsChanged: () => this.#broadcastProjects(tenant),
       storage: this.#storage,
       tenant,
+      importLegacy: this.#importLegacy,
     });
   }
 
