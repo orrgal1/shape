@@ -148,7 +148,7 @@ export function Canvas() {
    * content change — drill, up, a bubble the agent added, activity revealing an
    * ancestor, the reality toggle — recentres without a correction jump.
    */
-  const { boxes, entering, leaving, swap, setInteracting, toggleZoom } = useMotion({
+  const { boxes, entering, leaving, swap, setInteracting, toggleLens, lensed } = useMotion({
     input,
     scope,
     padding: FIT_PADDING,
@@ -216,6 +216,7 @@ export function Canvas() {
         thinking,
         pondering: pondering && !comparing,
         variations,
+        lens: lensed,
       }),
     [
       layer,
@@ -231,6 +232,7 @@ export function Canvas() {
       pondering,
       comparing,
       variations,
+      lensed,
     ],
   );
 
@@ -241,6 +243,14 @@ export function Canvas() {
     if (pane === null) return;
     pane.setAttribute("data-swap", swap);
   }, [swap]);
+
+  // and the same trick for the lens: the rest of the canvas reads as secondary
+  // while one bubble is grown, which is a paint, not a move
+  useEffect(() => {
+    const pane = document.querySelector(".react-flow__viewport");
+    if (pane === null) return;
+    pane.setAttribute("data-lens", lensed ?? "");
+  }, [lensed]);
 
   return (
     <ReactFlow
@@ -262,13 +272,14 @@ export function Canvas() {
         if (comparing || node.type !== "bubble") return;
         select({ kind: "node", id: node.id });
       }}
-      // double-click is the lens: centre and enlarge this bubble, and a second
-      // double-click on it gives the previous view back. Drilling in stays on
-      // the chip, so the gesture never changes what layer is on screen.
+      // double-click is the lens: centre this bubble and grow it to fit its
+      // words at the same scale; a second double-click on it gives the previous
+      // view back. Drilling in stays on the chip, so the gesture never changes
+      // what layer is on screen.
       onNodeDoubleClick={(_event, node) => {
         if (comparing || node.type !== "bubble") return;
         select({ kind: "node", id: node.id });
-        toggleZoom(node.id);
+        toggleLens(node.id);
       }}
       // Hover is what un-hides a stroke's words: over a bubble, its own
       // relations say what they are; over a stroke, that one does. Nothing here

@@ -746,6 +746,7 @@ button {
     border-color var(--dur) var(--ease),
     background var(--dur) var(--ease),
     box-shadow var(--dur) var(--ease),
+    opacity var(--dur) var(--ease),
     transform 260ms var(--ease);
 }
 
@@ -887,6 +888,31 @@ button {
 }
 .bubble[data-solo="true"] .bubble-label {
   font-size: var(--t-xl);
+}
+
+/* Under the lens the card is grown by the layout to fit exactly these lines, so
+   nothing is clipped — and the type stays at canvas scale on purpose: the lens
+   gives a bubble room to speak without pretending the canvas zoomed in. */
+.bubble[data-lens="true"] .bubble-summary {
+  -webkit-line-clamp: unset;
+}
+
+/* it grows past its neighbours, so it is lifted clear of them. The lens gesture
+   selects the bubble too, hence the ring restated rather than overridden. */
+.bubble[data-lens="true"] {
+  box-shadow: var(--shadow-3);
+}
+.bubble[data-lens="true"][data-selected="true"] {
+  box-shadow:
+    0 0 0 2px var(--focus),
+    var(--shadow-3);
+}
+
+/* the rest of the canvas while the lens is open: still there, still in place,
+   just secondary — the one grown card is what is being read */
+.react-flow__viewport[data-lens]:not([data-lens=""]) .bubble:not([data-lens="true"]),
+.react-flow__viewport[data-lens]:not([data-lens=""]) .react-flow__edge {
+  opacity: 0.55;
 }
 
 /* the volatile "now" line, shown in place of the promise while work is inside */

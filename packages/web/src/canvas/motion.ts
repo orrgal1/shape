@@ -16,6 +16,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { LayerNode } from "../layer.ts";
 import { computeLayout, type Box, type BoxMap, type LayoutInput } from "../layout.ts";
 import { useApp } from "../store.ts";
+import { withLens } from "./lens.ts";
 
 /** @xyflow/system is not a direct dependency, so take the shape from the util */
 type Padding = Parameters<typeof getViewportForBounds>[5];
@@ -28,9 +29,6 @@ type Padding = Parameters<typeof getViewportForBounds>[5];
 export const MOTION_MS = 380;
 /** a layer swap dissolves the outgoing layer before the new one arrives */
 export const SWAP_OUT_MS = 150;
-/** a bubble under the lens fills this much of the pane's shorter dimension, at most this zoom */
-const LENS_FILL = 0.62;
-const LENS_MAX_ZOOM = 2.2;
 
 /** exponential ease-out; the same family as --ease in the stylesheet */
 const ease = (t: number): number => 1 - Math.pow(1 - t, 3);
@@ -49,13 +47,17 @@ export interface MotionState {
   /** wired to React Flow's move handlers: a user's viewport wins while they drag */
   setInteracting: (interacting: boolean) => void;
   /**
-   * Centre and enlarge one bubble, or, for the bubble already under the lens,
-   * put the viewport back exactly where it was. Automatic framing is held off
-   * while the lens is on; a layer change lifts it.
+   * Put one bubble under the lens: its own box grows around its centre until the
+   * whole summary shows — at the type size it already had — and the viewport
+   * *pans*, never zooms, to put that grown box in the middle. Every other bubble
+   * keeps the size and the place the layout gave it. The same bubble again puts
+   * the boxes and the viewport back; another bubble hands the lens on and keeps
+   * the remembered way back. Automatic framing is held off while the lens is on;
+   * a layer change lifts it.
    */
-  toggleZoom: (id: string) => void;
+  toggleLens: (id: string) => void;
   /** the bubble under the lens, if any */
-  zoomed: string | null;
+  lensed: string | null;
 }
 
 
@@ -86,6 +88,34 @@ function boundsOf(boxes: BoxMap, ids: string[] | undefined): Box | null {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
+/**
+ * Where each box starts a tween that does not change the layer: from where it is
+ * now, and anything still fading out holds the place it had.
+ */
+function originFor(from: BoxMap, target: BoxMap): BoxMap {
+  const origin: BoxMap = {};
+  for (const [id, box] of Object.entries(target)) origin[id] = from[id] ?? box;
+  for (const [id, box] of Object.entries(from)) if (origin[id] === undefined) origin[id] = box;
+  return origin;
+}
+
+/** one change on one clock: boxes from `origin` to `target`, viewport to `wanted` */
+interface Ride {
+  origin: BoxMap;
+  target: BoxMap;
+  /** viewport to land on, or null when there is nothing to frame */
+  wanted: Viewport | null;
+  /** ms to hold before the boxes move, for the layer dissolve */
+  hold: number;
+  /** a layer change owns the dissolve phase and the enter/leave sets; a lens does not */
+  layer: boolean;
+  /**
+   * move the viewport even though `interacting` is held on. The lens holds it on
+   * to keep automatic framing away, but the lens's own pan is the user's move.
+   */
+  insist: boolean;
+}
+
 export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOptions): MotionState {
   const [boxes, setBoxes] = useState<BoxMap>({});
   const [entering, setEntering] = useState<ReadonlySet<string>>(new Set<string>());
@@ -97,6 +127,8 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
   const height = useStore((state) => state.height);
 
   const current = useRef<BoxMap>({});
+  /** the raw layout target, before the lens grew anything: what lifting goes back to */
+  const laid = useRef<BoxMap>({});
   const frame = useRef<number | null>(null);
   /** the layer we last showed, so departures can be rendered while they fade */
   const shown = useRef<LayerNode[]>([]);
@@ -109,7 +141,7 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
   const owed = useRef<Viewport | null>(null);
   /** the bubble under the lens and the viewport to give back when it lifts */
   const lens = useRef<{ id: string; previous: Viewport } | null>(null);
-  const [zoomed, setZoomed] = useState<string | null>(null);
+  const [lensed, setLensed] = useState<string | null>(null);
 
   const setInteracting = useCallback((value: boolean) => {
     interacting.current = value;
@@ -119,35 +151,149 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
     void setViewport(target, { duration: MOTION_MS });
   }, [setViewport]);
 
-  const toggleZoom = useCallback(
+  /** the promise a bubble makes, or null when it has nothing clipped to reveal */
+  const summaryOf = useCallback(
+    (id: string): string | null => {
+      // alone on its layer the card is already unclamped: the lens adds nothing
+      if (input.layer.nodes.length === 1) return null;
+      return input.layer.nodes.find((entry) => entry.node.id === id)?.node.summary ?? null;
+    },
+    [input],
+  );
+
+  /**
+   * The one rAF loop, shared by a layout change and a lens toggle so neither can
+   * fight the other: whichever starts last cancels the frame in flight.
+   */
+  const tween = useCallback(
+    ({ origin, target, wanted, hold, layer, insist }: Ride): void => {
+      if (frame.current !== null) {
+        cancelAnimationFrame(frame.current);
+        frame.current = null;
+      }
+
+      const moves = (): boolean => insist || !interacting.current;
+
+      const land = (): void => {
+        current.current = target;
+        setBoxes(target);
+        if (wanted === null) return;
+        if (!moves()) {
+          owed.current = wanted;
+          return;
+        }
+        void setViewport(wanted, { duration: 0 });
+      };
+
+      // Reduced motion or a hidden tab (rAF never fires there): land at once.
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || document.hidden) {
+        if (layer) {
+          swapUntil.current = 0;
+          setSwap("none");
+        }
+        land();
+        return;
+      }
+
+      const start = performance.now();
+      const startFrom = getViewport();
+      let phase: SwapPhase = hold > 0 ? "out" : "none";
+      if (layer) setSwap(phase);
+
+      const step = (nowMs: number): void => {
+        const elapsed = nowMs - start;
+        if (phase === "out" && elapsed >= hold) {
+          phase = "in";
+          setSwap("in");
+        }
+        const t = Math.min(1, Math.max(0, (elapsed - hold) / MOTION_MS));
+        const k = ease(t);
+        const next: BoxMap = {};
+        for (const id of Object.keys(origin)) {
+          const a = origin[id];
+          const b = target[id] ?? a;
+          if (a === undefined || b === undefined) continue;
+          next[id] =
+            t === 1
+              ? b
+              : {
+                  x: a.x + (b.x - a.x) * k,
+                  y: a.y + (b.y - a.y) * k,
+                  w: a.w + (b.w - a.w) * k,
+                  h: a.h + (b.h - a.h) * k,
+                };
+        }
+        current.current = next;
+        setBoxes(next);
+
+        // the viewport rides the same clock, so there is never a second
+        // correcting animation for the eye to catch
+        if (wanted !== null && moves()) {
+          void setViewport(
+            {
+              x: startFrom.x + (wanted.x - startFrom.x) * k,
+              y: startFrom.y + (wanted.y - startFrom.y) * k,
+              zoom: startFrom.zoom + (wanted.zoom - startFrom.zoom) * k,
+            },
+            { duration: 0 },
+          );
+        }
+
+        if (t < 1) {
+          frame.current = requestAnimationFrame(step);
+          return;
+        }
+        frame.current = null;
+        current.current = target;
+        if (wanted !== null && !moves()) owed.current = wanted;
+        if (layer) {
+          swapUntil.current = 0;
+          setEntering(new Set<string>());
+          setLeaving([]);
+        }
+      };
+
+      frame.current = requestAnimationFrame(step);
+    },
+    [setViewport, getViewport],
+  );
+
+  const toggleLens = useCallback(
     (id: string) => {
       const held = lens.current;
       if (held !== null && held.id === id) {
         lens.current = null;
-        setZoomed(null);
+        setLensed(null);
         interacting.current = false;
         // content moved on underneath the lens: the fresh framing wins over a
         // viewport that was framing something else
         const back = owed.current ?? held.previous;
         owed.current = null;
-        void setViewport(back, { duration: MOTION_MS });
+        const target = laid.current;
+        const origin = originFor(current.current, target);
+        tween({ origin, target, wanted: back, hold: 0, layer: false, insist: true });
         return;
       }
-      const box = current.current[id];
+      const box = laid.current[id];
       if (box === undefined || width === 0 || height === 0) return;
       // the first lens remembers where the user was; hopping lens to lens
       // keeps that first place, so the way back is always to before any lens
       const previous = held?.previous ?? getViewport();
-      const zoom = Math.min(LENS_MAX_ZOOM, (width * LENS_FILL) / box.w, (height * LENS_FILL) / box.h);
       lens.current = { id, previous };
-      setZoomed(id);
+      setLensed(id);
       interacting.current = true;
-      void setViewport(
-        { x: width / 2 - (box.x + box.w / 2) * zoom, y: height / 2 - (box.y + box.h / 2) * zoom, zoom },
-        { duration: MOTION_MS },
-      );
+      const target = withLens(laid.current, id, summaryOf);
+      const grown = target[id] ?? box;
+      // pan only: the zoom the user chose is the zoom they keep
+      const { zoom } = getViewport();
+      const wanted = {
+        x: width / 2 - (grown.x + grown.w / 2) * zoom,
+        y: height / 2 - (grown.y + grown.h / 2) * zoom,
+        zoom,
+      };
+      tween({ origin: originFor(current.current, target), target, wanted, hold: 0, layer: false, insist: true });
     },
-    [width, height, setViewport, getViewport],
+    [width, height, getViewport, tween, summaryOf],
   );
 
   useEffect(() => {
@@ -163,25 +309,26 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
 
         const focusChanged = lastFocus.current !== undefined && lastFocus.current !== (input.layer.focus?.id ?? null);
         lastFocus.current = input.layer.focus?.id ?? null;
+        laid.current = target;
         // a different layer is a different picture: the lens lifts with nothing to give back to
         if (lens.current !== null && (focusChanged || !layerIds.includes(lens.current.id))) {
           lens.current = null;
-          setZoomed(null);
+          setLensed(null);
           interacting.current = false;
           owed.current = null;
         }
+        // content can change under a held lens: the bubble stays grown through it
+        const displayed = withLens(target, lens.current?.id ?? null, summaryOf);
 
         // bubbles that were on screen a moment ago and are not in the new layer
         const survivors = new Set(layerIds);
         const departed = focusChanged ? [] : shown.current.filter((entry) => !survivors.has(entry.node.id));
         shown.current = input.layer.nodes;
 
-        const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
         const origin: BoxMap = {};
-        const ids = Object.keys(target);
+        const ids = Object.keys(displayed);
         for (const id of ids) {
-          const landing = target[id];
+          const landing = displayed[id];
           if (landing === undefined) continue;
           // an arriving bubble starts where it lands and fades in instead of sliding
           origin[id] = current.current[id] ?? landing;
@@ -192,7 +339,7 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
           if (last !== undefined) origin[entry.node.id] = last;
         }
 
-        const rect = boundsOf(target, scope);
+        const rect = boundsOf(displayed, scope);
         const wanted =
           rect === null || width === 0 || height === 0
             ? null
@@ -205,32 +352,8 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
                 padding,
               );
 
-        if (frame.current !== null) {
-          cancelAnimationFrame(frame.current);
-          frame.current = null;
-        }
-
         setEntering(arriving);
         setLeaving(departed);
-
-        const land = (): void => {
-          current.current = target;
-          setBoxes(target);
-          if (wanted === null) return;
-          if (interacting.current) {
-            owed.current = wanted;
-            return;
-          }
-          void setViewport(wanted, { duration: 0 });
-        };
-
-        // Reduced motion or a hidden tab (rAF never fires there): land at once.
-        if (reduced || document.hidden) {
-          swapUntil.current = 0;
-          setSwap("none");
-          land();
-          return;
-        }
 
         // The dissolve is a section of the same clock, not a separate timer.
         // Drilling resizes the pane (the focus card takes a row), which re-runs
@@ -240,63 +363,7 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
         if (focusChanged) swapUntil.current = now0 + SWAP_OUT_MS;
         const hold = Math.max(0, swapUntil.current - now0);
 
-        const startFrom = getViewport();
-        const start = now0;
-        let phase: SwapPhase = hold > 0 ? "out" : "none";
-        setSwap(phase);
-
-        const step = (nowMs: number): void => {
-          const elapsed = nowMs - start;
-          if (phase === "out" && elapsed >= hold) {
-            phase = "in";
-            setSwap("in");
-          }
-          const t = Math.min(1, Math.max(0, (elapsed - hold) / MOTION_MS));
-          const k = ease(t);
-          const next: BoxMap = {};
-          for (const id of Object.keys(origin)) {
-            const a = origin[id];
-            const b = target[id] ?? a;
-            if (a === undefined || b === undefined) continue;
-            next[id] =
-              t === 1
-                ? b
-                : {
-                    x: a.x + (b.x - a.x) * k,
-                    y: a.y + (b.y - a.y) * k,
-                    w: a.w + (b.w - a.w) * k,
-                    h: a.h + (b.h - a.h) * k,
-                  };
-          }
-          current.current = next;
-          setBoxes(next);
-
-          // the viewport rides the same clock, so there is never a second
-          // correcting animation for the eye to catch
-          if (wanted !== null && !interacting.current) {
-            void setViewport(
-              {
-                x: startFrom.x + (wanted.x - startFrom.x) * k,
-                y: startFrom.y + (wanted.y - startFrom.y) * k,
-                zoom: startFrom.zoom + (wanted.zoom - startFrom.zoom) * k,
-              },
-              { duration: 0 },
-            );
-          }
-
-          if (t < 1) {
-            frame.current = requestAnimationFrame(step);
-            return;
-          }
-          frame.current = null;
-          current.current = target;
-          swapUntil.current = 0;
-          if (wanted !== null && interacting.current) owed.current = wanted;
-          setEntering(new Set<string>());
-          setLeaving([]);
-        };
-
-        frame.current = requestAnimationFrame(step);
+        tween({ origin, target: displayed, wanted, hold, layer: true, insist: false });
       })
       .catch((error: unknown) => {
         // a blank canvas with no explanation is the worst possible failure here
@@ -306,7 +373,7 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
     return () => {
       cancelled = true;
     };
-  }, [input, scope, padding, minZoom, maxZoom, width, height, setViewport, getViewport]);
+  }, [input, scope, padding, minZoom, maxZoom, width, height, tween, summaryOf]);
 
   useEffect(
     () => () => {
@@ -315,5 +382,5 @@ export function useMotion({ input, scope, padding, minZoom, maxZoom }: MotionOpt
     [],
   );
 
-  return { boxes, entering, leaving, swap, setInteracting, toggleZoom, zoomed };
+  return { boxes, entering, leaving, swap, setInteracting, toggleLens, lensed };
 }

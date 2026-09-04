@@ -54,6 +54,12 @@ export interface BuildInput {
    */
   pondering: boolean;
   /**
+   * The bubble under the lens, or null. Its card is grown to fit its whole
+   * promise and drawn above the layer — the lens is allowed to overlap its
+   * neighbours, which is what keeps every other box exactly where it was.
+   */
+  lens: string | null;
+  /**
    * Comparison verdicts, or null on the live canvas. When set, every bubble and
    * line carries one — anything the delta does not mention is backdrop.
    */
@@ -66,6 +72,9 @@ export interface BuildInput {
 const NO_NOTES: readonly string[] = [];
 const NO_PIPS: readonly BranchPip[] = [];
 const NO_RINGS: readonly number[] = [];
+
+/** above every other card and stroke: the lensed bubble is the one being read */
+const LENS_Z = 1000;
 
 /**
  * The verdict for a drawn line. A line usually stands for one relation, but a
@@ -99,6 +108,7 @@ export function buildCanvas({
   marks,
   thinking,
   pondering,
+  lens,
   variations,
 }: BuildInput): CanvasModel {
   const selectedNodeId = selection?.kind === "node" ? selection.id : null;
@@ -155,6 +165,7 @@ export function buildCanvas({
 
   const nodes: CanvasNode[] = [];
   const bubble = (entry: LayerNode, motion: "enter" | "leave" | "none", order: number): void => {
+    const lensed = entry.node.id === lens;
     const box = boxes[entry.node.id];
     if (box === undefined) return;
     nodes.push({
@@ -172,6 +183,8 @@ export function buildCanvas({
       selectable: false,
       connectable: false,
       deletable: false,
+      // the lens grows past its neighbours on purpose, so it is drawn over them
+      ...(lensed ? { zIndex: LENS_Z } : null),
       data: {
         node: entry.node,
         phase: entry.node.phase,
@@ -187,6 +200,7 @@ export function buildCanvas({
         childCount: entry.childCount,
         descendantCount: entry.descendantCount,
         solo: layer.nodes.length === 1,
+        lens: lensed,
         // the fold is not a bubble in any layer, so it carries none of their
         // extra vocabulary
         layer: entry.isMore ? "build" : layerOf(entry.node),
