@@ -210,19 +210,17 @@ export async function attachManager(
   }
   const mgr = env.mgr ?? MGR;
 
-  let handle: ManagerHandle | null;
   try {
-    handle = await attach(project, launcher, env, mgr);
+    const handle = await attach(project, launcher, env, mgr);
+    if (handle === null) return null;
+    await configure(project, handle, env, mgr);
+    return handle;
   } catch (err) {
     // every herdr call in there can be refused (a workspace the user closed
     // mid-flight, a socket that dropped) and none of it is worth a project
     console.error(`[bridge] manager: none (${errText(err)})`);
     return null;
   }
-  if (handle === null) return null;
-
-  await configure(project, handle, env, mgr);
-  return handle;
 }
 
 /** FIND then OPEN; whichever answers, the caller configures it. */

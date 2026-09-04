@@ -789,7 +789,9 @@ export class HerdrLauncher implements Launcher {
         };
       },
       type: async (text) => {
-        await this.prompt(paneId, text);
+        // a driven session is only ever typed at after it greeted on the link,
+        // long past the readiness gap `prompt` waits out for a fresh pane
+        await this.#call("agent.prompt", { target: paneId, text });
       },
       interrupt: async () => {
         await this.#call("agent.send_keys", { target: paneId, keys: ["esc"] });
@@ -807,9 +809,9 @@ export class HerdrLauncher implements Launcher {
    * this tab, renamed to `spec.label` — exactly what a project's first
    * ordinary session gets.
    *
-   * The names are the caller's, in order, because a manager is recognized by
-   * its name across Shape restarts; only once every one of them is taken does
-   * this fall back to numbering the last (`manager-2`, `-3`, …).
+   * The names are the caller's, in order, because a manager is known by name
+   * to whoever reads the tab strip (`manager` first); only once every one of
+   * them is taken does this fall back to numbering the last (`-2`, `-3`, …).
    */
   async open(spec: LaunchSpec, names: readonly string[]): Promise<HerdrOpened> {
     const candidates = names.filter((name) => name.length > 0);
