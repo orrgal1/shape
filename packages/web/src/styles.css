@@ -3908,28 +3908,10 @@ kbd {
   color: color-mix(in oklab, var(--correctness) 60%, var(--text-dim));
 }
 
-/* the third door onto the build side, read from the verification end */
-.verifies-parts {
-  flex: none;
-  white-space: nowrap;
-  border-color: color-mix(in oklab, var(--correctness) 42%, var(--line-strong));
-  background: color-mix(in oklab, var(--correctness) 12%, var(--surface-3));
-  color: color-mix(in oklab, var(--correctness) 68%, var(--text));
-}
-
-.verifies-parts:hover {
-  background: color-mix(in oklab, var(--correctness) 26%, var(--surface-3));
-  border-color: color-mix(in oklab, var(--correctness) 78%, var(--line-strong));
-  color: var(--text);
-}
-
-/* the "attested by" layer: its card says which verification it answers for */
-.focus-card[data-verifies="true"] {
-  border-color: color-mix(in oklab, var(--correctness) 32%, var(--line-strong));
-  background: color-mix(in oklab, var(--correctness) 6%, var(--surface-2));
-}
-
-/* the fourth door, read from the build end */
+/* the third and fourth doors, the same `verifies` relation read from either
+   end: "verifies N parts" on a check, "covered by N" on a part. Both open onto
+   the correctness side, so both wear its hue. */
+.verifies-parts,
 .covered-by {
   flex: none;
   white-space: nowrap;
@@ -3938,13 +3920,16 @@ kbd {
   color: color-mix(in oklab, var(--correctness) 68%, var(--text));
 }
 
+.verifies-parts:hover,
 .covered-by:hover {
   background: color-mix(in oklab, var(--correctness) 26%, var(--surface-3));
   border-color: color-mix(in oklab, var(--correctness) 78%, var(--line-strong));
   color: var(--text);
 }
 
-/* the "covers" layer: its card says which part it answers for */
+/* the "attested by" and "covers" layers: the card says which verification, or
+   which part, it answers for */
+.focus-card[data-verifies="true"],
 .focus-card[data-covers="true"] {
   border-color: color-mix(in oklab, var(--correctness) 32%, var(--line-strong));
   background: color-mix(in oklab, var(--correctness) 6%, var(--surface-2));
