@@ -4256,12 +4256,14 @@ volumes:
   const cuFrames = [];
   let cuBridge = null;
   let cuSocket = null;
+  let cuErr = "";
   try {
     // the canvas as somebody left it: one bubble, over one of the two packages.
     // Written under the key the agent will derive, so the first attach finds it
     // exactly where it looks for its own canvas.
     const { openSqliteStorage } = await import(new URL("../src/server/sqlite.ts", import.meta.url));
-    const seeded = openSqliteStorage(join(cuHome, ".shape", "shape.db"));
+    const cuDb = join(cuHome, ".shape", "shape.db");
+    const seeded = openSqliteStorage(cuDb);
     await seeded.saveGraph("local", projectKeyOf(cuTarget), cuWt, {
       rev: 5,
       nodes: [
@@ -4287,7 +4289,6 @@ volumes:
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
-    let cuErr = "";
     cuBridge.stderr.setEncoding("utf8");
     cuBridge.stderr.on("data", (d) => {
       cuErr += d;
@@ -4304,29 +4305,43 @@ volumes:
     }
     const cuHello = await waitFor("hello for the stale map", () => cuFrames.find((f) => f.type === "hello"), 30_000);
     check(
-      // by the time a browser can connect the catch-up turn is already running,
-      // so what is asserted is that the seeded bubble is the canvas this room
-      // opened on — never that nothing has happened since
+      // the startup session was already being caught up by the time this
+      // browser could connect — on Linux the catch-up's file index is two git
+      // spawns that finish before the socket is even open — so what is asserted
+      // is that the seeded bubble is the canvas this room opened on, never that
+      // nothing has happened since; the proof of the turn is what the harness
+      // received and what the room wrote down, not a frame nobody was there for
       "the canvas the bridge came up on is the one that was left behind",
       cuHello.graphs[cuWt]?.nodes.some((n) => n.id === "the-front-door") === true &&
         !cuHello.graphs[cuWt]?.nodes.some((n) => n.id === "cu-auth"),
       JSON.stringify(cuHello.graphs[cuWt]?.nodes.map((n) => n.id) ?? null),
     );
 
-    const cuLine = await waitFor(
-      "the transcript line of the catch-up",
-      () =>
-        cuFrames.find(
-          (f) => f.type === "transcript" && f.worktree === cuWt && f.role === "user" && f.text.startsWith("Catch the map up"),
-        ),
-      30_000,
-    );
-    check("a canvas the code moved under is caught up, not remapped", cuLine.text === "Catch the map up with the code", cuLine.text);
-
     const catchUp = await waitFor(
       "the catch-up prompt",
       () => ompFrames(cuLog).find((f) => f.type === "deliver" && f.body.includes("<catch-up>")),
       30_000,
+    );
+    const cuAudit = await waitFor("the room's own record of the catch-up", () => {
+      let db = null;
+      try {
+        db = new DatabaseSync(cuDb);
+        const rows = db
+          .prepare("SELECT entry FROM audit WHERE tenant = ? AND key = ? AND worktree = ? ORDER BY seq ASC")
+          .all("local", projectKeyOf(cuTarget), cuWt);
+        return rows.map((r) => JSON.parse(r.entry)).find((e) => e.kind === "onboard") ?? null;
+      } catch {
+        return null;
+      } finally {
+        db?.close();
+      }
+    });
+    check(
+      "a canvas the code moved under is caught up, not remapped",
+      cuAudit.catchUp === true &&
+        cuAudit.focus === null &&
+        !ompFrames(cuLog).some((f) => f.type === "deliver" && f.body.includes("<onboarding-survey>")),
+      JSON.stringify(cuAudit),
     );
     check(
       "the catch-up prompt names the package no bubble covers, and the file with the parts inside it",
@@ -4373,13 +4388,19 @@ volumes:
     );
     const cuMark = await waitFor(
       "the mark the catch-up left on the canvas",
-      () => cuFrames.find((f) => f.type === "graph" && f.worktree === cuWt && f.graph.surveyed !== undefined),
+      () => {
+        const frame = cuFrames.find((f) => f.type === "graph" && f.worktree === cuWt && f.graph.surveyed !== undefined);
+        if (frame !== undefined) return frame.graph;
+        // delivered before this browser connected: the hello carries the mark
+        const graph = cuHello.graphs[cuWt];
+        return graph?.surveyed === undefined ? null : graph;
+      },
       30_000,
     );
     check(
       "the catch-up marks the canvas as caught up at this HEAD",
-      cuMark.graph.surveyed.head === cuMark.graph.reality.head && typeof cuMark.graph.surveyed.head === "string",
-      JSON.stringify(cuMark.graph.surveyed),
+      cuMark.surveyed.head === cuMark.reality.head && typeof cuMark.surveyed.head === "string",
+      JSON.stringify(cuMark.surveyed),
     );
 
     // and once at that HEAD: the variation closed and reopened is a second
@@ -4413,7 +4434,7 @@ volumes:
       JSON.stringify(cuMapped.map((f) => f.id)),
     );
   } catch (err) {
-    check("the automatic catch-up run completed", false, String(err));
+    check("the automatic catch-up run completed", false, `${String(err)}\n--- bridge stderr ---\n${cuErr}`);
   } finally {
     cuSocket?.close();
     cuBridge?.kill("SIGKILL");
