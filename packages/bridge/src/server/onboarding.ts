@@ -1,5 +1,5 @@
 /**
- * Brownfield onboarding, server half (onboarding.md): the two prompts the model
+ * Brownfield onboarding, server half (docs/onboarding.md): the two prompts the model
  * answers about existing code — the survey that maps a project nobody mapped,
  * and the catch-up that brings a map the code moved under back to the code —
  * and the validation that holds both to what the project contains.
@@ -41,7 +41,7 @@ function refInsideProject(ref: string): string | null {
   return segments.join("/");
 }
 
-/** Verbatim from understand.md — the bar a bubble must clear to exist. */
+/** Verbatim from docs/notes/understand.md — the bar a bubble must clear to exist. */
 const BOUNDARY_TEST =
   "can you state what it promises to the rest of the system in one sentence, and would deleting it break a named set of importers?";
 

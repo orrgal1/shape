@@ -1,3 +1,21 @@
+# dependencies and build output
 node_modules/
 dist/
+
+# bridge state (SQLite graph store, sessions)
 .shape/
+
+# logs, including the fake-harness JSONL the smokes write
+*.log
+
+# OS and editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
+
+# local secrets
+.env
+.env.*

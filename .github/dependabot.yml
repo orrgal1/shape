@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # pnpm workspaces are covered by the npm ecosystem: Dependabot reads
+  # pnpm-lock.yaml and every packages/*/package.json from the root manifest.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

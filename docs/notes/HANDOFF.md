@@ -1,7 +1,7 @@
 # Session handoff (2026-08-28)
 
-State carried over from the ideas-repo session that graduated this project. Read `vision.md` first
-— it is the authoritative design document. `understand.md` / `evaluate.md` / `log.md` are the
+State carried over from the ideas-repo session that graduated this project. Read `../vision.md` first
+— it is the authoritative design document. `understand.md` / `evaluate.md` are the
 frozen funnel record of the narrower predecessor idea (brownfield architecture map); kept for the
 analysis that still applies (self-report problem, boundary test, update trigger, prior art of
 codebase visualizers).
@@ -9,8 +9,8 @@ codebase visualizers).
 ## Where things stand
 
 - Vision, client decision (browser-first, TUI ruled out for v1), and stack
-  (React Flow v12 + elkjs + Zustand) are settled — see `vision.md` §"Client decision".
-- Research briefs preserved in `research/`: dictation-vendor integration ladder (historical),
+  (React Flow v12 + elkjs + Zustand) are settled — see `../vision.md` §"Client decision".
+- Research briefs preserved in `../research/`: dictation-vendor integration ladder (historical),
   stack evaluation. Links are scout-sourced — verify before load-bearing use.
 - **User said "Go"** — implementation was greenlit; nothing has been scaffolded yet.
 
@@ -44,7 +44,7 @@ Step 3 done — v1 slice built and proven end-to-end (2026-08-28):
   CLI in a temp dir, advancing bubble phases to `built` via the canvas tool as it worked.
   Deictic steering (click bubble → chip → utterance → `<canvas-steering>` injection) verified.
 
-Step 4 done — project onboarding (design: `onboarding.md`; contract deltas in CONTRACTS.md):
+Step 4 done — project onboarding (design: `../onboarding.md`; contract deltas in CONTRACTS.md):
 mechanical skeleton from extractReality → agent survey turn under anti-diary constraints
 (codeRefs-must-exist gate) → drift verification. Plus `IntentNode.status` ("what's happening
 now", clears on omission) and the TLDR side panel (project mode / selected-bubble mode,

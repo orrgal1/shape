@@ -1,0 +1,48 @@
+name: Feature or change
+description: Something Shape should do that it does not do yet
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The fields below are the body format the manager skill uses when it files
+        an issue, so a human-written request and a manager-written one read alike
+        and a builder session can pick either up without translation.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What should exist, and why it is worth building.
+      placeholder: |
+        Let a bubble be pinned so drift extraction never rewrites its label.
+        Long-lived architectural bubbles keep getting renamed by the extractor.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: Observable outcomes that mean this is done. Checkboxes, one per line.
+      placeholder: |
+        - [ ] a pinned bubble survives a drift pass with its label unchanged
+        - [ ] pinning round-trips through the revision store
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Constraints, files you expect to touch, prior art, alternatives you rejected.
+      placeholder: |
+        Op shape belongs in packages/shared (both sides import it).
+        Prior art: the existing `locked` flag on edges.
+    validations:
+      required: false
+  - type: input
+    id: blocked_by
+    attributes:
+      label: Blocked by
+      description: Issues that must land first, if any.
+      placeholder: "#12, #15"
+    validations:
+      required: false

@@ -1,0 +1,51 @@
+name: Bug report
+description: Something in Shape behaves differently than it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The fields below are the body format the manager skill uses when it files
+        an issue, so a human-written bug and a manager-written one read alike and
+        a builder session can pick either up without translation.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what you expected instead. One paragraph is enough.
+      placeholder: |
+        Attaching to a running omp session leaves the canvas empty.
+        Expected the bubbles from the last revision to render immediately.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: Observable outcomes that mean the bug is fixed. Checkboxes, one per line.
+      placeholder: |
+        - [ ] attaching to a live session renders the stored bubbles
+        - [ ] `pnpm --filter @shape/bridge smoke` still passes
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: >-
+        Repro steps, harness (omp / Claude Code), Node version, launcher (herdr /
+        pty), plus any constraints, files or prior art you already know about.
+      placeholder: |
+        Repro: pnpm bridge, then attach from the canvas.
+        Harness: omp. Node: 26.7.0. Launcher: herdr.
+        Suspect packages/bridge/src/agent/attach.ts.
+    validations:
+      required: false
+  - type: input
+    id: blocked_by
+    attributes:
+      label: Blocked by
+      description: Issues that must land first, if any.
+      placeholder: "#12, #15"
+    validations:
+      required: false

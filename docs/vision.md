@@ -1,7 +1,7 @@
 # Vision: voice-driven, canvas-first agent development interface
 
 *Fleshed out 2026-08-28. Supersedes the narrower "map of an existing codebase" framing in
-`understand.md` — this is the greenfield, primary-interface version of the same idea. Not re-gated;
+`notes/understand.md` — this is the greenfield, primary-interface version of the same idea. Not re-gated;
 recorded as vision.*
 
 ## The vision, distilled
@@ -23,8 +23,8 @@ A new kind of agent development interface that is absolutely visual and voice-dr
 
 ## Why this is different from the evaluated claim
 
-`understand.md` evaluated the brownfield read-mostly version: a code-derived map of an existing
-repo, agent labels only, steering demoted to "addressing." This version is the one `evaluate.md`
+`notes/understand.md` evaluated the brownfield read-mostly version: a code-derived map of an existing
+repo, agent labels only, steering demoted to "addressing." This version is the one `notes/evaluate.md`
 explicitly held payoff at 2 over: *"the version of this that pays off big is the one where the map
 becomes the primary interface for directing agents."* That is precisely this.
 
@@ -70,7 +70,7 @@ the interface you keep using.
 
 A click alone is a referent with no requirement. A sentence alone is a requirement with no referent
 (the agent guesses "which component"). Together they form a complete steering utterance — this
-dissolves the "instruction underspecification" objection from `understand.md`. Grammar:
+dissolves the "instruction underspecification" objection from `notes/understand.md`. Grammar:
 
 - **click(bubble) + speech** → scoped instruction ("this should also handle retries")
 - **click(edge) + speech** → interaction change ("make this async, queue in between")
@@ -79,12 +79,12 @@ dissolves the "instruction underspecification" objection from `understand.md`. G
 - **click(bubble) + "use the big model here"** → orchestration is the same primitive.
 
 Steering arrives mid-run as a queued, addressed instruction: the harness resolves the referent to
-concrete files/context (the "addressing" reduction from understand.md — now one half of the
+concrete files/context (the "addressing" reduction from notes/understand.md — now one half of the
 primitive rather than the whole feature).
 
 ### 3. Two-layer graph: intent vs reality, drift rendered
 
-The self-report problem from `understand.md` (agent-narrated structure is a diary, not a survey)
+The self-report problem from `notes/understand.md` (agent-narrated structure is a diary, not a survey)
 still stands and is MORE dangerous here, because the map is the primary interface. The fix:
 
 - **Intent layer** — agent-declared decomposition. Exists from minute zero; the only layer during
@@ -130,7 +130,7 @@ Scout-verified 2026-08 (links in research brief, agent://WisprIntegration):
    cooperation (omp has hub/steering; most CLIs don't expose it). Building on a harness that
    already supports mid-run steering is close to mandatory.
 3. **Decomposition quality is the product.** If the agent's bubbles are wrong-altitude (40 bubbles
-   for a 30k-LOC system), the interface amplifies the error. The boundary test from understand.md
+   for a 30k-LOC system), the interface amplifies the error. The boundary test from notes/understand.md
    (a bubble deserves to exist iff its promise is stateable in one sentence and deleting it breaks
    named importers) has to be enforced by the harness, not hoped for.
 4. **Reality-layer coverage beyond TS monorepos.** Mechanical extraction is cheap for pnpm

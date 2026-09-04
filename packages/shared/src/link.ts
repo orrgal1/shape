@@ -13,7 +13,7 @@
  *    `ServerToAgentMsg` is everything the server needs from the machine the
  *    harness and repo live on, and everything it asks that machine to do. In
  *    local mode both ends are in one process over an in-memory pair; remotely
- *    it is a WebSocket at `/agent` (PLAN.md §Link v2).
+ *    it is a WebSocket at `/agent` (docs/notes/PLAN.md §Link v2).
  *
  * Every frame after `attach` is implicitly scoped to the socket's project: the
  * server never trusts a project id in a frame body. Within that project, a

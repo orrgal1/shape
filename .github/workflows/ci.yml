@@ -1,0 +1,55 @@
+name: ci
+
+on: [push, pull_request]
+
+# A new push to the same ref makes the previous run's answer worthless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # No version pin: pnpm/action-setup reads `packageManager` from package.json,
+      # so the runner and a developer machine use the same pnpm.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # TypeScript is run directly by Node in bridge/link/shared, so typecheck is
+      # the only compile-time check there is outside the web build.
+      - run: pnpm typecheck
+
+      # Hermetic smokes only: no network, no model, no real agent session, fakes
+      # for omp/claude/herdr/gh. These are left out on purpose:
+      #   smoke:herdr  — models a herdr tab; run it locally.
+      #   smoke:auth, smoke:remote — bind real TCP ports across several
+      #     processes; run them locally before a PR that touches split mode.
+      #   smoke:adopt  — scans the host's real running agent sessions, so its
+      #     result depends on the machine and means nothing on a runner.
+      - name: shared contract smoke
+        run: pnpm smoke:shared
+
+      - name: wire protocol smoke
+        run: pnpm smoke:wire
+
+      - name: drift extractor smoke
+        run: pnpm --filter @shape/bridge smoke:drift
+
+      - name: Claude Code adapter smoke
+        run: pnpm --filter @shape/bridge smoke:claude
+
+      - name: bridge end-to-end smoke
+        run: pnpm --filter @shape/bridge smoke
+
+      - name: link omp extension selftest
+        run: pnpm --filter @shape/link selftest:omp

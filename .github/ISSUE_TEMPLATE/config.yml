@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/orrgal1/shape/blob/main/SECURITY.md
+    about: Do not open a public issue for a vulnerability. Follow SECURITY.md instead.

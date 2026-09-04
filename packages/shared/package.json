@@ -2,7 +2,13 @@
   "name": "@shape/shared",
   "private": true,
   "version": "0.0.1",
+  "description": "Shape contract: graph types, applyOps validation, canvas tool schema, wire messages, revision diff",
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=26",
+    "pnpm": ">=11"
+  },
   "scripts": {
     "smoke": "node scripts/smoke.mjs"
   }

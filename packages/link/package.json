@@ -2,8 +2,13 @@
   "name": "@shape/link",
   "private": true,
   "version": "0.0.1",
-  "type": "module",
   "description": "The link: Shape's canvas tool as an MCP server, plus a harness hook that reports what the agent is doing",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=26",
+    "pnpm": ">=11"
+  },
   "scripts": {
     "mcp": "node src/mcp.ts",
     "selftest:omp": "sh -c 'command -v bun >/dev/null 2>&1 && exec bun scripts/omp-extension-selftest.mjs; exec node scripts/omp-extension-selftest.mjs'",

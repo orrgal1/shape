@@ -3,7 +3,7 @@
 Settled 2026-08-28. `packages/shared/src/index.ts` is the machine-readable form of this
 document; when they disagree, the TS file wins.
 
-## Topology (split 2026-09-03, PLAN.md Phase 0)
+## Topology (split 2026-09-03, docs/notes/PLAN.md Phase 0)
 
 ```
 browser (Vite dev :5173)
@@ -537,7 +537,7 @@ Server → client (`ServerMsg`):
 
 Client → server (`ClientMsg`):
 - `utterance` — `{ referent: { kind: "node" | "edge", id: string } | null, text: string }`
-- `onboard` — `{ focus?: string }` map an existing project (see onboarding.md); valid only
+- `onboard` — `{ focus?: string }` map an existing project (see docs/onboarding.md); valid only
   while the intent layer is empty
 - `set_autonomous` — `{ worktree, on: boolean }` hand that variation over to itself, or take
   it back; refused with the usual reason when it has no session. See §Next and autonomy.
@@ -1003,7 +1003,7 @@ Edges touching a folded node lift onto the more-bubble (self-lifts dropped, merg
 their count badge) and liveness/drift/`failed` bubbling counts folded nodes. Edge labels are
 hidden until an endpoint bubble or the edge itself is selected or hovered; strokes always show.
 This cap is a SAFETY NET, not the structure: the agent is instructed to keep 3–5 bubbles per
-layer and to introduce named parent bubbles when there are more real parts (onboarding.md
+layer and to introduce named parent bubbles when there are more real parts (docs/onboarding.md
 §Stage 2), and that grouping is the real structure. No wire changes; the fold is pure rendering.
 
 **Views (client, user decision 2026-09-03; third view 2026-09-03; fourth view 2026-09-03):** the

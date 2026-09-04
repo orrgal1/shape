@@ -2,12 +2,12 @@
 
 Brownfield entry: point Shape at a repo that already exists, get a trustworthy canvas,
 continue steering/building from there. This is the funnel's original brownfield idea returning as
-a feature — the design decisions below are the corrections `understand.md` derived, applied.
+a feature — the design decisions below are the corrections `notes/understand.md` derived, applied.
 
 ## Principle
 
 The agent never invents the skeleton. Mechanics produce the graph; the model produces the
-meaning; drift rendering verifies the result. Survey, not diary (understand.md §self-report).
+meaning; drift rendering verifies the result. Survey, not diary (notes/understand.md §self-report).
 
 ## Pipeline
 
@@ -20,7 +20,7 @@ On `onboard`, the bridge synthesizes intent nodes from `extractReality`:
   or `"Workspace package at <dir> — survey pending."`
 - one `depends` intent edge per cross-package reality edge.
 
-Level 1 = boundaries enforced by mechanism (workspace packages), per understand.md's depth
+Level 1 = boundaries enforced by mechanism (workspace packages), per notes/understand.md's depth
 answer. The canvas fills with ground truth before the model says a word.
 
 ### Stage 2 — agent survey turn
@@ -30,7 +30,7 @@ Bridge composes an onboarding prompt (bridge/src/onboarding.ts) with these const
 1. **Enrich, don't invent.** Rewrite each placeholder summary as the package's one-sentence
    promise, derived from reading export surfaces, manifests, and imports — NOT from README
    or doc prose (anti-diary rule, stated to the agent explicitly).
-2. **Boundary test** (verbatim from understand.md): a bubble deserves to exist iff its promise
+2. **Boundary test** (verbatim from notes/understand.md): a bubble deserves to exist iff its promise
    is stateable in one sentence and deleting it would break a named set of importers.
 3. **Altitude bounds:** 3–5 bubbles per layer — top level and every set of children alike.
    6+ siblings means a grouping is missing, so the agent MUST introduce named parent bubbles
@@ -93,7 +93,7 @@ the survey turn, where every bubble must be a reading of existing code.
 
 On terminal `agent_end` the existing reality/drift pass runs. Drift glow immediately marks every
 bubble whose declared edges disagree with actual imports — the falsifiable-claim bar from
-understand.md, rendered instead of asserted. The user's first steering clicks naturally go to
+notes/understand.md, rendered instead of asserted. The user's first steering clicks naturally go to
 the glowing bubbles ("resurvey this").
 
 ## Contract deltas (v1.1)
@@ -133,4 +133,4 @@ Deltas from the product root (v1.3, 2026-09-03):
 - No subagent fan-out per package in v1 (candidate for large monorepos later).
 - Post-onboarding re-summarization on commit delta stays user-steered in v1 (click drifted
   bubble → speak); automatic re-summarization of affected nodes is the documented later step
-  (understand.md §update-trigger).
+  (notes/understand.md §update-trigger).

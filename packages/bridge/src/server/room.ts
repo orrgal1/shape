@@ -996,7 +996,7 @@ export class ProjectRoom {
   }
 
   /**
-   * Onboarding (onboarding.md), both directions of it. An empty canvas gets the
+   * Onboarding (docs/onboarding.md), both directions of it. An empty canvas gets the
    * survey: the mechanical skeleton first, then the survey turn with codeRefs
    * validation armed against that worktree's file index. A canvas that already
    * has bubbles gets the catch-up turn instead — the same validation, no

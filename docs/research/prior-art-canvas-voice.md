@@ -1,7 +1,7 @@
 # Prior Art: Canvas-First, Voice-Driven Agent Development Interfaces (2026-08-28)
 
 *Scout research brief; links scout-sourced, verify before load-bearing use. Complements the
-brownfield codebase-visualizer prior art (CodeViz, DeepWiki, CodeSee) in `understand.md`.*
+brownfield codebase-visualizer prior art (CodeViz, DeepWiki, CodeSee) in `../notes/understand.md`.*
 
 ## Taxonomy
 

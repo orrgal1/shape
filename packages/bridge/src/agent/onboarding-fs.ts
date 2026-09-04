@@ -1,5 +1,5 @@
 /**
- * Brownfield onboarding, agent half (onboarding.md): the mechanics that need
+ * Brownfield onboarding, agent half (docs/onboarding.md): the mechanics that need
  * the target project's disk — the bounded source probe that answers
  * `targetHasCode`, and the mechanical skeleton derived from the reality layer.
  *
