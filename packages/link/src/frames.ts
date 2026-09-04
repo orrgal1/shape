@@ -159,11 +159,6 @@ export class CanvasCalls {
     return `${prefix}-${this.#seq}`;
   }
 
-  /** whether anything is still waiting for an answer */
-  get idle(): boolean {
-    return this.#pending.size === 0;
-  }
-
   /**
    * Register `id` and hand back the answer it will settle to. The caller sends
    * the frame itself: registering first is what makes a result that arrives on
