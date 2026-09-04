@@ -4,6 +4,8 @@ import {
   layerOf,
   type DiscoveredSession,
   type Harness,
+  type ManagerHandle,
+  type ProjectTools,
   type ToolInfo,
   type WorktreeInfo,
 } from "../../shared/src/index.ts";
@@ -865,6 +867,34 @@ function TerminalButton() {
   );
 }
 
+/**
+ * What the header says about this project's manager. "none" is worth a title of
+ * its own: a project on Shape's own terminal has nowhere to put a manager,
+ * which is a different fact from a herdr workspace that simply has none.
+ */
+function managerState(
+  manager: ManagerHandle | null,
+  launcher: ProjectTools["launcher"] | null,
+): { label: string; title: string; muted: boolean } {
+  if (manager === null) {
+    return {
+      label: "none",
+      // the state word is dimmed when there is nothing behind it, the way the
+      // offline pill is: an absent manager is a fact, not a failure
+      muted: true,
+      title:
+        launcher !== null && launcher !== "herdr"
+          ? "Managers need herdr; this project runs on Shape's own terminal"
+          : "No manager tab in this project's herdr workspace",
+    };
+  }
+  return {
+    label: manager.origin === "found" ? "attached" : "opened",
+    muted: false,
+    title: `Manager ${manager.agentName} in pane ${manager.paneId} (${manager.origin}; Shape extension: ${manager.shapeAware ? "loaded" : "not loaded"})`,
+  };
+}
+
 function Header() {
   const conn = useApp((state) => state.conn);
   const session = useApp((state) => state.session);
@@ -883,6 +913,10 @@ function Header() {
   const branch = session === null || target === null ? null : branchOf(session.worktrees, target);
   const model = running?.session.model ?? null;
   const backend = running?.backend;
+  // The manager pill is project-wide, not per variation: one manager per
+  // project, and its absence is as worth saying as its presence.
+  const launcher = useApp((state) => state.tools?.launcher ?? null);
+  const manager = session === null ? null : managerState(session.manager, launcher);
   // the tab says which project this is, or that it is only the sample
   const cwd = session?.cwd;
   useEffect(() => {
@@ -919,6 +953,12 @@ function Header() {
           <span className="pill-key">harness</span>
           <span className="pill-harness-name">{backend.label}</span>
           {model === null ? null : <span className="pill-harness-model">· {model.id}</span>}
+        </span>
+      )}
+      {manager === null ? null : (
+        <span className="pill pill-manager" title={manager.title}>
+          <span className="pill-key">manager</span>
+          <span className={`pill-manager-state${manager.muted ? " pill-manager-none" : ""}`}>{manager.label}</span>
         </span>
       )}
       {/* the canvas is readable without an agent, but nothing on it can be

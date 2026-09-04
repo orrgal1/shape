@@ -249,6 +249,8 @@ export function mockSession(targetHasCode: boolean): SessionInfo {
     canPublish: true,
     // the mock has no agent behind it, so there is no directive on disk
     directivePath: null,
+    // and no herdr either, so no manager tab: the pill reads "none"
+    manager: null,
   };
 }
 

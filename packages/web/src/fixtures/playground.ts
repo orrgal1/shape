@@ -400,6 +400,16 @@ const PLAYGROUND_SESSION: SessionInfo = {
   agentConnected: true,
   canPublish: true,
   directivePath: null,
+  // this fixture runs on herdr, so it carries the manager the bridge would have
+  // opened there — the header pill's populated state is reachable in the playground
+  manager: {
+    paneId: "pane-7",
+    tabId: "tab-3",
+    workspaceId: "ws-ledgerly",
+    agentName: "manager",
+    origin: "opened",
+    shapeAware: true,
+  },
 };
 
 /** one project, named by the same id `hello` reports joined */

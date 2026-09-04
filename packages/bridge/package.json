@@ -18,6 +18,7 @@
     "smoke:claude": "node scripts/smoke-claude.mjs",
     "smoke:adopt": "node scripts/smoke-adopt.mjs",
     "smoke:herdr": "node scripts/smoke-herdr.mjs",
+    "smoke:manager": "node scripts/smoke-manager.mjs",
     "smoke:drift": "node scripts/smoke-drift.mjs",
     "smoke:remote": "node scripts/smoke-remote.mjs",
     "smoke:auth": "node scripts/smoke-auth.mjs",

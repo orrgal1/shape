@@ -27,9 +27,12 @@ import type { Backend, BackendEvents, BackendStart } from "./types.ts";
  * where packages/link is present but not built or importable from here, and
  * omp loads a `.ts` file directly.
  * `<repo>/packages/bridge/src/agent/backend/omp.ts` -> repo.
+ *
+ * Exported because the manager session (`../manager.ts`) has to load the same
+ * extension and hand it to every builder omp it launches: one path, one truth.
  */
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "..");
-const OMP_EXTENSION = join(REPO_ROOT, "packages", "link", "src", "omp-extension.ts");
+export const OMP_EXTENSION = join(REPO_ROOT, "packages", "link", "src", "omp-extension.ts");
 
 /**
  * How long a launched omp gets to greet. Generous because this covers the TUI

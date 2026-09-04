@@ -100,6 +100,8 @@ const PROJECT = {
   targetHasCode: true,
   canPublish: false,
   directivePath: "/home/u/.shape/server/projects/k-1/shape-directive.md",
+  // this fixture's launcher is the pty, which has no workspace to put a manager in
+  manager: null,
   legacyKeys: LEGACY,
 };
 const REALITY = { nodes: [], edges: [], symbols: [], infra: [], verification: [], extractedAt: null, head: "abc123" };

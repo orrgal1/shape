@@ -42,6 +42,7 @@ import type {
   BackendInfo,
   DiscoveredSession,
   HarnessId,
+  ManagerHandle,
   RealityLayer,
   WorktreeInfo,
 } from "../../../shared/src/index.ts";
@@ -62,6 +63,7 @@ import type { LinkTarget } from "./external.ts";
 import { chooseLauncher } from "./launcher/index.ts";
 import type { Launched, Launcher } from "./launcher/types.ts";
 import { mountLoopbackLink, type LoopbackLink } from "./link.ts";
+import { attachManager } from "./manager.ts";
 import { createProject, probeGitHub, type GithubRequest } from "./newproject.ts";
 import { SKIP_DIRS, hasSourceCode, synthesizeSkeleton } from "./onboarding-fs.ts";
 import { PtyManager, isPtyMsg } from "./pty.ts";
@@ -342,6 +344,12 @@ export class AgentRuntime {
    * point a builder's brief at it. Null when the write failed.
    */
   #directivePath: string | null = null;
+  /**
+   * This project's manager session in the user's herdr, as Shape last saw it.
+   * Null whenever there is none to see — no herdr, no `mgr`, or a herdr that
+   * would not cooperate — which the canvas shows as plainly as it shows one.
+   */
+  #manager: ManagerHandle | null = null;
 
   /** the server's preamble, from `attached`; prepended to each harness's first prompt */
   #preamble = "";
@@ -422,6 +430,9 @@ export class AgentRuntime {
     );
     this.#canPublish = await probeGitHub(GH_BINARY);
     await this.#openProject();
+    // before the first harness: the config the manager pass writes is what
+    // every builder the manager launches later comes up with
+    await this.#attachManager();
     // announced by `attach`, not by a frame of its own: the room does not exist
     // yet
     const primary = await this.#openHarness(this.#primary);
@@ -521,6 +532,28 @@ export class AgentRuntime {
       this.#directivePath = null;
       console.error(`[bridge] could not write shape-directive.md: ${errText(err)}`);
     }
+  }
+
+  /**
+   * Find or open this project's manager (issue #3, `./manager.ts`). Runs after
+   * `#openProject`, because the directive it points the manager's builders at
+   * is written there, and before any harness, because those builders inherit
+   * Shape's integration from the config this pass writes.
+   *
+   * `attachManager` reports every failure itself and answers null, so there is
+   * nothing to catch: a project without a manager still has a canvas.
+   */
+  async #attachManager(): Promise<void> {
+    this.#manager = await attachManager({ path: this.#projectCwd, label: basename(this.#projectCwd) }, this.#launcher, {
+      linkUrl: this.#sockets.url(LINK_WS_PATH),
+      directivePath: this.#directivePath,
+      // the link's callers spell their cwd however they were started; only the
+      // runtime knows how to compare a spelling with a directory
+      isLinked: (cwd) => {
+        const wanted = this.#canonicalDir(cwd);
+        return (this.#loopback?.greeted() ?? []).some((entry) => this.#canonicalDir(entry) === wanted);
+      },
+    });
   }
 
   /**
@@ -686,6 +719,7 @@ export class AgentRuntime {
         targetHasCode: this.#targetHasCode,
         canPublish: this.#canPublish,
         directivePath: this.#directivePath,
+        manager: this.#manager,
         legacyKeys,
       },
       worktrees: this.#worktrees,
@@ -1275,6 +1309,7 @@ export class AgentRuntime {
       this.#outboxOpen = false;
 
       await this.#openProject();
+      await this.#attachManager();
       const primary = await this.#openHarness(this.#primary, opts);
       this.#projectBackend = this.#backendInfo(primary);
       this.#sendAttach();

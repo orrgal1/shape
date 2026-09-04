@@ -22,6 +22,7 @@ import type {
   CanvasOp,
   DiscoveredSession,
   Harness,
+  ManagerHandle,
   ProjectTools,
   RealityEdge,
   RealityInfra,
@@ -214,6 +215,28 @@ function parseLegacyKeys(value: unknown): Record<string, string> {
   return out;
 }
 
+/**
+ * The manager Shape found or opened in the project's herdr workspace. Absent
+ * (an older agent, a stored row, or a project with no herdr) reads as "no
+ * manager", which is a real state — so is a value that does not describe a
+ * live pane, because the only thing downstream does with it is show it.
+ */
+function parseManager(value: unknown): ManagerHandle | null {
+  if (value === null || value === undefined || typeof value !== "object") return null;
+  const m = value as Record<string, unknown>;
+  if (!isId(m.paneId) || !isId(m.tabId) || !isId(m.workspaceId) || !isId(m.agentName)) return null;
+  if (m.origin !== "found" && m.origin !== "opened") return null;
+  if (typeof m.shapeAware !== "boolean") return null;
+  return {
+    paneId: m.paneId,
+    tabId: m.tabId,
+    workspaceId: m.workspaceId,
+    agentName: m.agentName,
+    origin: m.origin,
+    shapeAware: m.shapeAware,
+  };
+}
+
 /** the project half of an `attach`; also one row's project in the server's registry */
 export function parseProject(value: unknown): AgentProject | null {
   if (value === null || typeof value !== "object") return null;
@@ -244,6 +267,7 @@ export function parseProject(value: unknown): AgentProject | null {
     targetHasCode: p.targetHasCode,
     canPublish,
     directivePath,
+    manager: parseManager(p.manager),
     legacyKeys: parseLegacyKeys(p.legacyKeys),
   };
 }

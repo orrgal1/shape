@@ -672,6 +672,16 @@ the write failed — the directive is a convenience, never fatal. Travels on `Ag
 too, so a launcher reading the registry can point a builder's brief at it; absent or empty
 on the wire parses as `null`.
 
+`SessionInfo.manager: ManagerHandle | null` — `{ paneId, tabId, workspaceId, agentName,
+origin: "found" | "opened", shapeAware }`, the project's manager session in the user's herdr
+as the agent found or opened it (`packages/bridge/src/agent/manager.ts`). Null when the
+project's launcher is not herdr, or when the manager could not be reached — a project open
+never fails over a manager. Travels on `AgentProject` too, so a stored registry row
+remembers the manager the last attach saw; absent, or present without a whole handle,
+parses as `null` on both ends (`linkframes.ts` `parseManager`, `packages/web/src/parse.ts`
+`asManagerHandle`). The header shows it as the `manager` pill: `attached` for `found`,
+`opened` for `opened`, a dimmed `none` otherwise.
+
 `DiscoveredSession` (shared/) is one row of the bridge's `discoverSessions()`
 (`packages/bridge/src/agent/discover.ts`): `{ harness: "omp" | "claude" | "codex" | "opencode" |
 "cursor", pid, command, cwd, sessionId, sessionFile, startedAt, resumeCommand, attach:

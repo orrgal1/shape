@@ -23,6 +23,7 @@ import {
   type GraphEdge,
   type Harness,
   type IntentNode,
+  type ManagerHandle,
   type ModelRole,
   type Next,
   type NextChoice,
@@ -399,6 +400,25 @@ function asWorktreeSession(value: unknown): WorktreeSession | null {
   return { worktree, session, backend, state };
 }
 
+/**
+ * The project's manager session, as the agent reported it. Absent (an older
+ * bridge, or a project whose launcher is not herdr) is "no manager", which the
+ * header shows as such; a value that is not a whole handle is unusable for the
+ * one thing the browser does with it — naming the pane — so it reads as none.
+ */
+function asManagerHandle(value: unknown): ManagerHandle | null {
+  if (!isRecord(value)) return null;
+  const paneId = asStr(value.paneId);
+  const tabId = asStr(value.tabId);
+  const workspaceId = asStr(value.workspaceId);
+  const agentName = asStr(value.agentName);
+  if (paneId === null || tabId === null || workspaceId === null || agentName === null) return null;
+  if (paneId === "" || tabId === "" || workspaceId === "" || agentName === "") return null;
+  if (value.origin !== "found" && value.origin !== "opened") return null;
+  if (typeof value.shapeAware !== "boolean") return null;
+  return { paneId, tabId, workspaceId, agentName, origin: value.origin, shapeAware: value.shapeAware };
+}
+
 function asSessionInfo(value: unknown): SessionInfo | null {
   if (!isRecord(value)) return null;
   const cwd = asStr(value.cwd);
@@ -420,6 +440,7 @@ function asSessionInfo(value: unknown): SessionInfo | null {
     agentConnected: value.agentConnected,
     canPublish,
     directivePath,
+    manager: asManagerHandle(value.manager),
   };
 }
 

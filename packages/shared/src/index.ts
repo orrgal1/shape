@@ -1536,6 +1536,23 @@ export interface ProjectTools {
   harnesses: ToolInfo[];
  }
 
+/**
+ * The project's manager session in the user's herdr, as Shape attached to it:
+ * one `omp` tab per project, prompted to act as the manager, whose harness
+ * config Shape keeps pointed at this bridge. Null when there is none — no
+ * herdr, or Shape could not find or open one (issue #3).
+ */
+export interface ManagerHandle {
+  paneId: string;
+  tabId: string;
+  workspaceId: string;
+  agentName: string;
+  /** "found": a manager tab was already there; "opened": Shape opened one */
+  origin: "found" | "opened";
+  /** the pane is linked to this bridge's loopback link (Shape extension loaded) */
+  shapeAware: boolean;
+}
+
 export interface BackendInfo {
   id: string;
   label: string;
@@ -1582,6 +1599,12 @@ export interface SessionInfo {
    * append to a builder's brief. Null when the agent could not write it.
    */
   directivePath: string | null;
+  /**
+   * The manager session Shape found or opened for this project, or null when
+   * the project has none (its launcher is not herdr, or the manager could not
+   * be reached). Absent on the wire from an older agent ⇒ null.
+   */
+  manager: ManagerHandle | null;
 }
 
 /** one project the server knows, for the picker */

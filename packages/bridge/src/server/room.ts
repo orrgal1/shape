@@ -750,6 +750,7 @@ export class ProjectRoom {
       agentConnected: this.#agentConnected,
       canPublish: this.#project.canPublish,
       directivePath: this.#project.directivePath,
+      manager: this.#project.manager,
     };
   }
 

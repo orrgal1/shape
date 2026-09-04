@@ -41,11 +41,33 @@ export interface LoopbackLinkOptions {
 export interface LoopbackLink {
   /** drop every connected caller (runtime stop, link teardown) */
   close(): void;
+  /**
+   * The cwds of callers that greeted and have not gone away: which sessions
+   * have a Shape-aware harness on the link RIGHT NOW. Raw as they said them —
+   * canonicalizing a directory is the runtime's job, and only it knows the
+   * repo's worktrees.
+   */
+  greeted(): string[];
 }
 
 export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptions): LoopbackLink {
   const io = new ExternalIo({ route: opts.route });
   const clients = new Set<WebSocket>();
+  /**
+   * How many live sockets greeted for each cwd. A count, not a set: a harness
+   * being restarted in the same directory overlaps its successor for a moment
+   * (the old socket closes after the new one greets), and the directory is
+   * linked throughout — dropping it on the first goodbye would report a live
+   * session as unaware of Shape.
+   */
+  const linked = new Map<string, number>();
+
+  /** one caller of `cwd` is gone; the directory stays linked while others hold it */
+  const leave = (cwd: string): void => {
+    const left = (linked.get(cwd) ?? 0) - 1;
+    if (left > 0) linked.set(cwd, left);
+    else linked.delete(cwd);
+  };
 
   sockets.mount(LINK_WS_PATH, (socket) => {
     clients.add(socket);
@@ -65,8 +87,17 @@ export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptio
         socket.send(REFUSAL);
         return;
       }
-      if (msg.type === "hello") greeted = msg.cwd;
-      if (msg.type === "bye") greeted = null;
+      if (msg.type === "hello") {
+        // a socket that greets twice re-targets: the directory it held first
+        // loses this caller, or a restart in place would never be released
+        if (greeted !== null) leave(greeted);
+        greeted = msg.cwd;
+        linked.set(msg.cwd, (linked.get(msg.cwd) ?? 0) + 1);
+      }
+      if (msg.type === "bye" && greeted !== null) {
+        leave(greeted);
+        greeted = null;
+      }
       io.handle(msg, (out) => {
         if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(out));
       });
@@ -76,6 +107,7 @@ export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptio
       const cwd = greeted;
       greeted = null;
       if (cwd === null) return;
+      leave(cwd);
       io.handle({ type: "bye", cwd, reason }, () => undefined);
     };
     socket.on("close", () => gone("the harness closed the link"));
@@ -86,6 +118,9 @@ export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptio
     close(): void {
       for (const socket of clients) socket.close();
       clients.clear();
+    },
+    greeted(): string[] {
+      return [...linked.keys()];
     },
   };
 }

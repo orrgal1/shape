@@ -26,6 +26,7 @@ import type {
   BackendInfo,
   CanvasOp,
   DiscoveredSession,
+  ManagerHandle,
   ProjectTools,
   RealityLayer,
   WorktreeInfo,
@@ -163,6 +164,14 @@ export interface AgentProject {
    * convenience, so nothing else depends on it.
    */
   directivePath: string | null;
+  /**
+   * The manager session in this project's herdr workspace, as the agent found
+   * or opened it. Null when the project's launcher is not herdr, or when the
+   * manager could not be reached — a project open never fails over a manager.
+   * Absent from an older agent, and from a stored registry row that predates
+   * this.
+   */
+  manager: ManagerHandle | null;
   /**
    * For every worktree the agent lists, the project key an older Shape would
    * have derived for it — machine + realpath of the worktree DIRECTORY, from
