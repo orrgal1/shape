@@ -69,7 +69,7 @@ it from inside your worktree — the canvas you write to is chosen by the direct
 call from outside the project is refused. Check the bridge is reachable with:
 
 \`\`\`sh
-node ${opts.cliPath} status
+SHAPE_LINK=${opts.linkUrl} node ${opts.cliPath} status
 \`\`\`
 
 \`canvas\` prints exactly one JSON line, \`{"text":…,"isError":…}\` — the same receipt the tool
