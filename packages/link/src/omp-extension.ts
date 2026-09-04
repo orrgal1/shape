@@ -16,11 +16,28 @@
  * `SHAPE_WORKTREE` is the launcher's own bookkeeping and is not read.
  *
  * Runs under omp's Bun. Global `WebSocket` only — no node imports, no deps, so
- * the file is loadable straight from the checkout by a Bun `import()`.
+ * the file is loadable straight from the checkout by a Bun `import()`. The
+ * frames it builds and the pending-call correlator come from `./frames.ts`,
+ * which holds to the same rules: `./cli.ts` speaks the identical wire from
+ * Node, and a frame built twice is a frame that eventually differs.
  */
 
 import { CANVAS_TOOL_DESCRIPTION, CANVAS_TOOL_SCHEMA } from "../../shared/src/index.ts";
 import type { AgentEvent, LinkClientMsg, LinkServerMsg } from "../../shared/src/link.ts";
+import {
+  agentEventFrame,
+  byeFrame,
+  CALL_TIMEOUT_MS,
+  CanvasCalls,
+  canvasCallFrame,
+  deliveredFrame,
+  helloFrame,
+  parseServerFrame,
+  socketMessageText,
+  UNREACHABLE,
+  type CallResult,
+  type LinkSocket,
+} from "./frames.ts";
 
 // ---------------------------------------------------------------------------
 // The omp surface we use
@@ -96,17 +113,11 @@ interface ExtensionApi {
 }
 
 /**
- * The WHATWG socket Bun puts on the global. Declared locally because this
- * package's tsconfig has no DOM lib and `@types/node` carries no WebSocket
- * global — the runtime one is what we bind to.
+ * The WHATWG socket constructor Bun puts on the global. Declared locally
+ * because this package's tsconfig has no DOM lib and the runtime one is what
+ * we bind to; the socket's own shape is `LinkSocket` in `./frames.ts`, shared
+ * with the CLI.
  */
-interface LinkSocket {
-  readyState: number;
-  send: (data: string) => void;
-  close: () => void;
-  addEventListener: (type: string, listener: (event: unknown) => void) => void;
-}
-
 declare const WebSocket: {
   new (url: string): LinkSocket;
   readonly OPEN: number;
@@ -258,19 +269,9 @@ function schemaToZod(schema: unknown, z: ZodBuilder): ZodType {
 // The link
 // ---------------------------------------------------------------------------
 
-/** the bridge answers a canvas call in milliseconds; this is a deadlock guard */
-const CALL_TIMEOUT_MS = 20_000;
-
-const UNREACHABLE = "Shape server unreachable";
-
 /** reconnect floor and ceiling: a restarted bridge is back within seconds */
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 8_000;
-
-interface CallResult {
-  text: string;
-  isError: boolean;
-}
 
 /**
  * One socket to the bridge, held for the session's life and re-dialled on a
@@ -279,12 +280,11 @@ interface CallResult {
  */
 class ShapeLink {
   readonly #url: string;
-  readonly #pending = new Map<string, (result: CallResult) => void>();
+  readonly #calls = new CanvasCalls(CALL_TIMEOUT_MS);
   #socket: LinkSocket | null = null;
   #dialling = false;
   #backoffMs = BACKOFF_MIN_MS;
   #nextDialAt = 0;
-  #seq = 0;
   /** the frames to (re)send the moment a socket opens: hello, then session */
   #greeting: () => LinkClientMsg[] = () => [];
   #onServer: (frame: LinkServerMsg) => void = () => {};
@@ -329,35 +329,25 @@ class ShapeLink {
 
   async call(cwd: string, id: string, args: unknown): Promise<CallResult> {
     if (!this.open) return { text: UNREACHABLE, isError: true };
-    const { promise, resolve } = Promise.withResolvers<CallResult>();
-    this.#pending.set(id, resolve);
-    this.send({ type: "canvas_call", cwd, id, args });
-    const timer = setTimeout(() => {
-      if (!this.#pending.delete(id)) return;
-      resolve({ text: "Shape did not answer the canvas call", isError: true });
-    }, CALL_TIMEOUT_MS);
-    const result = await promise;
-    clearTimeout(timer);
-    return result;
+    // registered before the frame goes out: a result on the same tick is still ours
+    const answer = this.#calls.open(id);
+    this.send(canvasCallFrame(cwd, id, args));
+    return answer;
   }
 
   /** the tool call was cancelled: the answer, if it ever comes, is nobody's */
   cancel(id: string, text: string): void {
-    const settle = this.#pending.get(id);
-    if (settle === undefined) return;
-    this.#pending.delete(id);
-    settle({ text, isError: true });
+    this.#calls.cancel(id, text);
   }
 
   nextId(prefix: string): string {
-    this.#seq += 1;
-    return `${prefix}-${this.#seq}`;
+    return this.#calls.nextId(prefix);
   }
 
   close(): void {
     const socket = this.#socket;
     this.#socket = null;
-    this.#settleAll(UNREACHABLE);
+    this.#calls.settleAll(UNREACHABLE);
     if (socket === null) return;
     try {
       socket.close();
@@ -388,7 +378,7 @@ class ShapeLink {
       this.#dialling = false;
       const wasOpen = this.#socket === socket;
       this.#socket = null;
-      this.#settleAll(UNREACHABLE);
+      this.#calls.settleAll(UNREACHABLE);
       this.#retry();
       if (wasOpen) this.#log("link closed; reconnecting");
     });
@@ -397,20 +387,14 @@ class ShapeLink {
       this.#dialling = false;
     });
     socket.addEventListener("message", (event: unknown) => {
-      const data = record(event)?.data;
-      const text = typeof data === "string" ? data : null;
+      const text = socketMessageText(event);
       if (text === null) return;
-      let frame: LinkServerMsg;
-      try {
-        frame = JSON.parse(text) as LinkServerMsg;
-      } catch {
-        return;
-      }
+      const frame = parseServerFrame(text);
+      if (frame === null) return;
+      // a result belongs to the call that asked; everything else is an ask of
+      // the session, which the extension answers
       if (frame.type === "canvas_result") {
-        const settle = this.#pending.get(frame.id);
-        if (settle === undefined) return;
-        this.#pending.delete(frame.id);
-        settle({ text: frame.text, isError: frame.isError });
+        this.#calls.settle(frame);
         return;
       }
       this.#onServer(frame);
@@ -420,11 +404,6 @@ class ShapeLink {
   #retry(): void {
     this.#nextDialAt = Date.now() + this.#backoffMs;
     this.#backoffMs = Math.min(this.#backoffMs * 2, BACKOFF_MAX_MS);
-  }
-
-  #settleAll(text: string): void {
-    for (const settle of this.#pending.values()) settle({ text, isError: true });
-    this.#pending.clear();
   }
 }
 
@@ -469,8 +448,7 @@ export default function shapeExtension(pi: ExtensionApi): void {
     const event = sessionEvent(ctx);
     const identity = event.kind === "session" ? event : null;
     return [
-      {
-        type: "hello",
+      helloFrame({
         cwd,
         harness: "omp",
         sessionId: identity?.sessionId ?? null,
@@ -478,13 +456,13 @@ export default function shapeExtension(pi: ExtensionApi): void {
         model: identity?.model ?? null,
         // the extension owns both: `sendUserMessage` steers, `canvas` is ours
         capabilities: { steer: true, tool: true },
-      },
-      { type: "agent_event", cwd, event },
+      }),
+      agentEventFrame(cwd, event),
     ];
   };
 
   const emit = (event: AgentEvent): void => {
-    link?.send({ type: "agent_event", cwd, event });
+    link?.send(agentEventFrame(cwd, event));
   };
 
   const state = (value: "idle" | "streaming" | "compacting"): void => {
@@ -503,7 +481,7 @@ export default function shapeExtension(pi: ExtensionApi): void {
     });
     // `sendUserMessage` prompts when idle and steers mid-turn on its own, so
     // nothing is ever left waiting for a later turn: `queued` is always false
-    link?.send({ type: "delivered", cwd, id: frame.id, mode: frame.mode, queued: false });
+    link?.send(deliveredFrame(cwd, frame.id, frame.mode, false));
   };
 
   const onServer = (frame: LinkServerMsg): void => {
@@ -574,7 +552,7 @@ export default function shapeExtension(pi: ExtensionApi): void {
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
-    link?.send({ type: "bye", cwd: cwd || ctx.cwd, reason: "session shutdown" });
+    link?.send(byeFrame(cwd || ctx.cwd, "session shutdown"));
     link?.close();
     link = null;
     session = null;

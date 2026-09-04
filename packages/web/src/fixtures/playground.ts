@@ -399,6 +399,7 @@ const PLAYGROUND_SESSION: SessionInfo = {
   ],
   agentConnected: true,
   canPublish: true,
+  directivePath: null,
 };
 
 /** one project, named by the same id `hello` reports joined */

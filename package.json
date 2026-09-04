@@ -26,6 +26,8 @@
     "smoke:herdr": "pnpm --filter @shape/bridge smoke:herdr",
     "web": "pnpm --filter @shape/web dev",
     "smoke:shared": "pnpm --filter @shape/shared smoke",
-    "link:mcp": "node packages/link/src/mcp.ts"
+    "smoke:link-cli": "pnpm --filter @shape/link smoke:link-cli",
+    "link:mcp": "node packages/link/src/mcp.ts",
+    "link:canvas": "node packages/link/src/cli.ts"
   }
 }

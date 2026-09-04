@@ -48,6 +48,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
   const drillHosts = useApp((state) => state.drillHosts);
   const drillVerified = useApp((state) => state.drillVerified);
   const drillCovering = useApp((state) => state.drillCovering);
+  const drillServed = useApp((state) => state.drillServed);
 
   const {
     node,
@@ -62,6 +63,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
     isMore,
     childCount,
     solo,
+    root,
     lens,
     layer,
     realizerCount,
@@ -106,9 +108,6 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
   const infra = layer === "infra";
   const verifies = layer === "correctness";
   const build = layer === "build";
-  // the one top-level capability is the product itself: the bubble the whole
-  // graph starts from, so it says so and counts capabilities, not parts
-  const isRoot = product && !isMore && node.parentId === null;
   // a capability points at code only through the build bubbles that realize it,
   // so a path on the card would be claiming something it does not own
   const codeRef = product ? undefined : node.codeRefs?.[0];
@@ -135,6 +134,11 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
         : null;
 
   const comparing = deltaStatus !== null;
+  // The build end's doors, one to each layer that names this part. Zero is
+  // hidden on both: a hollow shield already says nothing covers it, and
+  // `unrealized` already says nothing is served.
+  const coveredDoor = build && coverCount > 0 && tier !== "min" && !comparing;
+  const servesDoor = !product && detail && serveCount > 0 && !comparing;
   const deltaWord = deltaStatus === null ? undefined : DELTA_WORD[deltaStatus];
   /** the loudest thing about a changed bubble is what changed, not its promise */
   const changeNote = deltaNotes[0];
@@ -182,9 +186,12 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
       title={tip}
       data-phase={node.phase}
       data-layer={layer}
-      data-root={isRoot}
+      data-root={root}
       data-solo={solo}
       data-lens={lens}
+      // two doors need a row of their own, which the summary pays for — except
+      // on the wide cards, a solo or a lens, where the foot has room for both
+      data-doors={coveredDoor && servesDoor && !solo && !lens ? 2 : undefined}
       // in a comparison what moved is the whole story; a second loud claim
       // about the build side would answer a question nobody asked
       data-unrealized={unrealized && !comparing}
@@ -345,28 +352,37 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
             verifies {verifyCount} {verifyCount === 1 ? "part" : "parts"}
           </button>
         ) : null}
-        {/* The same door read from the build end: a part says how many checks
-            cover it, and opening it shows exactly those checks. Zero is hidden
-            because a hollow shield already says so. */}
-        {build && coverCount > 0 && tier !== "min" && !comparing ? (
-          <button
-            type="button"
-            className="built-by covered-by nodrag nopan"
-            title={`show the ${coverCount} ${coverCount === 1 ? "check" : "checks"} that cover “${node.label}”`}
-            onClick={(event) => {
-              event.stopPropagation();
-              drillCovering(node.id);
-            }}
-          >
-            covered by {coverCount}
-          </button>
-        ) : null}
-        {!product && detail && serveCount > 0 && !comparing ? (
-          <span
-            className="badge badge-serves"
-            title={`part of ${serveCount} ${serveCount === 1 ? "capability" : "capabilities"} on the product layer`}
-          >
-            serves {serveCount}
+        {/* The same doors read from the build end: a part says how many checks
+            cover it and how many capabilities it serves, and opening either
+            shows exactly those. */}
+        {coveredDoor || servesDoor ? (
+          <span className="bubble-doors">
+            {coveredDoor ? (
+              <button
+                type="button"
+                className="built-by covered-by nodrag nopan"
+                title={`show the ${coverCount} ${coverCount === 1 ? "check" : "checks"} that cover “${node.label}”`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  drillCovering(node.id);
+                }}
+              >
+                covered by {coverCount}
+              </button>
+            ) : null}
+            {servesDoor ? (
+              <button
+                type="button"
+                className="built-by serves nodrag nopan"
+                title={`show the ${serveCount} ${serveCount === 1 ? "capability" : "capabilities"} “${node.label}” serves`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  drillServed(node.id);
+                }}
+              >
+                serves {serveCount}
+              </button>
+            ) : null}
           </span>
         ) : null}
       </div>
@@ -423,7 +439,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
             ? "open"
             : tier === "min"
               ? null
-              : isRoot
+              : root
                 ? `${childCount} ${childCount === 1 ? "capability" : "capabilities"}`
                 : mechanical
                   ? `${symbolCount} in code`

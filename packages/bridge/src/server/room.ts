@@ -749,6 +749,7 @@ export class ProjectRoom {
       sessions: this.#runningSessions(),
       agentConnected: this.#agentConnected,
       canPublish: this.#project.canPublish,
+      directivePath: this.#project.directivePath,
     };
   }
 

@@ -1576,6 +1576,12 @@ export interface SessionInfo {
    * the folder only.
    */
   canPublish: boolean;
+  /**
+   * Where a launcher can read Shape's directive for this project — the file
+   * the agent wrote naming the link URL and the `canvas` contract, e.g. to
+   * append to a builder's brief. Null when the agent could not write it.
+   */
+  directivePath: string | null;
 }
 
 /** one project the server knows, for the picker */

@@ -409,6 +409,9 @@ function asSessionInfo(value: unknown): SessionInfo | null {
   if (typeof value.agentConnected !== "boolean") return null;
   // an older bridge simply cannot publish: the form then offers the folder only
   const canPublish = value.canPublish === true;
+  // an older bridge wrote no directive: nothing for a launcher to read
+  const directivePath =
+    typeof value.directivePath === "string" && value.directivePath.length > 0 ? value.directivePath : null;
   return {
     cwd,
     targetHasCode: value.targetHasCode,
@@ -416,6 +419,7 @@ function asSessionInfo(value: unknown): SessionInfo | null {
     sessions,
     agentConnected: value.agentConnected,
     canPublish,
+    directivePath,
   };
 }
 

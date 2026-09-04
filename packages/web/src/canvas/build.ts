@@ -201,6 +201,8 @@ export function buildCanvas({
         descendantCount: entry.descendantCount,
         solo: layer.nodes.length === 1,
         lens: lensed,
+        root:
+          !entry.isMore && layer.served === null && layerOf(entry.node) === "product" && entry.node.parentId === null,
         // the fold is not a bubble in any layer, so it carries none of their
         // extra vocabulary
         layer: entry.isMore ? "build" : layerOf(entry.node),

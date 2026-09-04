@@ -299,6 +299,34 @@ export function coveredByPartOf(focus: string | null): string | null {
   return id.length === 0 ? null : id;
 }
 
+/**
+ * The fifth cross-layer drill, and the one answered inside the product layer: a
+ * build bubble's "serves N" chip focuses one flat layer of the capabilities it
+ * serves. It is the `__realizes__:` drill read from the other end — the same
+ * one `realizes` relation, asked of the part instead of of the capability — and
+ * synthetic for the same reason: `realizes` names a set no parent chain
+ * describes, and the ancestor rule (a capability realized by a parent is served
+ * by its children) makes it wider still.
+ */
+const SERVES_PREFIX = "__serves__:";
+
+export function isServesId(id: string): boolean {
+  return id.startsWith(SERVES_PREFIX);
+}
+
+export function servesIdOf(buildId: string): string {
+  return `${SERVES_PREFIX}${buildId}`;
+}
+
+/** the build bubble a focus is asking "what does this serve?" about, folds included */
+export function servesPartOf(focus: string | null): string | null {
+  if (focus === null) return null;
+  const base = isMoreId(focus) ? moreBaseOf(focus) : focus;
+  if (base === null || !isServesId(base)) return null;
+  const id = base.slice(SERVES_PREFIX.length);
+  return id.length === 0 ? null : id;
+}
+
 /** one level up from a focus: the parent bubble, or the fold this one nests in */
 export function focusParentOf(doc: GraphDoc, focus: string): string | null {
   const more = parseMoreId(focus);
@@ -552,6 +580,12 @@ export interface Layer {
    */
   covered: IntentNode | null;
   /**
+   * The build bubble this layer was opened to answer for — set only while the
+   * focus is a `__serves__:` drill, where the bubbles on screen are the
+   * capabilities one part serves.
+   */
+  served: IntentNode | null;
+  /**
    * The mechanical "inside" of the focused bubble: the classes and functions of
    * its own code, in full and uncapped, when the focus is a build leaf. Empty
    * everywhere else — a bubble with children answers "what is inside" with
@@ -591,14 +625,15 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
   const wholeById = new Map<string, IntentNode>();
   for (const node of whole.nodes) wholeById.set(node.id, node);
 
-  // The four cross-layer drills are the questions asked across the layers:
+  // The five cross-layer drills are the questions asked across the layers:
   // which build bubbles make this capability real, which build bubbles run on
   // this piece of infrastructure, which build bubbles one verification attests,
-  // and — the same `verifies` relation read from the other end — which checks
-  // cover one build bubble. All four are asked of the whole document, so the
-  // bubble being asked about is resolved before the document is narrowed to a
-  // layer; the first three are answered inside the build layer, the fourth
-  // inside the correctness layer.
+  // and — the same relations read from the other end — which checks cover one
+  // build bubble and which capabilities one build bubble serves. All five are
+  // asked of the whole document, so the bubble being asked about is resolved
+  // before the document is narrowed to a layer; the first three are answered
+  // inside the build layer, the fourth inside the correctness layer and the
+  // fifth inside the product layer.
   const askedFor = realizesProductOf(focus);
   const asked = askedFor === null ? undefined : wholeById.get(askedFor);
   const product = asked !== undefined && layerOf(asked) === "product" ? asked : null;
@@ -614,6 +649,10 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
   const askedCovered = coveredByPartOf(focus);
   const part = askedCovered === null ? undefined : wholeById.get(askedCovered);
   const covered = part !== undefined && layerOf(part) === "build" ? part : null;
+
+  const askedServes = servesPartOf(focus);
+  const serving = askedServes === null ? undefined : wholeById.get(askedServes);
+  const served = serving !== undefined && layerOf(serving) === "build" ? serving : null;
 
   // One layer at a time. Hierarchy and relations are same-layer by
   // construction, so this single filter is what keeps the product view from
@@ -643,7 +682,7 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
   const parentOf = (node: IntentNode): string | null =>
     node.parentId !== null && byId.has(node.parentId) ? node.parentId : null;
 
-  // A focus is either a real bubble, one of the four cross-layer drills, or one
+  // A focus is either a real bubble, one of the five cross-layer drills, or one
   // of the folds under any of them. A focus whose base is gone addresses
   // nothing, so it falls back to the root layer, the same way a deleted bubble
   // does.
@@ -653,20 +692,23 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
   const hostsBase = baseId !== null && isHostsId(baseId);
   const verifiesBase = baseId !== null && isVerifiesId(baseId);
   const coveredBase = baseId !== null && isCoveredById(baseId);
-  const crossBase = realizesBase || hostsBase || verifiesBase || coveredBase;
+  const servesBase = baseId !== null && isServesId(baseId);
+  const crossBase = realizesBase || hostsBase || verifiesBase || coveredBase || servesBase;
   const focusNode = baseId === null || crossBase ? null : (byId.get(baseId) ?? null);
   const focusId = focusNode === null ? null : focusNode.id;
   /**
    * The fold namespace of this layer. A cross-layer drill folds under its own
    * synthetic id rather than under the root, so walking out of that fold lands
-   * back on the realizers — or the hosted parts, the attested parts, or the
-   * checks that cover one part — instead of on the whole layer.
+   * back on the realizers — or the hosted parts, the attested parts, the checks
+   * that cover one part, or the capabilities one part serves — instead of on the
+   * whole layer.
    */
   const foldBase =
     (realizesBase && product !== null) ||
     (hostsBase && infra !== null) ||
     (verifiesBase && correctness !== null) ||
-    (coveredBase && covered !== null)
+    (coveredBase && covered !== null) ||
+    (servesBase && served !== null)
       ? baseId
       : focusId;
   const baseAlive = realizesBase
@@ -677,7 +719,9 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
         ? correctness !== null
         : coveredBase
           ? covered !== null
-          : baseId === null || focusNode !== null;
+          : servesBase
+            ? served !== null
+            : baseId === null || focusNode !== null;
   const wantedDepth = more === null || !baseAlive ? 0 : more.depth;
 
   const childCount: Record<string, number> = {};
@@ -687,9 +731,10 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
   }
 
   // A capability's realizers, the parts running on one piece of infrastructure,
-  // the parts one verification attests and the checks that cover one part are
-  // sets, not subtrees: they may sit at any depth and under different parents,
-  // which is exactly why these layers are flat.
+  // the parts one verification attests, the checks that cover one part and the
+  // capabilities one part serves are sets, not subtrees: they may sit at any
+  // depth and under different parents, which is exactly why these layers are
+  // flat.
   const members =
     product !== null
       ? realizersOf(whole, product.id)
@@ -701,7 +746,11 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
           ? verifiedOf(whole, correctness.id).filter((node) => byId.has(node.id))
           : covered !== null
             ? verifiersOf(whole, covered.id).filter((node) => byId.has(node.id))
-            : doc.nodes.filter((node) => parentOf(node) === focusId);
+            : served !== null
+              ? servesOf(whole, served.id)
+                  .map((id) => byId.get(id))
+                  .filter((node): node is IntentNode => node !== undefined)
+              : doc.nodes.filter((node) => parentOf(node) === focusId);
 
   /**
    * Every node maps to the visible bubble that stands for it, or to nothing when
@@ -928,6 +977,18 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
       phase: covered.phase,
     });
   }
+  // The served crumb reads `realizes` from the part's end, in that same voice:
+  // "served by the sync engine" names the bubble that answers for the
+  // capabilities on screen, and the crumb is the way back to it.
+  if (served !== null) {
+    trail.push({
+      id: servesIdOf(served.id),
+      parentId: null,
+      label: `served by ${served.label}`,
+      summary: `the capabilities “${served.label}” serves`,
+      phase: served.phase,
+    });
+  }
   // one crumb per fold walked into; only the last one is ever the focus card,
   // so the intermediate crumbs need a label and a hue, nothing more
   const insidePhase = mostAdvanced(shown.length > 0 ? shown : folded);
@@ -940,9 +1001,11 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
           ? `what ${correctness.label} attests`
           : covered !== null
             ? `what covers ${covered.label}`
-            : focusNode === null
-              ? "the project"
-              : focusNode.label;
+            : served !== null
+              ? `what ${served.label} serves`
+              : focusNode === null
+                ? "the project"
+                : focusNode.label;
   for (let level = 1; level <= depth; level += 1) {
     trail.push({
       id: moreIdOf(foldBase, level),
@@ -1118,6 +1181,7 @@ export function selectLayer({ doc: whole, focus, activity, layer: view, fold = t
     infra,
     correctness,
     covered,
+    served,
     // the mechanical inside of a leaf, which is what the ghost bubbles on an
     // otherwise empty layer are drawn from
     symbols:

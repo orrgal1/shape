@@ -247,6 +247,8 @@ export function mockSession(targetHasCode: boolean): SessionInfo {
     agentConnected: true,
     // the fixture offers the GitHub option so the create form's full shape is reachable
     canPublish: true,
+    // the mock has no agent behind it, so there is no directive on disk
+    directivePath: null,
   };
 }
 

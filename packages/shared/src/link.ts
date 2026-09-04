@@ -157,6 +157,13 @@ export interface AgentProject {
   /** `gh` is installed and signed in here, so a new project can be published */
   canPublish: boolean;
   /**
+   * Absolute path on the agent's machine of the per-project directive the
+   * agent wrote (what Shape is, this project's link URL, the `canvas`
+   * contract). Null when it could not be written — the directive is a
+   * convenience, so nothing else depends on it.
+   */
+  directivePath: string | null;
+  /**
    * For every worktree the agent lists, the project key an older Shape would
    * have derived for it — machine + realpath of the worktree DIRECTORY, from
    * before the key came off the repo's common dir. Keyed by worktree id. The
