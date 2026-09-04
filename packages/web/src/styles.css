@@ -3947,14 +3947,39 @@ kbd {
 }
 
 .bubble-foot > .bubble-phase,
-.bubble-foot > .built-by {
+.bubble-foot > .built-by,
+.bubble-foot > .bubble-doors {
   flex: none;
 }
 
-/* two doors on one part — "covered by" and "serves" — sit together at the right
-   end rather than being pushed apart by a second `margin-left: auto` */
-.bubble-foot > .built-by + .built-by {
-  margin-left: 0;
+/* The build end's doors travel together, at the right end of the row where a
+   lone door sits. Inside the group the first door's `margin-left: auto` has no
+   room to take, so the two sit at the row's own gap. */
+.bubble-foot > .bubble-doors {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+/* Two doors do not fit beside the phase word in a 210px row, and a door the
+   row clips is not a door. So they take the card's bottom-right corner on a
+   row of their own, and the summary gives up its second line to pay for it —
+   the lens shows the whole promise anyway. Reserved from the card's padding
+   so the foot above keeps its place, and clear of the drill chip, which hangs
+   below the bottom edge. */
+.bubble[data-doors="2"] {
+  padding-bottom: calc(var(--s3) + 17px + var(--s1));
+}
+
+.bubble[data-doors="2"] .bubble-summary {
+  -webkit-line-clamp: 1;
+}
+
+.bubble[data-doors="2"] .bubble-doors {
+  position: absolute;
+  right: var(--s3);
+  bottom: var(--s3);
 }
 
 /* a block rather than the badge's usual inline-flex: `text-overflow` only
