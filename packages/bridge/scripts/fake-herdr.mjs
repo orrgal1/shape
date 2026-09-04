@@ -371,6 +371,15 @@ async function dispatch(method, params) {
       statusChanged(tab, "idle");
       return { agent: agentRecord(tab) };
     }
+    case "agent.get": {
+      // what the launcher reads before its first utterance: this fake's agents
+      // are ready the moment `agent.start` answers, so it never says pending
+      const tab = agentTarget(String(params.target ?? ""));
+      if (tab === null || tab.child === null) {
+        throw Object.assign(new Error(`no such agent: ${String(params.target)}`), { code: "agent_not_found" });
+      }
+      return { agent: agentRecord(tab) };
+    }
     case "agent.prompt": {
       const tab = agentTarget(String(params.target ?? ""));
       if (tab === null || tab.child === null) {

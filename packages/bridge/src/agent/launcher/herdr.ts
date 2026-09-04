@@ -78,14 +78,17 @@ const START_TIMEOUT_MS = 60_000;
 const MAX_NAME_ATTEMPTS = 20;
 
 /**
- * How long an utterance waits for herdr to consider a just-started agent an
- * "active named agent", and how often it asks again. `agent.start` answering
- * is not that moment: herdr refuses `agent.prompt` with `agent_not_ready` for
- * a beat afterwards (seen against herdr 0.8.0), so the first thing said to a
- * session Shape just opened would be dropped.
+ * How long an utterance waits for a just-started agent to become addressable,
+ * and how often it looks. `agent.start` answering is not that moment: the
+ * agent stays `launch_pending` for a few seconds afterwards (herdr 0.8.0 is
+ * watching the screen settle), and `agent.prompt` in that window is refused
+ * with `agent_not_ready`. Retrying the prompt itself does not help — every
+ * attempt keeps the agent pending for as long as the attempts continue (seen
+ * against the same herdr: 10 s of 200 ms retries, then ready the moment they
+ * stopped) — so readiness is READ off `agent.get` and the prompt sent once.
  */
-const PROMPT_READY_MS = 10_000;
-const PROMPT_RETRY_MS = 200;
+const PROMPT_READY_MS = 15_000;
+const PROMPT_POLL_MS = 250;
 
 /** connecting to a socket nobody is listening on must not hang the startup */
 const CONNECT_TIMEOUT_MS = 3_000;
@@ -826,25 +829,25 @@ export class HerdrLauncher implements Launcher {
   }
 
   /**
-   * Type an utterance into a pane, waiting out the gap between `agent.start`
-   * answering and herdr treating that agent as addressable (`agent_not_ready`
-   * — see PROMPT_READY_MS). Every other refusal is the caller's at once: a
-   * pane whose agent exited is not going to become ready.
+   * Type an utterance into a pane, after the gap between `agent.start`
+   * answering and herdr treating that agent as addressable (see
+   * PROMPT_READY_MS). A pane with no agent left in it is not going to become
+   * ready: `agent.get` refusing, or the wait running out, is the caller's.
    */
   async prompt(paneId: string, text: string): Promise<void> {
     const deadline = Date.now() + PROMPT_READY_MS;
     for (;;) {
-      try {
-        await this.#call("agent.prompt", { target: paneId, text });
-        return;
-      } catch (err) {
-        if (!(err instanceof HerdrRefusal) || err.code !== "agent_not_ready" || Date.now() >= deadline) throw err;
-        const { promise, resolve: settle } = Promise.withResolvers<void>();
-        // a wait for a session nobody is watching must not hold the process open
-        setTimeout(settle, PROMPT_RETRY_MS).unref();
-        await promise;
+      const got = await this.#call("agent.get", { target: paneId });
+      if (asRecord(got.agent).launch_pending !== true) break;
+      if (Date.now() >= deadline) {
+        throw new Error(`agent in pane ${paneId} was still starting after ${String(PROMPT_READY_MS)}ms`);
       }
+      const { promise, resolve: settle } = Promise.withResolvers<void>();
+      // a wait for a session nobody is watching must not hold the process open
+      setTimeout(settle, PROMPT_POLL_MS).unref();
+      await promise;
     }
+    await this.#call("agent.prompt", { target: paneId, text });
   }
 
   /**
