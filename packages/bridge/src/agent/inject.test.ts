@@ -307,6 +307,38 @@ test("two projects are briefed independently, and a shared pane only once", asyn
   assert.deepEqual(workspacesCalled, ["ws-a", "ws-b"]);
 });
 
+test("two passes running at once, as the fleet runs them, still brief a shared pane once", async (t) => {
+  const h = await harness(t);
+  // two repos in ONE herdr workspace put the same pane on both boards; the
+  // fleet starts every project's pass together, so both read `briefed` before
+  // either has typed anything — the reservation is what makes "once" hold
+  const shared = { manager: null, in_flight: [issue(2, "pane-shared", join(h.dir, "wt-shared"))], awaiting_approval: [], adopting: [] };
+  await h.board("ws-a", shared);
+  await h.board("ws-b", shared);
+
+  const briefed = new Set<string>();
+  const [a, b] = await Promise.all([
+    injectProject(h.project, h.launcher, h.env, briefed),
+    injectProject(h.projectB, h.launcher, h.env, briefed),
+  ]);
+  assert.deepEqual([...a, ...b], ["pane-shared"]);
+  assert.deepEqual(
+    h.prompts.map((entry) => entry.paneId),
+    ["pane-shared"],
+  );
+  assert.deepEqual([...briefed], ["pane-shared"]);
+});
+
+test("a refused pane gives its reservation back, so a refusal never blocks a later pass", async (t) => {
+  const h = await harness(t);
+  await h.board("ws-a", { manager: null, in_flight: [issue(1, "pane-1", join(h.dir, "wt-1"))], awaiting_approval: [], adopting: [] });
+  h.refuse.add("pane-1");
+
+  const briefed = new Set<string>();
+  assert.deepEqual(await injectProject(h.project, h.launcher, h.env, briefed), []);
+  assert.deepEqual([...briefed], []);
+});
+
 test("a project with no herdr workspace is left alone entirely", async (t) => {
   const h = await harness(t);
   h.workspaces.delete(h.project.path);

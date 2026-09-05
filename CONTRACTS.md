@@ -269,7 +269,7 @@ skipped when they are already there.
 
 **At most once per pane per process.** `AgentFleet.#briefed` is the set of pane ids briefed,
 owned by the fleet and shared by every runtime, so a project marked inactive and then active
-again does not brief its panes a second time through a fresh runtime. It is process-scoped
+again does not brief its panes a second time through a fresh runtime. A pass RESERVES every pane it selected in that set before its first await and gives a reservation back only when the prompt is refused: two repos in one herdr workspace put the same pane on both boards, and their passes run concurrently. It is process-scoped
 deliberately: a restarted bridge cannot know what the sessions were told before it, so it tells
 them again.
 

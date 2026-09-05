@@ -169,6 +169,9 @@ export async function injectProject(
   env: ManagerEnvironment,
   briefed: Set<string>,
 ): Promise<string[]> {
+  // gives back the reservations of the panes not yet briefed; a no-op until
+  // the pass has selected its targets
+  let release = (): void => {};
   try {
     // the directive is the whole payload; before the runtime has written it
     // there is nothing to say that the session could act on
@@ -193,9 +196,26 @@ export async function injectProject(
 
     const targets = pending(panesOf(board), env, briefed);
     if (targets.length === 0) return [];
-    const directive = await readFile(env.directivePath, "utf8");
-
+    // RESERVED before the first await below. Two repos in one herdr workspace
+    // put the same pane on both boards, and the fleet runs their passes at
+    // once: a pane entered here only after its prompt would be typed into
+    // twice. A reservation a prompt then fails is given back, so the next
+    // scan still retries it.
+    for (const target of targets) briefed.add(target.paneId);
     const sent: string[] = [];
+    release = () => {
+      for (const target of targets) if (!sent.includes(target.paneId)) briefed.delete(target.paneId);
+    };
+
+    let directive: string;
+    try {
+      directive = await readFile(env.directivePath, "utf8");
+    } catch (err) {
+      release();
+      console.error(`[bridge] inject: ${project.label}: directive unreadable (${errText(err)})`);
+      return [];
+    }
+
     for (const target of targets) {
       let text = `${INJECT_PREFIX}\n\n${directive}`;
       if (target.role === "manager") {
@@ -207,18 +227,19 @@ export async function injectProject(
         await launcher.prompt(target.paneId, text);
       } catch (err) {
         // a pane that ended, or an agent that will not take input right now;
-        // the next scan finds it again because it never entered `briefed`
+        // the next scan finds it again because its reservation is given back
+        briefed.delete(target.paneId);
         console.error(`[bridge] inject: ${project.label}: pane ${target.paneId} refused the directive (${errText(err)})`);
         continue;
       }
-      briefed.add(target.paneId);
       sent.push(target.paneId);
       console.error(`[bridge] inject: ${project.label}: briefed pane ${target.paneId} (${target.role})`);
     }
     return sent;
   } catch (err) {
-    // a herdr call that dropped mid-pass, a directive file the user deleted:
-    // one line, and the next scan tries again
+    // a herdr call that dropped mid-pass: one line, the reservations given
+    // back, and the next scan tries again
+    release();
     console.error(`[bridge] inject: ${project.label}: nothing briefed (${errText(err)})`);
     return [];
   }
