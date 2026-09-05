@@ -35,7 +35,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 const linkPkg = dirname(here);
 const repo = dirname(dirname(linkPkg));
 const bridgePkg = join(repo, "packages", "bridge");
-const fakeOmp = join(bridgePkg, "scripts", "fake-omp-tui.mjs");
 const cli = join(linkPkg, "src", "cli.ts");
 
 // ---------------------------------------------------------------------------
@@ -120,12 +119,9 @@ const running = [];
 const scratch = [];
 
 /**
- * One real bridge on its own port, over its own target repo and SHAPE_HOME,
- * with the fake omp TUI as the harness — the same spawn line the bridge's own
- * smoke uses. It is ready when the browser hub reports a session in the target
- * worktree: that is exactly the condition `#routeLink` needs to accept a
- * caller's cwd, so waiting for it removes the whole class of "no Shape session
- * is running" flakes.
+ * One real bridge on its own port, over its own target repo and SHAPE_HOME.
+ * Nothing is launched in it: a caller speaking from inside the target is what
+ * makes a session appear, so the bridge is ready as soon as its hub listens.
  */
 async function startBridge(tag) {
   const port = await freePort();
@@ -136,30 +132,26 @@ async function startBridge(tag) {
   await seedTarget(target);
   const worktree = realpathSync(target);
 
-  const child = spawn(
-    process.execPath,
-    ["src/index.ts", "--cwd", target, "--port", String(port), "--omp", `${process.execPath} ${fakeOmp}`],
-    {
-      cwd: bridgePkg,
-      env: {
-        ...process.env,
-        // Shape's own pty launcher, one detected harness pointed at the fake,
-        // and no automatic map: the canvas has to be empty until the fixture
-        // call writes to it, or the two graphs would differ by whatever a
-        // survey happened to draw.
-        SHAPE_LAUNCHER: "pty",
-        SHAPE_FORCE_HARNESSES: "omp",
-        SHAPE_AUTO_MAP: "0",
-        SHAPE_HOME: home,
-        HOME: home,
-        GIT_AUTHOR_NAME: "smoke",
-        GIT_AUTHOR_EMAIL: "smoke@example.com",
-        GIT_COMMITTER_NAME: "smoke",
-        GIT_COMMITTER_EMAIL: "smoke@example.com",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
+  const child = spawn(process.execPath, ["src/index.ts", "--cwd", target, "--port", String(port)], {
+    cwd: bridgePkg,
+    env: {
+      ...process.env,
+      // no herdr probe against the developer's own terminal, one detected
+      // harness, and no automatic map: the canvas has to be empty until the
+      // fixture call writes to it, or the two graphs would differ by whatever
+      // the skeleton happened to draw.
+      SHAPE_LAUNCHER: "none",
+      SHAPE_FORCE_HARNESSES: "omp",
+      SHAPE_AUTO_MAP: "0",
+      SHAPE_HOME: home,
+      HOME: home,
+      GIT_AUTHOR_NAME: "smoke",
+      GIT_AUTHOR_EMAIL: "smoke@example.com",
+      GIT_COMMITTER_NAME: "smoke",
+      GIT_COMMITTER_EMAIL: "smoke@example.com",
     },
-  );
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   let log = "";
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
@@ -180,10 +172,6 @@ async function startBridge(tag) {
   running.push(bridge);
 
   await waitFor(`${tag}: bridge listening`, () => log.includes("canvas at ws://"));
-  await waitFor(`${tag}: a session in ${worktree}`, async () => {
-    const hello = await hubHello(port);
-    return hello.session?.sessions?.some((s) => s.worktree === worktree) === true;
-  });
   return bridge;
 }
 
