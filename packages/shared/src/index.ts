@@ -7,7 +7,6 @@
  */
 
 import type { AgentSession, WorktreeSession } from "./link.ts";
-import type { PtyClientMsg, PtyServerMsg } from "./pty.ts";
 
 export type {
   AgentEvent,
@@ -19,7 +18,6 @@ export type {
   ServerToAgentMsg,
   WorktreeSession,
 } from "./link.ts";
-export type { PtyClientMsg, PtyServerMsg } from "./pty.ts";
 
 // ---------------------------------------------------------------------------
 // Graph document
@@ -1481,14 +1479,12 @@ export interface DiscoveredSession {
   startedAt: string | null;
   resumeCommand: string[] | null;
   attach: "socket" | "daemon" | "http" | "none";
-  /** a harness session started BY a Shape agent (its parent is a bridge) */
-  spawnedByShape: boolean;
 }
 
 /**
- * What the bridge can do with the backend it is driving. The client renders
- * from this instead of assuming omp: a backend that cannot steer mid-turn
- * queues instead, one with `terminal: "none"` hides the terminal pane.
+ * What the bridge knows about the harness it is observing. The client renders
+ * from this instead of assuming omp: `terminal: "none"` hides the "go to
+ * terminal" affordance.
  */
 export interface BackendCapabilities {
   /** a message can be injected into a running turn */
@@ -1501,12 +1497,10 @@ export interface BackendCapabilities {
   resume: boolean;
   /**
    * Where the harness's terminal is. `external` ⇒ it runs in the user's own
-   * terminal (a herdr tab): Shape can only ask for it to be focused. `pane` ⇒
-   * Shape owns the pty, so the browser can open a drawer over the canvas and
-   * type into it. `none` ⇒ there is nothing to attach to and no way to reach
-   * it (a remote agent that was not started with `--allow-terminal`).
+   * terminal (a herdr tab): Shape can ask for it to be focused. `none` ⇒ there
+   * is no way to reach it (no herdr, or a remote agent).
    */
-  terminal: "external" | "pane" | "none";
+  terminal: "external" | "none";
 }
 
 /**
@@ -1524,17 +1518,17 @@ export interface ToolInfo {
 }
 
 /**
- * What is installed where this project's agent runs, and how it starts things.
- * Project-wide, not per worktree: one agent process picks one launcher and
- * sees one PATH. `launcher` is the one it chose — herdr when it is installed
- * and its socket answers, else Shape's own pty.
+ * What is installed where this project's agent runs. Project-wide, not per
+ * worktree: one agent process sees one PATH. `launcher` is herdr when it is
+ * installed and its socket answers — the one way Shape can reach a session's
+ * terminal — else null.
  */
 export interface ProjectTools {
-  launcher: "herdr" | "pty";
+  launcher: "herdr" | null;
   launchers: ToolInfo[];
-  /** every harness detected on PATH; what the "start a session" card offers */
+  /** every harness detected on PATH */
   harnesses: ToolInfo[];
- }
+}
 
 /**
  * The project's manager session in the user's herdr, as Shape attached to it:
@@ -1562,13 +1556,13 @@ export interface BackendInfo {
 /**
  * What the browser knows about the project as a whole. The harness facts that
  * used to live here (session id, model, backend) are per worktree now and live
- * in `sessions`: one project runs as many harnesses as the user opened
- * worktrees, and none of them is "the" session.
+ * in `sessions`: one project has as many sessions as worktrees with a harness
+ * reporting in, and none of them is "the" session.
  */
 export interface SessionInfo {
   /** the MAIN worktree's path — the project's label and its default target */
   cwd: string;
-  /** target repo already contains source code (onboarding CTA gate) */
+  /** target repo already contains source code (automatic map gate) */
   targetHasCode: boolean;
   /**
    * every worktree of the target's repo (`git worktree list`), each an
@@ -1577,22 +1571,13 @@ export interface SessionInfo {
    */
   worktrees: WorktreeInfo[];
   /**
-   * the harnesses running right now, one per worktree the user opened. A
-   * worktree with no entry here is visible on the canvas but cannot be steered
-   * until it is opened.
+   * the harnesses reporting in right now, one per worktree with a session on
+   * the link. A worktree with no entry here is visible on the canvas; nothing
+   * is running in it that Shape can see.
    */
   sessions: WorktreeSession[];
-  /**
-   * an agent is attached to this project right now. False ⇒ the canvas is
-   * read-only: steering, onboarding and the terminal are refused with a reason.
-   */
+  /** an agent is attached to this project right now; false ⇒ the picture is frozen */
   agentConnected: boolean;
-  /**
-   * A new project started from the canvas can also be put on GitHub: the
-   * agent's machine has the `gh` CLI and is signed in. False ⇒ the form offers
-   * the folder only.
-   */
-  canPublish: boolean;
   /**
    * Where a launcher can read Shape's directive for this project — the file
    * the agent wrote naming the link URL and the `canvas` contract, e.g. to
@@ -1621,16 +1606,11 @@ export interface ProjectSummary {
 
 export type AgentState = "idle" | "streaming" | "compacting";
 
-export interface Referent {
-  kind: "node" | "edge";
-  id: string;
-}
-
 /**
  * Bridge → browser. Every frame that is about ONE worktree names it: the
- * canvas merges the worktrees of a repo into one view, so a graph, a state or
- * a terminal byte that did not say where it came from could not be placed.
- * Project-wide frames (`session`, `projects`, `sessions`, `error`) carry none.
+ * canvas merges the worktrees of a repo into one view, so a graph or a state
+ * that did not say where it came from could not be placed. Project-wide
+ * frames (`session`, `projects`, `sessions`, `error`) carry none.
  */
 export type ServerMsg =
   | {
@@ -1647,43 +1627,29 @@ export type ServerMsg =
       projectId: string;
       /** available snapshots per worktree, each ascending by rev */
       revisions: Record<string, RevisionInfo[]>;
-      /** agent sessions running on this machine, newest first; Shape's own children excluded */
+      /** agent sessions running on this machine, newest first */
       sessions: DiscoveredSession[];
-      /** the card each worktree's last turn ended on; null where there is none */
-      nexts: Record<string, Next | null>;
-      /** which worktrees are deciding for themselves right now */
-      autonomous: Record<string, boolean>;
-      /** what is installed where this project's agent runs, and how it starts a harness */
+      /** what is installed where this project's agent runs */
       tools: ProjectTools;
     }
   | { type: "graph"; worktree: string; graph: GraphDoc }
   | { type: "agent"; worktree: string; state: AgentState }
   /** session facts changed without any graph changing (agent attached/detached, worktrees appeared) — no client state reset */
   | { type: "session"; session: SessionInfo }
-  /** a harness came up in `worktree` — unsolicited, or the answer to `open_worktree` */
+  /** a harness started reporting in from `worktree` */
   | { type: "session_started"; worktree: string; session: AgentSession; backend: BackendInfo }
-  /** that worktree's harness is gone; steering it is refused until it is opened again */
+  /** that worktree's harness is gone */
   | { type: "session_stopped"; worktree: string; reason: string }
   /** broadcast whenever the project list changes (attach, detach) */
   | { type: "projects"; projects: ProjectSummary[] }
   | { type: "activity"; worktree: string; nodeIds: string[] }
   | { type: "transcript"; worktree: string; role: "assistant" | "user" | "tool"; text: string }
-  /** where that worktree's turn left things, or null once anything is said to it */
-  | { type: "next"; worktree: string; next: Next | null }
-  /** that worktree is (or is no longer) deciding for itself and carrying on */
-  | { type: "autonomous"; worktree: string; on: boolean }
   /** broadcast whenever a new snapshot is written; ascending by rev */
   | { type: "revisions"; worktree: string; revisions: RevisionInfo[] }
   /** broadcast reply to a `diff` request, over the worktree it asked about */
   | { type: "delta"; worktree: string; delta: GraphDelta }
   /** broadcast answer to `discover`, and re-broadcast whenever the bridge re-scans */
   | { type: "sessions"; sessions: DiscoveredSession[] }
-  /**
-   * The pty launcher's harness wants the terminal drawer shown (or hidden):
-   * the answer to `focus_terminal` when Shape owns the pty. A harness in the
-   * user's own terminal is focused there and sends nothing here.
-   */
-  | { type: "terminal"; worktree: string; open: boolean }
   /**
    * The sentence being written right now, folded from the harness's text
    * deltas — the last of it, throttled, and never stored. `null` at the end of
@@ -1697,35 +1663,18 @@ export type ServerMsg =
    * project did not open a dialog and has nothing to do with the reply.
    */
   | { type: "folder_picked"; path: string | null }
-  | { type: "error"; message: string }
-  | PtyServerMsg;
+  | { type: "error"; message: string };
 
 /**
- * Browser → bridge. A frame that acts on a canvas names the worktree it acts
- * on: with several worktrees merged into one view, "the current one" is a
- * property of the click, not of the connection.
+ * Browser → bridge. Shape is a read-only picture: nothing here instructs,
+ * starts, stops or types into an agent. What the browser can ask for is which
+ * project to look at, another look at what is running, a comparison of two
+ * snapshots, and — under herdr — for a session's own terminal to be raised.
+ * A frame that acts on a canvas names the worktree it acts on: with several
+ * worktrees merged into one view, "the current one" is a property of the
+ * click, not of the connection.
  */
 export type ClientMsg =
-  | {
-      type: "utterance";
-      /** the worktree whose harness is steered; refused when it has no session */
-      worktree: string;
-      referent: Referent | null;
-      text: string;
-      /**
-       * Greenfield only: leave the first turn to the product picture (the
-       * default when absent) instead of letting the agent start building. Read
-       * only when the canvas is empty as the utterance lands.
-       */
-      productFirst?: boolean;
-    }
-  | { type: "onboard"; worktree: string; focus?: string }
-  /**
-   * Hand that worktree over to itself, or take it back: while it is on, the
-   * bridge answers the end of every turn for the user until the agent says the
-   * work is finished.
-   */
-  | { type: "set_autonomous"; worktree: string; on: boolean }
   /** ask THIS project's agent to retarget onto `path` (local mode; the agent decides) */
   | { type: "switch_project"; path: string }
   /**
@@ -1735,38 +1684,13 @@ export type ClientMsg =
    * points at is only a path on the machine the dialog opened on.
    */
   | { type: "pick_folder" }
-  /**
-   * start a brand-new project at `path`: create the folder, put it under
-   * version control, optionally publish it to GitHub, then retarget onto it
-   */
-  | { type: "create_project"; path: string; github: { visibility: "public" | "private" } | null }
   /** join another project this server hosts; answered with a fresh `hello` to this socket only */
   | { type: "select_project"; projectId: string }
-  /**
-   * Run a harness in the worktree at `path` — a worktree of THIS project, not a
-   * retarget. Answered with `session_started`, or an `error` frame.
-   *
-   * `backend` names the harness to start and beats every configured default;
-   * absent, the agent resolves one (project config, user config, its flag, or
-   * the single detected harness). `autonomous` starts it deciding for itself,
-   * which for most harnesses means launching with approval turned off — it can
-   * only be chosen HERE, because that is the only moment it can be passed.
-   * `remember` writes the chosen harness to `<path>/.shape/config.json`, so
-   * the next open of this project needs no card.
-   */
-  | { type: "open_worktree"; path: string; backend?: string; autonomous?: boolean; remember?: boolean }
-  /**
-   * Take the user to the harness's terminal: focused in their own terminal
-   * (herdr), or answered with a `terminal` frame that opens the drawer (pty).
-   */
+  /** take the user to the harness's terminal: its herdr tab is switched to and the app raised */
   | { type: "focus_terminal"; worktree: string }
-  /** stop the harness running in `worktree`; its canvas stays on the view */
-  | { type: "close_worktree"; worktree: string }
   /** compare two snapshots of one worktree; `revA` = before, `revB` = after. Unknown rev → `error` frame */
   | { type: "diff"; worktree: string; revA: number; revB: number }
-  | { type: "abort"; worktree: string }
   /** re-scan running agent sessions; answered with a `sessions` broadcast */
   | { type: "discover" }
-  /** retarget this bridge onto a discovered session (by pid), resuming it when it has an id */
-  | { type: "adopt"; pid: number }
-  | PtyClientMsg;
+  /** retarget this bridge onto the repo a discovered session (by pid) runs in, and watch it there */
+  | { type: "adopt"; pid: number };

@@ -17,8 +17,8 @@
  *
  * Every frame after `attach` is implicitly scoped to the socket's project: the
  * server never trusts a project id in a frame body. Within that project, a
- * frame about one harness names its `worktree` explicitly — one agent runs one
- * harness per worktree the user opened, and the socket cannot say which.
+ * frame about one harness names its `worktree` explicitly — one agent observes
+ * one harness per worktree that reports in, and the socket cannot say which.
  */
 
 import type {
@@ -31,7 +31,6 @@ import type {
   RealityLayer,
   WorktreeInfo,
 } from "./index.ts";
-import type { PtyClientMsg, PtyServerMsg } from "./pty.ts";
 
 // ---------------------------------------------------------------------------
 // Loopback link (harness-side process ↔ agent)
@@ -115,7 +114,7 @@ export type LinkServerMsg =
 // Agent link (agent ↔ Shape server)
 // ---------------------------------------------------------------------------
 
-/** the harness session the agent is driving in one worktree, as far as it knows */
+/** the harness session the agent is observing in one worktree, as far as it knows */
 export interface AgentSession {
   sessionId: string | null;
   sessionName: string | null;
@@ -123,9 +122,9 @@ export interface AgentSession {
 }
 
 /**
- * One running harness of a project: Shape runs one per worktree the user
- * opened, so a session is only ever meaningful together with the worktree it
- * is running in. This is the unit `attach` lists and `session_started` adds.
+ * One running harness of a project: one per worktree with a session reporting
+ * in, so a session is only ever meaningful together with the worktree it is
+ * running in. This is the unit `attach` lists and `session_started` adds.
  */
 export interface WorktreeSession {
   /** the worktree id (realpath of its directory) this harness runs in */
@@ -145,18 +144,14 @@ export interface AgentProject {
   label: string;
   cwd: string;
   /**
-   * The project's harness: the one the first opened worktree runs. A project
-   * always resolves one (omp when nothing else was chosen), so this is `null`
-   * only while no session is running — every harness exited or was closed —
-   * until the next one starts.
+   * The project's harness: the one the first session that reported in runs
+   * on. `null` while no session is on the link.
    */
   backend: BackendInfo | null;
-  /** what is installed where this agent runs, and which launcher it picked */
+  /** what is installed where this agent runs, and whether herdr is there */
   tools: ProjectTools;
-  /** the repo already contains source code (onboarding CTA gate) */
+  /** the repo already contains source code (automatic map gate) */
   targetHasCode: boolean;
-  /** `gh` is installed and signed in here, so a new project can be published */
-  canPublish: boolean;
   /**
    * Absolute path on the agent's machine of the per-project directive the
    * agent wrote (what Shape is, this project's link URL, the `canvas`
@@ -198,9 +193,9 @@ export type AgentToServerMsg =
        */
       worktrees: WorktreeInfo[];
       /**
-       * the harnesses this agent is running, one per opened worktree. May be
+       * the harnesses reporting in to this agent, one per worktree. May be
        * empty: the server opens the room with no running session and waits for
-       * `open_worktree`.
+       * `session_started`.
        */
       sessions: WorktreeSession[];
       /**
@@ -213,9 +208,9 @@ export type AgentToServerMsg =
       /** this machine's recent project paths, most recent first */
       recentProjects: string[];
     }
-  /** a harness came up in `worktree`: the agent started it, or adopted one into it */
+  /** a harness started reporting in from `worktree` (a link `hello`, a hook, a canvas call) */
   | { type: "session_started"; worktree: string; session: AgentSession; backend: BackendInfo }
-  /** that worktree's harness is gone (closed, exited, disposed by a retarget) */
+  /** that worktree's harness is gone (said `bye`, or the agent retargeted) */
   | { type: "session_stopped"; worktree: string; reason: string }
   | { type: "agent_event"; worktree: string; event: AgentEvent }
   /** the harness (native host tool or loopback link) wants to write to the canvas */
@@ -233,86 +228,31 @@ export type AgentToServerMsg =
    * decides what to open — so this frame only carries the path back.
    */
   | { type: "folder_picked"; path: string | null }
-  /** receipt for `deliver`: how it went out; `queued` when a prompt landed mid-turn on a backend that cannot steer */
-  | { type: "delivered"; worktree: string; id: string; mode: "prompt" | "steer"; queued: boolean }
   /** answers `synthesize_skeleton`, echoing the request's worktree */
   | { type: "skeleton_result"; worktree: string; id: string; ops: CanvasOp[] }
-  /** answers `file_index`: project-relative paths of every tracked (or, for a non-git target, every walked) file */
-  | { type: "file_index"; worktree: string; id: string; files: string[] }
   /** an adapter error worth showing the user (becomes a browser `error` frame) */
   | { type: "agent_error"; message: string }
-  /** the harness died; the agent cannot continue this project */
+  /** the agent cannot continue this project */
   | { type: "agent_exit"; reason: string }
-  | { type: "detached"; reason: string }
-  /**
-   * The harness's terminal wants to be on screen: `open: true` answers a
-   * `focus_terminal` under the pty launcher, where "focus" can only mean the
-   * browser's own drawer. A launcher whose terminal is the user's (herdr)
-   * focuses it for real and never sends this.
-   */
-  | { type: "terminal"; worktree: string; open: boolean }
-  /**
-   * A `create` finished. Sent after the agent's own post-create `switch`, so it
-   * travels the ordinary outbox and lands in the NEW room once it is attached.
-   * Everything short of "the folder does not exist" is a warning, not a
-   * failure: the user is standing in the new project either way.
-   */
-  | {
-      type: "created";
-      path: string;
-      repo: "initialized" | "existing";
-      github: { url: string } | null;
-      warnings: string[];
-    }
-  | PtyServerMsg;
+  | { type: "detached"; reason: string };
 
 /**
  * Server → agent. Requests carry an `id` the agent echoes in its answer, and
- * everything that acts on one harness names its worktree. `switch` and
- * `create` are the exceptions on purpose: they retarget the WHOLE agent at
- * another project, disposing every harness it runs.
+ * everything that acts on one harness names its worktree. `switch` is the
+ * exception on purpose: it retargets the WHOLE agent at another repo.
  */
 export type ServerToAgentMsg =
-  | { type: "attached"; projectId: string; preamble: string }
+  | { type: "attached"; projectId: string }
   | { type: "error"; message: string }
   | { type: "canvas_result"; id: string; text: string; isError: boolean }
   /**
-   * A composed utterance for one worktree's harness. The agent decides `steer`
-   * vs `prompt` (only it has live backend state) and prepends the preamble
-   * from `attached` to the first fresh prompt of a harness session.
-   */
-  | { type: "deliver"; worktree: string; id: string; body: string }
-  | { type: "abort"; worktree: string }
-  /**
-   * Run a harness in the worktree at `path` — a worktree of the project the
-   * agent is already attached to. Answered by `session_started`, or by
-   * `agent_error` when the harness could not be started.
-   *
-   * `backend` names the harness explicitly and beats every config layer.
-   * `autonomous` starts it with its own approvals off. `remember: true` writes
-   * the choice to `<cwd>/.shape/config.json`, so the next open needs no card.
-   */
-  | {
-      type: "open_worktree";
-      path: string;
-      backend?: string;
-      resumeSessionId?: string;
-      autonomous?: boolean;
-      remember?: boolean;
-    }
-  /**
-   * Bring that worktree's harness terminal forward: `agent.focus` on a herdr
-   * tab, or a `terminal { open: true }` back to the browser under the pty
-   * launcher. Answered by `agent_error` when it could not be done.
+   * Bring that worktree's harness terminal forward: `agent.focus` on its herdr
+   * tab. Answered by `agent_error` when it could not be done.
    */
   | { type: "focus_terminal"; worktree: string }
-  /** dispose the harness running in `worktree`; answered by `session_stopped` */
-  | { type: "close_worktree"; worktree: string }
-  /** retarget: dispose every harness, open `path`, start again, then re-`attach` */
-  | { type: "switch"; path: string; backend?: string; resumeSessionId?: string }
-  /** create a project at `path` (folder, version control, optional GitHub), then `switch` onto it */
-  | { type: "create"; path: string; github: { visibility: "public" | "private" } | null }
-  /** resolve a discovered pid (fresh scan) and `switch` to it */
+  /** retarget: forget every session, open `path`, then re-`attach` */
+  | { type: "switch"; path: string }
+  /** resolve a discovered pid (fresh scan) and `switch` to the repo it runs in */
   | { type: "adopt"; pid: number }
   /**
    * Open the machine's native folder chooser, because the browser cannot: no
@@ -324,6 +264,4 @@ export type ServerToAgentMsg =
   | { type: "discover"; id: string }
   | { type: "list_worktrees"; id: string }
   | { type: "extract_reality"; worktree: string }
-  | { type: "synthesize_skeleton"; worktree: string; id: string }
-  | { type: "file_index"; worktree: string; id: string }
-  | PtyClientMsg;
+  | { type: "synthesize_skeleton"; worktree: string; id: string };
