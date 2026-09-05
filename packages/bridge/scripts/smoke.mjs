@@ -1756,6 +1756,7 @@ try {
         directivePath: null,
         manager: null,
         legacyKeys: {},
+        injected: [],
       },
       tenant: "local",
       worktrees: [{ id: wtOldKey, path: wtOldKey, branch: "smoke", head: null }],

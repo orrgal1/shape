@@ -296,8 +296,7 @@ export class ProjectRoom {
       // the room owes a project nothing else yet: the only thing it is still
       // working through is a canvas whose code it has asked to have read to it
       caughtUp: ![...this.#states.values()].some((state) => state.autoMapPending),
-      // #5 briefs sessions with the directive; until then nothing is injected
-      injected: 0,
+      injected: this.#project.injected.length,
       lastSeen: this.#lastSeen,
     };
   }
@@ -936,6 +935,16 @@ export class ProjectRoom {
         return;
       case "agent_error":
         this.#error(msg.message);
+        return;
+      case "injected":
+        // the agent sends the whole list, so this is a replace: it is the same
+        // list `attach` carries, and a room that added to it would count a
+        // pane twice when the link came back
+        this.#project = { ...this.#project, injected: msg.paneIds };
+        // the switcher shows the count, and the row is what an inactive
+        // project's summary is read from later
+        this.#onProjectsChanged();
+        void this.saveProject();
         return;
       case "agent_exit":
         // whether the process dies with the harness is the agent's call

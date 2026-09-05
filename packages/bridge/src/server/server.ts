@@ -496,6 +496,9 @@ export class ShapeServer {
         directivePath: null,
         manager: null,
         legacyKeys: {},
+        // nothing has briefed anybody yet: the runtime this insert starts is
+        // what does the briefing, and it says so with an `injected` frame
+        injected: [],
       },
       tenant,
       worktrees: repo.worktrees,
@@ -661,7 +664,9 @@ export class ShapeServer {
         manager: row.project.manager !== null,
         // nothing is owed a project nothing is running for
         caughtUp: true,
-        injected: 0,
+        // what the row remembers: an inactive project has no runtime briefing
+        // anyone, so the count is whatever its last active pass left behind
+        injected: row.project.injected.length,
         lastSeen: row.lastSeen,
       });
     }

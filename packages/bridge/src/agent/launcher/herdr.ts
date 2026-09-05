@@ -548,6 +548,23 @@ export class HerdrLauncher {
     await this.#call("tab.close", { tab_id: tabId });
   }
 
+  /**
+   * Type a prompt into a LIVE pane: the harness running there reads it as if
+   * the user had typed it, so this is how Shape reaches a session that started
+   * before Shape did and therefore never loaded the omp extension.
+   *
+   * The pane must be one `mgr board` just named — no waiting, no polling for a
+   * harness to come up, because Shape starts no sessions of its own and every
+   * pane it prompts is one the manager already has an agent in. A refusal
+   * (`pane_not_found` after the session ended, an agent that is not accepting
+   * input) throws with herdr's own code in the message, and the CALLER logs
+   * it: one pane that would not take the directive is not a reason to stop
+   * briefing the rest.
+   */
+  async prompt(paneId: string, text: string): Promise<void> {
+    await this.#call("agent.prompt", { target: paneId, text });
+  }
+
   /** Close a whole workspace, tabs and all. */
   async closeWorkspace(workspaceId: string): Promise<void> {
     await this.#call("workspace.close", { workspace_id: workspaceId });

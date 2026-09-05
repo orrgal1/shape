@@ -110,6 +110,8 @@ const PROJECT = {
   // no manager tab open in this project's workspace, which is the usual state
   manager: null,
   legacyKeys: LEGACY,
+  // no session briefed yet: this bridge process has just come up
+  injected: [],
 };
 const REALITY = { nodes: [], edges: [], symbols: [], infra: [], verification: [], extractedAt: null, head: "abc123" };
 const WORKTREES = [
@@ -192,6 +194,13 @@ const WORKTREES = [
     JSON.stringify(badLegacy?.project.legacyKeys),
   );
 
+  const noInjected = parseAgentToServerMsg(JSON.stringify({ ...attach, project: { ...PROJECT, injected: undefined } }));
+  check(
+    "attach: an agent from before injection has briefed nobody",
+    noInjected !== null && noInjected.project.injected.length === 0,
+    JSON.stringify(noInjected?.project.injected),
+  );
+
   const noLauncher = parseAgentToServerMsg(
     JSON.stringify({ ...attach, project: { ...PROJECT, tools: { ...TOOLS, launcher: null } } }),
   );
@@ -236,6 +245,15 @@ roundTrip(parseAgentToServerMsg, "skeleton_result", { type: "skeleton_result", w
 // project-wide answers stay project-wide: they are about the agent, not one harness
 roundTrip(parseAgentToServerMsg, "worktrees", { type: "worktrees", id: "w-1", worktrees: WORKTREES }, { worktreeScoped: false });
 roundTrip(parseAgentToServerMsg, "agent_error", { type: "agent_error", message: "no such worktree" }, { worktreeScoped: false });
+// what the injection pass briefed: project-wide, and the whole list every time
+roundTrip(parseAgentToServerMsg, "injected", { type: "injected", paneIds: ["pane-1"] }, { worktreeScoped: false });
+check(
+  "injected: a pane nobody can name is refused, list and all",
+  parseAgentToServerMsg(JSON.stringify({ type: "injected", paneIds: ["pane-1", 7] })) === null &&
+    parseAgentToServerMsg(JSON.stringify({ type: "injected", paneIds: ["pane-1", ""] })) === null &&
+    parseAgentToServerMsg(JSON.stringify({ type: "injected", paneIds: "pane-1" })) === null &&
+    parseAgentToServerMsg(JSON.stringify({ type: "injected" })) === null,
+);
 
 // ---------------------------------------------------------------------------
 // 2. Agent link: server → agent

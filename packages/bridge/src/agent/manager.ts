@@ -27,6 +27,14 @@
  *   reconciliation is Shape's job: the desired list is computed, and only a
  *   difference costs an `unset` + re-add.
  *
+ * The CONFIG pass is also reached from the other direction: when the injection
+ * pass (./inject.ts) finds a manager that never loaded Shape's extension, it
+ * writes the same config BEFORE telling that manager its future builders are
+ * covered — which is why `configureManager` is exported and takes a workspace
+ * id rather than the handle FIND produced. The `mgr` plumbing (`run`,
+ * `parseJson`, `strings`, `mgrEnv`) is exported for the same reason: there is
+ * one way this bridge calls `mgr`, and both passes go through it.
+ *
  * Every failure here degrades to `null` and one line on stderr, never an
  * exception, because this runs INSIDE opening a project: a herdr that refused,
  * a `mgr` that is not installed or a workspace the user closed are all reasons
@@ -55,7 +63,7 @@ export const MANAGER_LABEL = "manager";
  * `mgr config` hands the path down to every builder the manager launches.
  */
 const BRIDGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const MGR = join(BRIDGE_ROOT, "node_modules", ".bin", "mgr");
+export const MGR = join(BRIDGE_ROOT, "node_modules", ".bin", "mgr");
 export const OMP_EXTENSION = resolve(BRIDGE_ROOT, "..", "link", "src", "omp-extension.ts");
 
 /**
@@ -97,8 +105,11 @@ interface Ran {
  * Run `mgr` without a shell; a non-zero exit is data, not an exception. A
  * binary that is not there at all says nothing on stderr, so the spawn error
  * stands in for it — "mgr ENOENT" is the only useful thing to report then.
+ *
+ * Exported so the injection pass runs `mgr board` the same way, with the same
+ * timeout and the same "a refusal is data" contract.
  */
-function run(file: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<Ran> {
+export function run(file: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<Ran> {
   const { promise, resolve: settle } = Promise.withResolvers<Ran>();
   execFile(file, args, { cwd, env, timeout: MGR_TIMEOUT_MS }, (err, stdout, stderr) => {
     const failed = err === null ? "" : err.message;
@@ -109,7 +120,7 @@ function run(file: string, args: string[], cwd: string, env: NodeJS.ProcessEnv):
 }
 
 /** Failures arrive as Errors whose message is already the whole story. */
-function errText(err: unknown): string {
+export function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
@@ -118,7 +129,7 @@ function errText(err: unknown): string {
  * contract between two programs, and half-understood output is worse than
  * none.
  */
-function parseJson(stdout: string): Record<string, unknown> | null {
+export function parseJson(stdout: string): Record<string, unknown> | null {
   const line = stdout.trim();
   if (line.length === 0) return null;
   let raw: unknown;
@@ -131,8 +142,26 @@ function parseJson(stdout: string): Record<string, unknown> | null {
 }
 
 /** one multi-valued `mgr config` key, with anything of the wrong shape dropped */
-function strings(value: unknown): string[] {
+export function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+/**
+ * The environment every `mgr` call of this bridge gets: the project's herdr
+ * workspace, and NOT the pane this bridge happens to be sitting in.
+ *
+ * `mgr` runs a guard heartbeat whenever it sees BOTH `HERDR_WORKSPACE_ID` and
+ * `HERDR_PANE_ID` — that is how a real manager session tells the skill "I am
+ * the manager of this repo". A bridge started from inside a herdr pane
+ * inherits both, so calling `mgr` with the ambient environment would register
+ * SHAPE as the project's manager and shoulder the user's own session aside.
+ * Stripping the pane id here keeps that impossible for every caller, which is
+ * why this is the only place the environment is built.
+ */
+export function mgrEnv(workspaceId: string): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = { ...process.env, HERDR_WORKSPACE_ID: workspaceId };
+  delete environment.HERDR_PANE_ID;
+  return environment;
 }
 
 /**
@@ -221,7 +250,7 @@ export async function attachManager(
     console.error(
       `[bridge] manager: found ${found.agentName} in pane ${found.paneId} of workspace ${found.workspaceId} (shape-aware: ${found.shapeAware ? "yes" : "no"})`,
     );
-    await configure(project, found, env, env.mgr ?? MGR);
+    await configureManager(project, found.workspaceId, env, env.mgr ?? MGR);
     return found;
   } catch (err) {
     // every herdr call in there can be refused (a workspace the user closed
@@ -290,14 +319,19 @@ async function findManager(
  * throws: a manager Shape can see but not configure is still a manager worth
  * showing, and the reason is on stderr for whoever wonders why a builder came
  * up off the canvas.
+ *
+ * Takes the workspace id rather than a `ManagerHandle` because the injection
+ * pass reaches this with a manager it learned about from `mgr board`, where
+ * the only identity that matters is which workspace the config write must
+ * heartbeat as.
  */
-async function configure(
+export async function configureManager(
   project: { path: string; label: string },
-  handle: ManagerHandle,
+  workspaceId: string,
   env: ManagerEnvironment,
   mgr: string,
 ): Promise<void> {
-  const environment = { ...process.env, HERDR_WORKSPACE_ID: handle.workspaceId };
+  const environment = mgrEnv(workspaceId);
   const listed = await run(mgr, ["config", "list"], project.path, environment);
   const config = listed.ok ? parseJson(listed.stdout) : null;
   if (config === null) {

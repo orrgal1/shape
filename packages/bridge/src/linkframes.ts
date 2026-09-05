@@ -218,6 +218,20 @@ function parseLegacyKeys(value: unknown): Record<string, string> {
 }
 
 /**
+ * The panes this agent has briefed with the directive (§Injection). Absent is
+ * the common case — an older agent, or a stored row written before injection
+ * existed — and reads as "nobody briefed yet"; an unusable entry drops that
+ * pane alone, because the list is only ever counted and shown, and one bad
+ * spelling must not cost the rest their count.
+ */
+function parseInjected(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const entry of value) if (typeof entry === "string" && entry.length > 0) out.push(entry);
+  return out;
+}
+
+/**
  * The manager Shape found in the project's herdr workspace. Absent (an older
  * agent, a stored row, or a project with no herdr) reads as "no manager",
  * which is a real state — so is a value that does not describe a live pane,
@@ -269,6 +283,7 @@ export function parseProject(value: unknown): AgentProject | null {
     directivePath,
     manager: parseManager(p.manager),
     legacyKeys: parseLegacyKeys(p.legacyKeys),
+    injected: parseInjected(p.injected),
   };
 }
 
@@ -506,6 +521,12 @@ export function parseAgentToServerMsg(raw: string): AgentToServerMsg | null {
     case "agent_error":
       if (typeof m.message !== "string") return null;
       return { type: "agent_error", message: m.message };
+    case "injected":
+      // the frame REPLACES the room's list, so a malformed one is refused
+      // rather than half-read: a list with a pane nobody can name would leave
+      // the room counting sessions that do not exist
+      if (!Array.isArray(m.paneIds) || !m.paneIds.every((id) => isId(id))) return null;
+      return { type: "injected", paneIds: m.paneIds as string[] };
     case "agent_exit":
     case "detached":
       if (typeof m.reason !== "string") return null;

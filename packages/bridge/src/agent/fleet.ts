@@ -20,6 +20,13 @@
  * while somebody is watching: `browsers(n)` starts it and `browsers(0)` stops
  * it. The one exception is the seed scan at `start()`, which is how the
  * machine's projects get into the registry before the first browser connects.
+ *
+ * A SCAN IS THEREFORE FOUR THINGS: what is live on the machine, grouped into
+ * repos; the handoff to the registry; a runtime for every project the registry
+ * calls active; and one injection pass per project the scan saw a session in,
+ * which briefs that project's sessions with the Shape directive (§Injection).
+ * The injection pass is last because it wants the runtimes the handoff opened —
+ * which is why the seed scan briefs nobody: it runs before any of them exists.
  */
 
 import { basename } from "node:path";
@@ -102,6 +109,13 @@ export class AgentFleet {
    * same directory: one report per scan interval is all the registry needs.
    */
   readonly #reported = new Map<string, number>();
+  /**
+   * The herdr panes this PROCESS has briefed with a project's directive
+   * (§Injection). Once per pane per process is the contract, so the set
+   * outlives any one runtime: a project marked inactive and then active again
+   * gets a fresh runtime, and it must not brief the panes the last one did.
+   */
+  readonly #briefed = new Set<string>();
 
   #timer: NodeJS.Timeout | null = null;
   /** a scan in flight; a tick that lands on one is dropped rather than queued */
@@ -231,6 +245,7 @@ export class AgentFleet {
       tools: this.#tools,
       launcher: this.#launcher,
       isLinked: (cwd) => this.#isLinked(cwd),
+      briefed: this.#briefed,
       // the server closed this project's link: it was marked inactive, or the
       // attach was refused. Either way this project has no room to talk to
       onExit: (reason) => {
@@ -359,6 +374,23 @@ export class AgentFleet {
     // a scan sees every session on this machine, so a repo it stays silent
     // about has nothing live in it: the registry zeroes those counts itself
     await registry.discovered([...repos.values()], true);
+    if (this.#stopped) return;
+    // Brief the sessions of every project this scan saw somebody working in
+    // (§Injection). Only those: a project with nobody in it has nobody to
+    // brief, and `mgr board` costs a `gh` round trip per project, so a repo
+    // that went quiet must not be asked about every 30 s.
+    //
+    // The seed scan in `start()` runs BEFORE any runtime exists, so it briefs
+    // nothing — the runtimes it leads to are started right after it, and the
+    // first browser-driven scan is what reaches their panes.
+    const passes: Promise<void>[] = [];
+    for (const repo of repos.values()) {
+      if (repo.live.length === 0) continue;
+      // runtimes are keyed by the repo's main worktree, which is `repo.cwd`
+      const runtime = this.#runtimes.get(repo.cwd);
+      if (runtime !== undefined) passes.push(runtime.inject());
+    }
+    await Promise.all(passes);
   }
 
   /**

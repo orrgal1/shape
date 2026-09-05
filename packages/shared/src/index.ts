@@ -1581,7 +1581,11 @@ export interface ProjectSummary {
   manager: boolean;
   /** false while the bridge still owes this project a catch-up (#29 wires the real signal) */
   caughtUp: boolean;
-  /** sessions briefed with the Shape directive (#5 wires the real count); 0 until then */
+  /**
+   * How many of this project's sessions the bridge has briefed with the Shape
+   * directive: `AgentProject.injected.length` (§Injection). Zero for a project
+   * with no room — an inactive project has nobody briefing anybody.
+   */
   injected: number;
   /** ISO time of the last attach or detach; the list is ordered by it, newest first */
   lastSeen: string;

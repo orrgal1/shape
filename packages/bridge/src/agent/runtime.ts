@@ -51,6 +51,7 @@ import type { SocketServer } from "../wsserver.ts";
 import type { DetectedTools } from "./detect.ts";
 import { LINK_CLI, directivePath, renderDirective, writeDirective } from "./directive.ts";
 import type { AgentEvents, LinkHello, LinkTarget } from "./external.ts";
+import { injectProject } from "./inject.ts";
 import type { HerdrLauncher } from "./launcher/herdr.ts";
 import { attachManager } from "./manager.ts";
 import { hasSourceCode, synthesizeSkeleton } from "./onboarding-fs.ts";
@@ -103,6 +104,14 @@ export interface AgentRuntimeOptions {
   launcher: HerdrLauncher | null;
   /** whether a loopback caller from `cwd` is currently greeted (the fleet owns the link) */
   isLinked: (cwd: string) => boolean;
+  /**
+   * The pane ids this PROCESS has already briefed with the directive, owned by
+   * the fleet and shared by every runtime (§Injection). Process-wide because
+   * the contract is once per pane per process: a project marked inactive and
+   * then active again gets a new runtime, and that runtime must not brief the
+   * panes this one already spoke to.
+   */
+  briefed: Set<string>;
   /** the server closed this runtime's link (project marked inactive, attach refused): the fleet drops it */
   onExit: (reason: string) => void;
 }
@@ -160,6 +169,11 @@ export class AgentRuntime {
    * no session here has a terminal Shape can reach.
    */
   readonly #launcher: HerdrLauncher | null;
+  /**
+   * The panes the whole process has briefed, shared with every other runtime
+   * (the fleet owns the set). Read and written by the injection pass alone.
+   */
+  readonly #briefed: Set<string>;
 
   /** one record per worktree with a session reporting in, keyed by worktree id */
   readonly #sessions = new Map<string, Observed>();
@@ -187,6 +201,18 @@ export class AgentRuntime {
    * would not cooperate — which the canvas shows as plainly as it shows one.
    */
   #manager: ManagerHandle | null = null;
+  /**
+   * The panes this runtime has briefed, in the order they were briefed. Sent
+   * whole in `attach` and in every `injected` frame, because the room replaces
+   * its copy rather than adding to it.
+   */
+  #injected: string[] = [];
+  /**
+   * An injection pass in flight. One pass per project at a time: a scan tick
+   * landing on a running pass wants the same answer, and two `mgr board` calls
+   * for one repo would brief the same pane twice.
+   */
+  #injecting: Promise<void> | null = null;
 
   /** false while frames wait for `attached`; see the file header */
   #outboxOpen = false;
@@ -210,6 +236,7 @@ export class AgentRuntime {
     this.#tools = opts.tools;
     this.#launcher = opts.launcher;
     this.#isLinked = opts.isLinked;
+    this.#briefed = opts.briefed;
     this.#onExit = opts.onExit;
     this.#cwd = opts.cwd;
   }
@@ -356,6 +383,55 @@ export class AgentRuntime {
   }
 
   /**
+   * Brief this project's sessions with the directive (issue #5,
+   * `./inject.ts`): one `mgr board` for the project, and an `agent.prompt`
+   * into every managed pane that is not already talking to Shape on the link.
+   * The fleet calls it after every discovery scan that saw a session in this
+   * repo — a project nobody is working in has nobody to brief.
+   *
+   * Guards, in order: no launcher means no pane to prompt and no `mgr` to ask;
+   * an outbox that is not open means the room does not exist yet, and the
+   * `attach` that opens it carries the list anyway, so a pass now would only
+   * queue a frame that repeats it. A pass already in flight is the answer to a
+   * second caller: `mgr board` costs a `gh` round trip, and two passes for one
+   * repo would race over the same panes.
+   *
+   * `injectProject` never throws and logs every per-pane failure itself, so
+   * there is nothing to catch: a project whose sessions could not be briefed
+   * is a project whose canvas is unaffected.
+   */
+  inject(): Promise<void> {
+    const running = this.#injecting;
+    if (running !== null) return running;
+    const launcher = this.#launcher;
+    if (launcher === null || this.#stopped || !this.#outboxOpen) return Promise.resolve();
+    const pass = this.#runInject(launcher).finally(() => {
+      this.#injecting = null;
+    });
+    this.#injecting = pass;
+    return pass;
+  }
+
+  /** One injection pass, and the frame that tells the room what it briefed. */
+  async #runInject(launcher: HerdrLauncher): Promise<void> {
+    const briefed = await injectProject(
+      { path: this.#projectCwd, label: basename(this.#projectCwd) },
+      launcher,
+      {
+        linkUrl: this.#sockets.url(LINK_WS_PATH),
+        directivePath: this.#directivePath,
+        isLinked: this.#isLinked,
+      },
+      this.#briefed,
+    );
+    // a pass that briefed nobody is the steady state — every pane already
+    // knows — and the room's copy is already right
+    if (briefed.length === 0) return;
+    this.#injected.push(...briefed);
+    this.#post({ type: "injected", paneIds: [...this.#injected] });
+  }
+
+  /**
    * How one observed session is described on the wire, derived fresh each
    * time. Everything in it is either what the session itself said or a plain
    * fact about this machine: Shape cannot steer a session it does not drive,
@@ -479,6 +555,9 @@ export class AgentRuntime {
         directivePath: this.#directivePath,
         manager: this.#manager,
         legacyKeys,
+        // what this process has briefed so far: a re-attach after a link gap
+        // finds a new room, and the count belongs to the project either way
+        injected: [...this.#injected],
       },
       worktrees: this.#worktrees,
       sessions,

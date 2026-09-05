@@ -175,6 +175,16 @@ export interface AgentProject {
    * older agent, and empty in a stored registry row that predates this.
    */
   legacyKeys: Record<string, string>;
+  /**
+   * The herdr panes this bridge PROCESS has briefed with the project's Shape
+   * directive (issue #5, §Injection). Pane ids, not worktrees: a project's
+   * sessions are panes, several of them can share one worktree, and each is
+   * briefed at most once per process. Process-scoped on purpose — a restarted
+   * bridge cannot know what the sessions were told before it, so it tells them
+   * again. Empty from an older agent, and empty in a stored registry row that
+   * predates this.
+   */
+  injected: string[];
 }
 
 /**
@@ -222,6 +232,14 @@ export type AgentToServerMsg =
   | { type: "agent_error"; message: string }
   /** the agent cannot continue this project */
   | { type: "agent_exit"; reason: string }
+  /**
+   * The panes this agent has briefed with the directive: the FULL current list,
+   * which REPLACES the room's copy rather than adding to it, sent after every
+   * injection pass that briefed somebody. A list, not a count, so a room that
+   * hears it twice cannot double-count — and so a re-attach and a later frame
+   * say the same thing.
+   */
+  | { type: "injected"; paneIds: string[] }
   | { type: "detached"; reason: string };
 
 /**

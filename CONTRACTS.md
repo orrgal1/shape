@@ -148,9 +148,12 @@ a socket owns what is listening on it. What is left of the client is what a read
 needs: probe/connect, `workspaceOf` (the project's workspace by cached id, then by
 `worktree.repo_root` / `checkout_path`, then by label), `tabs()`, `agents()` (also the
 discovery scan's source of truth — §Projects and status), `closeTab`, focus-by-cwd for
-`focus_terminal`, and `dispose`. `launch()`, `Launched`, `type`, `interrupt`, `kill`, the
-pty fallback and `open` + `prompt` (which existed for the manager tab Shape no longer opens —
-§`SessionInfo.manager`) are gone. `SHAPE_LAUNCHER` is no longer a choice between two launchers:
+`focus_terminal`, `dispose`, and — since #5 — `prompt(paneId, text)` again, which is
+`agent.prompt { target, text }`: injection writes the directive into panes Shape never opened,
+so it needs a way to speak to a pane without owning it (§Injection). `launch()`, `Launched`,
+`type`, `interrupt`, `kill`, the pty fallback and `open` (which existed for the manager tab
+Shape no longer opens — §`SessionInfo.manager`) are gone.
+`SHAPE_LAUNCHER` is no longer a choice between two launchers:
 `herdr` forces the probe even when herdr was not found on PATH, `none` skips it, an unknown
 value logs and falls through to ordinary detection — the launcher is herdr when it answers and
 `null` when it does not.
@@ -221,11 +224,69 @@ registry, opening a room for each active one:
 - `select_project` is accepted for an ACTIVE project only: inactive is `error` "project <id>
   is inactive", unknown is `error` "unknown project <id>".
 
-Two `ProjectSummary` fields are placeholders wired by other issues, on the wire now so the
-switcher's copy does not have to move later: `caughtUp` is true unless the room still owes a
-worktree its automatic map, and [#29](https://github.com/orrgal1/shape/issues/29) replaces it
-with the real catch-up signal; `injected` is the number of sessions briefed with the Shape
-directive and stays 0 until [#5](https://github.com/orrgal1/shape/issues/5) counts them.
+One `ProjectSummary` field is still a placeholder wired by another issue, on the wire now so
+the switcher's copy does not have to move later: `caughtUp` is true unless the room still owes
+a worktree its automatic map, and [#29](https://github.com/orrgal1/shape/issues/29) replaces
+it with the real catch-up signal. `injected` is real since #5: it is
+`AgentProject.injected.length` — how many of the project's herdr panes this bridge process has
+briefed with the Shape directive (§Injection) — and 0 for a row with no room, because an
+inactive project has no runtime briefing anybody.
+
+## Injection (2026-09-05, issue #5)
+
+Shape attaches itself to the sessions that are already running. A user who opens Shape on a
+repo has builders and a manager working in it that were launched without it, and telling them
+it exists is not something the user should have to do session by session:
+`packages/bridge/src/agent/inject.ts` does it, once per pane per bridge process.
+
+**When it runs.** After every discovery scan (§Projects and status), for each ACTIVE project
+the scan saw a live session in — `AgentFleet.#runScan` calls `AgentRuntime.inject()` on the
+runtime keyed by that repo's main worktree once the registry handoff has returned. A project
+with nobody in it has nobody to brief and is skipped, because the pass costs a `mgr board` (a
+`gh` round trip) per project. The seed scan in `start()` runs BEFORE any runtime exists, so it
+briefs nothing: the first browser-driven scan is what reaches the panes. One pass per project
+at a time (`#injecting`), and no pass at all before the room exists — the `attach` that opens
+it already carries the list.
+
+**Who gets briefed.** The pass runs `mgr board` headlessly with `HERDR_WORKSPACE_ID`
+set to the project's herdr workspace and cwd = the project's primary checkout, and takes every
+pane in `in_flight`, `adopting` and `awaiting_approval`, plus `board.manager`. `unmanaged` is
+never prompted: those panes are the manager's business, and Shape does not decide what an
+unadopted session is. A pane whose cwd is already greeted on the loopback link is SKIPPED — it
+is talking to Shape already, and a directive would interrupt work to say what the session
+knows. `HERDR_PANE_ID` is STRIPPED from the env handed to `mgr`, because every `mgr` call with
+both that and `HERDR_WORKSPACE_ID` set runs a guard heartbeat: a bridge started inside a herdr
+pane would otherwise register itself as that project's manager.
+
+**What they are told.** `agent.prompt` (§Sessions are observed — herdr) with the directive
+prefixed by `Shape is attached to this project. Read and follow the directive below; then
+continue your current work.` A manager pane that is not shape-aware also gets `Future builders
+you launch are shape-aware automatically via mgr config; you need do nothing for them.`, and
+the pass writes that repo's `mgr config` for it — the four keys `omp-arg --extension`,
+`omp-arg <abs omp-extension.ts>`, `env SHAPE_LINK=<url>` and `brief-extra <directive path>`,
+via the same `configureManager` the manager pass uses (§`SessionInfo.manager`), idempotent and
+skipped when they are already there.
+
+**At most once per pane per process.** `AgentFleet.#briefed` is the set of pane ids briefed,
+owned by the fleet and shared by every runtime, so a project marked inactive and then active
+again does not brief its panes a second time through a fresh runtime. It is process-scoped
+deliberately: a restarted bridge cannot know what the sessions were told before it, so it tells
+them again.
+
+**Failures are per pane.** A pane that refuses the prompt is logged with its id
+(`[bridge] inject: …`) and costs nothing but itself; the rest of the board is still briefed. A
+`mgr board` that fails for one project is ONE warning and that project is skipped for this
+round, retried on the next scan. `injectProject` never throws.
+
+**What the browser sees.** `AgentProject.injected: string[]` is the pane ids this process has
+briefed; the agent sends the FULL list in `attach` and in an `injected { paneIds }` frame after
+every pass that briefed somebody, and the room REPLACES its copy with it (a room that added
+would double-count across a link gap), broadcasts `projects` and saves the row.
+`ProjectSummary.injected` is that list's length, which the switcher's tooltip renders as
+"N sessions briefed". Covered by `packages/bridge/src/agent/inject.test.ts` against a fake
+launcher and a fake `mgr`: a linked pane skipped, an unlinked pane prompted once, an unaware
+manager prompted with the extra line and its config written, one refusal not blocking the rest,
+and two projects handled independently.
 
 ## Graph document
 
@@ -691,6 +752,11 @@ and closed by `set_project_status` (§Projects and status). What is left going d
 and `synthesize_skeleton`; the way the server ENDS a link is `error` + close, which the
 runtime reads as its exit.
 
+What goes UP, besides `attach`: `session_started`, `session_stopped`, `agent_event`,
+`canvas_call`, `reality`, `worktrees`, `skeleton_result`, `agent_error`, `agent_exit`,
+`detached`, and `injected { paneIds }` — the full list of panes this process has briefed with
+the directive, replacing the room's copy (§Injection).
+
 ## Worktrees (user decision 2026-08-28: toggle first, compare later) — SUPERSEDED
 
 **Superseded on 2026-09-03 by §Worktrees on one canvas.** Everything below describes the
@@ -735,8 +801,8 @@ what lets one canvas merge them; `AgentProject.cwd` is the MAIN worktree's path.
 - Agent → server: `session_started { worktree, session, backend }` and
   `session_stopped { worktree, reason }` — both unsolicited, because a session is observed
   rather than asked for — and `worktree` on `agent_event`, `canvas_call`, `reality` and
-  `skeleton_result`. `worktrees`, `sessions`, `agent_error`, `agent_exit` and
-  `detached` stay project-wide.
+  `skeleton_result`. `worktrees`, `sessions`, `agent_error`, `agent_exit`, `injected` and
+  `detached` stay project-wide — injection briefs PANES, and a pane is not a worktree.
 - Server → agent: `worktree` on `extract_reality`, `synthesize_skeleton` and
   `focus_terminal`. There is no frame that starts a session, stops one, or says anything to
   one, and none that moves an agent between projects — one link, one project (§The agent link).
