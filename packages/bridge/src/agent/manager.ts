@@ -41,19 +41,26 @@ import { realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ManagerHandle } from "../../../shared/src/index.ts";
-import { OMP_EXTENSION } from "./backend/omp.ts";
-import { HerdrLauncher } from "./launcher/herdr.ts";
-import type { Launcher } from "./launcher/types.ts";
+import type { HerdrLauncher } from "./launcher/herdr.ts";
 
 /** what the manager's tab is called, and how it is recognized again */
 export const MANAGER_LABEL = "manager";
 
 /**
- * The `mgr` CLI the skill ships, as a dependency of THIS package.
+ * Two paths, both derived from this file's own location:
  * `<repo>/packages/bridge/src/agent/manager.ts` -> the bridge package root.
+ *
+ * `MGR` is the `mgr` CLI the manager skill ships, a dependency of THIS
+ * package. `OMP_EXTENSION` is the omp extension's PATH rather than its import,
+ * because the bridge must run against a checkout where packages/link is
+ * present but not built or importable from here, and omp loads a `.ts` file
+ * directly. That extension is Shape's whole integration with an omp: the
+ * manager is launched with it, and `mgr config` hands the same path down to
+ * every builder the manager launches. One path, one truth.
  */
 const BRIDGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const MGR = join(BRIDGE_ROOT, "node_modules", ".bin", "mgr");
+export const OMP_EXTENSION = resolve(BRIDGE_ROOT, "..", "link", "src", "omp-extension.ts");
 
 /**
  * How long a `mgr` call gets. It reads `git config` and writes it back, so it
@@ -197,13 +204,12 @@ export function planEnv(existing: readonly string[], linkUrl: string): string[] 
  */
 export async function attachManager(
   project: { path: string; label: string },
-  launcher: Launcher,
+  launcher: HerdrLauncher | null,
   env: ManagerEnvironment,
 ): Promise<ManagerHandle | null> {
-  // the manager lives in the USER's terminal or nowhere: Shape's own pty has
-  // no tab strip to put it in and nothing that would outlive this process.
-  // `instanceof` rather than `id`, because this needs the herdr-only calls
-  if (!(launcher instanceof HerdrLauncher)) return null;
+  // the manager lives in the USER's terminal or nowhere: it has to be a tab in
+  // a strip they can walk over to, and it has to outlive this process
+  if (launcher === null) return null;
   if (process.env.SHAPE_MANAGER === "0") {
     console.error("[bridge] manager: disabled by SHAPE_MANAGER=0");
     return null;
@@ -318,10 +324,9 @@ async function openManager(
   const named = `${MANAGER_LABEL}-${slug(project.label)}`.slice(0, MAX_AGENT_NAME);
   const opened = await launcher.open(
     {
-      cwd: project.path,
       // the manager works in the main checkout: it writes issues and launches
       // builders, and never edits the tree itself
-      worktree: project.path,
+      cwd: project.path,
       kind: "omp",
       argv: ["omp", "--extension", OMP_EXTENSION],
       env: { [LINK_ENV]: env.linkUrl },

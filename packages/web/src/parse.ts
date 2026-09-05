@@ -25,8 +25,6 @@ import {
   type IntentNode,
   type ManagerHandle,
   type ModelRole,
-  type Next,
-  type NextChoice,
   type Phase,
   type ProjectSummary,
   type ProjectTools,
@@ -328,7 +326,7 @@ function asWorktree(value: unknown): WorktreeInfo | null {
 }
 
 const BACKEND_EVENT_KINDS: readonly string[] = ["native", "hooks", "transcript", "none"];
-const BACKEND_TERMINALS: readonly string[] = ["external", "pane", "none"];
+const BACKEND_TERMINALS: readonly string[] = ["external", "none"];
 
 /** one tool found on the machine the agent runs on: a launcher or a harness */
 function asToolInfo(value: unknown): ToolInfo | null {
@@ -347,7 +345,9 @@ function asProjectTools(value: unknown): ProjectTools | null {
   const launchers = mapAll(value.launchers, asToolInfo);
   const harnesses = mapAll(value.harnesses, asToolInfo);
   if (launchers === null || harnesses === null) return null;
-  if (value.launcher !== "herdr" && value.launcher !== "pty") return null;
+  // `null` is a machine with no herdr: the one launcher Shape can reach a
+  // terminal through, so its absence is what hides the "go to terminal" button
+  if (value.launcher !== "herdr" && value.launcher !== null) return null;
   return { launcher: value.launcher, launchers, harnesses };
 }
 
@@ -427,8 +427,6 @@ function asSessionInfo(value: unknown): SessionInfo | null {
   if (cwd === null || worktrees === null || sessions === null) return null;
   if (typeof value.targetHasCode !== "boolean") return null;
   if (typeof value.agentConnected !== "boolean") return null;
-  // an older bridge simply cannot publish: the form then offers the folder only
-  const canPublish = value.canPublish === true;
   // an older bridge wrote no directive: nothing for a launcher to read
   const directivePath =
     typeof value.directivePath === "string" && value.directivePath.length > 0 ? value.directivePath : null;
@@ -438,7 +436,6 @@ function asSessionInfo(value: unknown): SessionInfo | null {
     worktrees,
     sessions,
     agentConnected: value.agentConnected,
-    canPublish,
     directivePath,
     manager: asManagerHandle(value.manager),
   };
@@ -474,7 +471,6 @@ function asDiscoveredSession(value: unknown): DiscoveredSession | null {
   if (command === null || attach === null || !SESSION_ATTACH.includes(attach)) return null;
   if (cwd === undefined || sessionId === undefined || sessionFile === undefined || startedAt === undefined) return null;
   if (typeof value.pid !== "number" || !Number.isInteger(value.pid)) return null;
-  if (typeof value.spawnedByShape !== "boolean") return null;
   // null is a legitimate value here: not every harness can be resumed
   const resumeCommand = value.resumeCommand === null ? null : asStrArray(value.resumeCommand);
   if (resumeCommand === null && value.resumeCommand !== null) return null;
@@ -489,7 +485,6 @@ function asDiscoveredSession(value: unknown): DiscoveredSession | null {
     startedAt,
     resumeCommand,
     attach: attach as DiscoveredSession["attach"],
-    spawnedByShape: value.spawnedByShape,
   };
 }
 
@@ -516,57 +511,6 @@ function asWorktreeId(value: unknown): string | null {
   return id === null || id === "" ? null : id;
 }
 
-/**
- * The card a turn ended on. Its own boundary check rather than the shared
- * validator's: the bridge has already refused a malformed one, and what arrives
- * here is a frame this client either draws whole or ignores.
- */
-function asNext(value: unknown): Next | null {
-  if (!isRecord(value)) return null;
-  const summary = asStr(value.summary);
-  const question = asNullableStr(value.question);
-  if (summary === null || question === undefined) return null;
-  const choices = mapAll(value.choices, (item): NextChoice | null => {
-    if (!isRecord(item)) return null;
-    const label = asStr(item.label);
-    const say = asStr(item.say);
-    return label === null || say === null ? null : { label, say };
-  });
-  return choices === null ? null : { summary, choices, question };
-}
-
-/**
- * The card each variation is offering. `mapValues` cannot carry this: a null
- * value here is a legitimate "no card", not a value that failed to parse, and
- * that is exactly the distinction the generic map has no room for.
- */
-function asNextMap(value: unknown): Record<string, Next | null> | null {
-  if (!isRecord(value)) return null;
-  const out: Record<string, Next | null> = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (key === "") return null;
-    if (item === null) {
-      out[key] = null;
-      continue;
-    }
-    const next = asNext(item);
-    if (next === null) return null;
-    out[key] = next;
-  }
-  return out;
-}
-
-/** which variations are running on their own: one flag per worktree id */
-function asAutonomousMap(value: unknown): Record<string, boolean> | null {
-  if (!isRecord(value)) return null;
-  const out: Record<string, boolean> = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (key === "" || typeof item !== "boolean") return null;
-    out[key] = item;
-  }
-  return out;
-}
-
 export function parseServerMsg(raw: unknown): ServerMsg | null {
   if (!isRecord(raw)) return null;
   switch (raw.type) {
@@ -580,14 +524,9 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
       const revisions = mapValues(raw.revisions, (item) => mapAll(item, asRevisionInfo));
       const sessions = mapAll(raw.sessions, asDiscoveredSession);
       const tools = asProjectTools(raw.tools);
-      // A bridge that predates the end-of-turn card sends neither field, and
-      // "no card anywhere, nothing running on its own" is the honest reading of
-      // that — the same tolerance the reality lists get.
-      const nexts = raw.nexts === undefined ? {} : asNextMap(raw.nexts);
-      const autonomous = raw.autonomous === undefined ? {} : asAutonomousMap(raw.autonomous);
       if (graphs === null || session === null || agents === null || recentProjects === null) return null;
       if (revisions === null || sessions === null || projects === null || projectId === null) return null;
-      if (nexts === null || autonomous === null || tools === null) return null;
+      if (tools === null) return null;
       return {
         type: "hello",
         graphs,
@@ -598,8 +537,6 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
         projectId,
         revisions,
         sessions,
-        nexts,
-        autonomous,
         tools,
       };
     }
@@ -648,19 +585,6 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
       if (worktree === null || state === null) return null;
       return { type: "agent", worktree, state };
     }
-    case "next": {
-      const worktree = asWorktreeId(raw.worktree);
-      if (worktree === null) return null;
-      // an explicit null is the frame that takes the card down
-      if (raw.next === null) return { type: "next", worktree, next: null };
-      const next = asNext(raw.next);
-      return next === null ? null : { type: "next", worktree, next };
-    }
-    case "autonomous": {
-      const worktree = asWorktreeId(raw.worktree);
-      if (worktree === null || typeof raw.on !== "boolean") return null;
-      return { type: "autonomous", worktree, on: raw.on };
-    }
     case "activity": {
       const worktree = asWorktreeId(raw.worktree);
       const nodeIds = asStrArray(raw.nodeIds);
@@ -673,11 +597,6 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
       const text = asStr(raw.text);
       if (worktree === null || role === null || text === null) return null;
       return { type: "transcript", worktree, role, text };
-    }
-    case "terminal": {
-      const worktree = asWorktreeId(raw.worktree);
-      if (worktree === null || typeof raw.open !== "boolean") return null;
-      return { type: "terminal", worktree, open: raw.open };
     }
     case "now": {
       const worktree = asWorktreeId(raw.worktree);

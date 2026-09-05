@@ -1,11 +1,11 @@
 /**
  * Everything a room keeps between turns: its graphs, the revisions they can be
  * diffed over, the registry row a restart reopens it from, and the audit trail
- * of what was steered through it. A `Storage` is a record store, not a
- * directory: graph rows are keyed by `(tenant, projectKey, worktree)` because
- * the same repo path on two machines is two projects that must never read each
- * other's graph, and every worktree of one repo is its own canvas the view
- * merges — one project, as many graphs as it has worktrees.
+ * of what the server itself wrote onto a canvas. A `Storage` is a record store,
+ * not a directory: graph rows are keyed by `(tenant, projectKey, worktree)`
+ * because the same repo path on two machines is two projects that must never
+ * read each other's graph, and every worktree of one repo is its own canvas the
+ * view merges — one project, as many graphs as it has worktrees.
  *
  * Both modes are served by the same implementation (`server/sqlite.ts`); they
  * differ only in which database file they open and in whether the server
@@ -21,7 +21,6 @@ import type {
   AgentProject,
   GraphDoc,
   GraphSnapshot,
-  Referent,
   RevisionInfo,
   WorktreeInfo,
   WorktreeSession,
@@ -48,29 +47,23 @@ export interface StoredProject {
 }
 
 /**
- * What was said to a harness through this server, and how it went out. On-prem
- * operators need that record for steering they did not type themselves; the
- * room stamps `at`/`tenant`/`projectId` onto one of these bodies.
+ * What the server wrote onto a canvas without being asked. Shape does not
+ * instruct a session, so the only line there is to keep is the room's own: an
+ * on-prem operator reading a canvas that grew bubbles nobody drew finds the
+ * moment the room seeded them here. The room stamps `at`/`tenant`/`projectId`
+ * onto one of these bodies.
  */
 export type AuditBody =
-  /** an utterance composed from the canvas and sent to the agent */
-  | { kind: "deliver"; id: string; referent: Referent | null; text: string }
-  /** the agent's receipt for a `deliver`: `steer` mid-turn or `prompt`, queued or not */
-  | { kind: "delivered"; id: string; mode: "prompt" | "steer"; queued: boolean }
   /**
-   * The onboarding turn, whose text the server wrote: the survey of a canvas
-   * nobody mapped, or (`catchUp`) the pass that brings a map the code moved
-   * under back to the code. An automatic one carries no focus, because nobody
-   * typed one.
+   * The mechanical skeleton the room drew onto an empty canvas by itself
+   * (`server/room.ts`), and how many of its ops landed.
    */
-  | { kind: "onboard"; id: string; focus: string | null; catchUp?: boolean }
-  /** autonomous mode answered a turn end for the user; `run` is its place in the stretch */
-  | { kind: "auto"; id: string; run: number };
+  { kind: "onboard"; ops: number };
 
 /**
  * One audit line, stamped with where it happened. `worktree` is part of the
- * record, not of the lookup key: an operator asks what was steered through a
- * project and reads which of its variations each line went to.
+ * record, not of the lookup key: an operator asks what a project's rooms wrote
+ * and reads which of its variations each line went to.
  */
 export type AuditEntry = AuditBody & {
   at: string;
@@ -97,7 +90,7 @@ export interface Storage {
   saveProject(row: StoredProject): Promise<void>;
   /**
    * Append one audit line, against the worktree it happened in. Never rejects:
-   * a steer must not fail because a disk did.
+   * a canvas the room seeded must not be lost because a disk was.
    */
   appendAudit(tenant: string, key: string, worktree: string, entry: AuditEntry): Promise<void>;
   /**

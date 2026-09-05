@@ -2,10 +2,11 @@
  * Boundary validator for the loopback link (`ws://127.0.0.1:<port>/link`).
  *
  * The agent half owns it because it is the end that terminates the link: an
- * MCP server, a harness hook or an adapter sidecar sends these frames, and the
- * agent runtime is what validates and routes them (`agent/external.ts`). The
- * event validator itself lives in `../linkframes.ts` — the same events travel
- * on to the server, and one wire is one validator.
+ * MCP server, a harness hook or a harness's own extension sends these frames,
+ * and the agent runtime is what validates and routes them
+ * (`agent/external.ts`). The event validator itself lives in
+ * `../linkframes.ts` — the same events travel on to the server, and one wire
+ * is one validator.
  */
 
 import type { LinkClientMsg } from "../../../shared/src/link.ts";
@@ -20,13 +21,14 @@ export function parseLinkMsg(raw: string): LinkClientMsg | null {
     return null;
   }
   if (parsed === null || typeof parsed !== "object" || !("type" in parsed)) return null;
-  // the caller's cwd is what routes the frame to a harness: a frame without one
-  // cannot be attributed to a worktree, so it is not a frame we accept
+  // the caller's cwd is what routes the frame to a worktree: a frame without
+  // one cannot be attributed to a session, so it is not a frame we accept
   if (!("cwd" in parsed) || typeof parsed.cwd !== "string" || parsed.cwd.length === 0) return null;
   const cwd = parsed.cwd;
   if (parsed.type === "hello") {
-    // the harness kind is a free string on purpose: a launcher can host kinds
-    // Shape has no adapter for, and the runtime decides what to do about that
+    // the harness kind is a free string on purpose: Shape does not decide what
+    // may report in, it reports what did — the name travels through to the
+    // canvas as the session's own
     if (!("harness" in parsed) || typeof parsed.harness !== "string" || parsed.harness.length === 0) return null;
     const sessionId = "sessionId" in parsed ? parsed.sessionId : null;
     if (sessionId !== null && typeof sessionId !== "string") return null;
@@ -61,7 +63,11 @@ export function parseLinkMsg(raw: string): LinkClientMsg | null {
     return { type: "agent_event", cwd, event };
   }
   if (parsed.type === "delivered") {
-    // the receipt answers one `deliver`: without its id it says nothing
+    // A receipt for a prompt Shape did not send. Shape delivers nothing any
+    // more, but a harness running an older Shape integration still
+    // acknowledges what it was given, and a frame the validator refuses would
+    // come back at it as an `error` it did not earn: it parses, and the route
+    // drops it.
     if (!("id" in parsed) || typeof parsed.id !== "string" || parsed.id.length === 0) return null;
     if (!("mode" in parsed) || (parsed.mode !== "prompt" && parsed.mode !== "steer")) return null;
     if (!("queued" in parsed) || typeof parsed.queued !== "boolean") return null;

@@ -188,11 +188,10 @@ export interface GraphDoc {
   drift: DriftMap;
   /**
    * When this canvas was last mapped against the code, and the git HEAD it was
-   * mapped at: written by the server the moment it DELIVERS an onboarding
-   * survey or a catch-up prompt, never when such a turn ends. Delivery is the
-   * honest mark — a turn that fails, or a harness that drops mid-survey, must
-   * not leave the automatic trigger free to deliver the same prompt on every
-   * reconnect. Absent on a canvas nothing ever mapped.
+   * mapped at: written by the server the moment it seeds the mechanical
+   * skeleton onto an empty canvas. It is what keeps the automatic map from
+   * seeding the same project again on every reconnect. Absent on a canvas
+   * nothing ever mapped.
    */
   surveyed?: { head: string | null; at: string };
 }
@@ -397,16 +396,16 @@ function inside(prefix: string, path: string): boolean {
  * The code no bubble on this canvas claims: the reality packages nothing points
  * at, and the files reality parsed that nothing points at either, each with the
  * parts it declares. This is the other half of drift — drift says what the map
- * gets WRONG, this says what the map is MISSING — and it is what the catch-up
- * turn is composed from (bridge/src/server/onboarding.ts).
+ * gets WRONG, this says what the map is MISSING — and the web renders it as the
+ * dim code column beside the layer.
  *
  * A package counts as claimed the moment a codeRef touches it from either
  * direction: a bubble owning "packages/auth" claims it, and so does a child
  * bubble owning one part of one file inside it, because the package is then
  * already on the canvas at some altitude. A file counts as claimed only when a
  * codeRef is at or above it, which is the ordinary prefix rule — a bubble that
- * owns the package owns its files, and asking the survey to map them again
- * would be asking for depth the altitude rules already govern.
+ * owns the package owns its files, and listing them again would be depth the
+ * altitude rules already govern.
  *
  * Pure, and layer-blind: a path claimed by an infra or correctness bubble is
  * claimed, since the question is whether the canvas mentions that code at all.
@@ -437,7 +436,7 @@ export function unclaimedReality(doc: Pick<GraphDoc, "nodes" | "reality">): {
     } else bucket.push(symbol);
   }
   // one order every time, whatever order the extraction happened to be in:
-  // the catch-up prompt is compared byte for byte in the smokes
+  // callers compare this listing byte for byte in the smokes
   files.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
   return { packages, files };
 }
@@ -765,7 +764,7 @@ const BUILD_LINKS: readonly {
  * through: the host tool a native adapter registers, and the MCP server the
  * link ships. One text, or the two channels would drift apart.
  */
-export const CANVAS_TOOL_DESCRIPTION = `Maintain the visual canvas the user is watching — this is their only view of your work.
+export const CANVAS_TOOL_DESCRIPTION = `Maintain the visual canvas the user is watching — this is their only view of your work. They read it; nothing they do there reaches you, so the picture has to say where things stand on its own.
 
 ops (batch, applied per-op): upsert_node, remove_node (rejected while it has children), upsert_edge, remove_edge, set_phase.
 ids are slugs: ^[a-z0-9][a-z0-9-]*$. Node summary is REQUIRED: one sentence stating what the bubble promises, <= 200 chars; a bubble that cannot be summarized in one sentence is at the wrong altitude.
@@ -776,8 +775,8 @@ THE INFRA LAYER is the things the running product needs that are not code you wr
 THE CORRECTNESS LAYER is what shows the parts are correct rather than just written: test suites, smoke or end-to-end runs, checks like typechecking and linting, review passes a person does, and monitoring that watches the thing in production. Give each one a plain-English bubble ("the protocol checks", "checks that run on every push") with kind set to test | smoke | check | review | monitor, codeRefs pointing at the files that ARE the verification, and verifies (up to 40 existing build node ids) naming the build bubbles it attests. verifies is the link from correctness to build; it belongs on correctness nodes only, and like infra this layer has no single root bubble. A finished part nothing attests is a claim, so when you finish one, add or extend what proves it and say so with verifies.
 THE PRODUCT LAYER STARTS FROM ONE BUBBLE: the product itself, the only product node with parentId null — its label is the product's name and its summary the one-sentence promise of the whole thing. Create it before anything else, then hang the 3-5 capabilities under it as its children, and deeper capabilities under those. A second top-level product bubble is rejected with op/second-root, whose evidence names the root to parent it under. The root spans the whole build layer, so realizes on it is optional; every capability below it still needs one.
 summary = the bubble's stable promise. status (optional, <= 140 chars) = what is happening in it RIGHT NOW; refresh it on bubbles you are building and omit it when done — an upsert without status clears it.
-PLAIN ENGLISH, NO JARGON: every label, summary, status, edge label and note is read by a non-programmer steering by voice — everyday words, outcomes not mechanisms, no acronyms or protocol/library/file-format names or code identifiers unless the bubble is literally about that thing. Only codeRefs stay technical.
-next (optional, and the way EVERY turn should end): { summary, choices, question } — the call to action the user reads when you stop. summary is one sentence, <= 200 chars, on where things stand. choices is 0 to 4 one-click ways on, each { label (<= 40 chars, the words on the button), say (the exact sentence sent to you when it is clicked) } — write them as the user's own words, e.g. label "Build the first screen", say "Build the first screen and show me what it looks like". question is the decision only the user can make, or null. Send an EMPTY choices array with question null only when the work is genuinely finished; a turn with no next at all gets a generic card instead of yours.
+PLAIN ENGLISH, NO JARGON: every label, summary, status, edge label and note is read by a non-programmer reading the picture, not a programmer reading code — everyday words, outcomes not mechanisms, no acronyms or protocol/library/file-format names or code identifiers unless the bubble is literally about that thing. Only codeRefs stay technical.
+next (optional, accepted for compatibility): { summary, choices, question } — still validated, but the canvas does not show it and a choice is never sent back to you, so nothing is waiting on it and you may leave it out. Say where things stand in the bubbles themselves: summary for the promise, status for what is happening in it right now.
 Call this as you think and work, in the same turn your understanding changes. The result tells you what applied; rejections come back as JSON repair receipts ({code, subject, evidence, supportedFixes}) — apply a supported fix and resend just the rejected ops.`;
 
 /**
@@ -1454,9 +1453,9 @@ export type Harness = "omp" | "claude" | "codex" | "opencode" | "cursor";
  *
  * Deliberately a different set from `Harness` above: that one classifies
  * RUNNING processes for adoption (an older, smaller list that spells Cursor's
- * CLI "cursor"), while these are the ids the launcher can start and the
- * adapters are registered under. `harnessIdFor` in bridge agent/detect.ts maps
- * a discovered harness onto one of these.
+ * CLI "cursor"), while these are the ids Shape knows a harness by. Detection
+ * (bridge agent/detect.ts) reports which of them is installed on the machine;
+ * nothing starts one.
  */
 export type HarnessId =
   | "omp"
@@ -1487,7 +1486,7 @@ export interface DiscoveredSession {
  * terminal" affordance.
  */
 export interface BackendCapabilities {
-  /** a message can be injected into a running turn */
+  /** whether a message could be injected into a running turn — always false: Shape sends none */
   steerMidTurn: boolean;
   /** the harness can call a host-provided tool (the canvas) */
   hostTool: boolean;

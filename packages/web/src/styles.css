@@ -499,9 +499,10 @@ button {
   color: var(--phase-built);
 }
 
-/* whether that project has an agent right now: a room you can steer versus one
-   you can only read. Centred on purpose — the row is baseline-aligned text and
-   a 6px dot on a text baseline reads as a bullet, not as a status light. */
+/* whether that project has an agent right now: a room whose picture is still
+   moving versus one that is frozen. Centred on purpose — the row is
+   baseline-aligned text and a 6px dot on a text baseline reads as a bullet,
+   not as a status light. */
 .project-room-dot {
   align-self: center;
   color: var(--text-faint);
@@ -541,54 +542,14 @@ button {
   border-color: color-mix(in oklab, var(--focus) 45%, var(--line-strong));
 }
 
-/* the create form is a folder + a name, then the path it adds up to, then the
-   publishing options */
-.project-create {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s2);
-}
-
-.project-create-where {
-  display: flex;
-  gap: var(--s2);
-}
-
-/* the folder is a path and gets the room; the name is one short segment */
-.project-create-where .project-path {
-  flex: 2;
-}
-
-.project-create-where .project-new-name {
-  flex: 1;
-}
-
-.project-create-preview {
-  margin: 0;
+/* the open box is followed by the running-session fold: the hint sits close
+   under its box and carries the section gap the title rule would have put
+   there */
+.project-open-hint {
+  margin: calc(var(--s2) - var(--s4)) 0 var(--s4);
   color: var(--text-faint);
   font-size: var(--t-sm);
   overflow-wrap: anywhere;
-}
-
-/* the open box is followed by the create form now: the hint sits close under
-   its box and carries the section gap the title rule would have put there */
-.project-open-hint {
-  margin: calc(var(--s2) - var(--s4)) 0 var(--s4);
-}
-
-.project-create-opt {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  color: var(--text-dim);
-  font-size: var(--t-sm);
-  cursor: pointer;
-}
-
-.project-create-vis {
-  display: flex;
-  gap: var(--s4);
-  padding-left: var(--s4);
 }
 
 .project-error {
@@ -1176,7 +1137,7 @@ button {
 }
 
 /* ==========================================================================
-   edges — steering targets, equal to nodes
+   edges — what a relation is, drawn equal to nodes
    ========================================================================== */
 
 .react-flow__edge .rel-path {
@@ -1193,7 +1154,7 @@ button {
 }
 
 /* a lifted line is an approximation: the relation lives one or more levels down,
-   so it is dashed even when the relation itself is still steerable */
+   so it is dashed even when the line still selects that real relation */
 .rel-lifted .rel-path {
   stroke-dasharray: 5 4;
   opacity: 0.78;
@@ -1746,27 +1707,6 @@ button {
   color: var(--line);
 }
 
-/* steering addresses the project as it is now, so the bar stays visible but
-   inert while a comparison is open — the way back is in the summary above */
-.steer[data-suspended="true"] {
-  opacity: 0.5;
-}
-
-.steer[data-suspended="true"] .steer-input {
-  cursor: default;
-}
-
-/* no agent is attached, so there is nothing to steer: the bar stays legible
-   (its hint is the instruction for getting one back) but plainly inert */
-.steer[data-offline="true"] .steer-input {
-  cursor: default;
-  color: var(--text-faint);
-}
-
-.steer[data-offline="true"] .steer-hint {
-  color: var(--text-dim);
-}
-
 /* ==========================================================================
    canvas controls (top right of stage)
    ========================================================================== */
@@ -1823,25 +1763,6 @@ button {
 
 .toggle[aria-pressed="true"] .toggle-box {
   background: currentColor;
-}
-
-/* Same pill, but it does something rather than showing something: it carries
-   the drift hue, because what it offers is the answer to a drifted map, and it
-   goes quiet while the harness is already working. */
-.toggle-act {
-  border-color: color-mix(in oklab, var(--drift) 40%, var(--line-strong));
-  color: color-mix(in oklab, var(--drift) 70%, var(--text-dim));
-}
-
-.toggle-act:hover:enabled {
-  border-color: var(--drift);
-  color: var(--drift);
-}
-
-.toggle-act:disabled {
-  border-color: var(--line);
-  color: var(--text-faint);
-  cursor: default;
 }
 
 .errors {
@@ -1964,14 +1885,14 @@ button {
    very evidence it is talking about. Two moves keep it clear. Down, into the
    bottom-left band the fit padding reserves above the stage floor — riding the
    same lift the now-pill takes, and then clearing the pill itself, so the stack
-   from the floor up is dock, zoom controls, pill, card. Narrow: an extracted
+   from the floor up is zoom controls, pill, card. Narrow: an extracted
    column is 330px wide at the widest zoom and centred on the stage, so its left
    edge never comes closer than 165px to the middle, and the card stops short of
    that — with a floor, so a very narrow stage gets readable text rather than a
    sliver. */
 .empty-compact {
   top: auto;
-  bottom: calc(var(--dock-h, 96px) + var(--s5) + var(--s3) + 38px + 30px);
+  bottom: calc(var(--s5) + var(--s3) + 38px + 30px);
   left: var(--s5);
   transform: none;
   max-width: min(300px, max(200px, calc(50% - 190px)));
@@ -1979,33 +1900,6 @@ button {
 
 .empty-compact .empty-body {
   font-size: var(--t-sm);
-}
-
-.empty-compact-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--s3);
-  margin-top: var(--s4);
-  pointer-events: auto;
-}
-
-/* the product-first choice folded onto the row: its help sentence is the title,
-   because two lines of help would make the compact card the splash again */
-.empty-pick {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s2);
-  font-size: var(--t-sm);
-  color: var(--text-dim);
-  cursor: pointer;
-}
-
-.empty-pick input {
-  width: 14px;
-  height: 14px;
-  accent-color: var(--focus);
-  cursor: pointer;
 }
 
 .empty-kicker {
@@ -2031,37 +1925,6 @@ button {
   color: var(--text-dim);
 }
 
-/* product-first choice (ProductFirst): the one thing on the empty state that
-   takes a click, so it opts back into pointer events the panel gives up */
-.empty-choice {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  align-items: center;
-  gap: 0 var(--s2);
-  margin-top: var(--s4);
-  pointer-events: auto;
-  cursor: pointer;
-}
-
-.empty-choice input {
-  width: 14px;
-  height: 14px;
-  accent-color: var(--focus);
-  cursor: pointer;
-}
-
-.empty-choice-label {
-  font-size: var(--t-md);
-  color: var(--text);
-}
-
-.empty-choice-help {
-  grid-column: 2;
-  font-size: var(--t-sm);
-  line-height: 1.5;
-  color: var(--text-faint);
-}
-
 kbd {
   display: inline-block;
   padding: 1px 5px;
@@ -2075,140 +1938,8 @@ kbd {
 }
 
 /* ==========================================================================
-   steering bar
+   buttons
    ========================================================================== */
-
-/* The bar is placed by `.steer-dock` (see "next + autonomy"), which stacks the
-   end-of-turn card on top of it; `position: relative` is what the armed outline
-   below is drawn against. */
-.steer {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: var(--s3);
-  padding: 10px 10px 10px var(--s4);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-lg);
-  background: color-mix(in oklab, var(--surface) 94%, transparent);
-  box-shadow: var(--shadow-3);
-}
-
-.steer::before {
-  content: "";
-  position: absolute;
-  inset: -1px;
-  border-radius: inherit;
-  border: 1px solid transparent;
-  pointer-events: none;
-  transition: border-color var(--dur) var(--ease);
-}
-
-.steer[data-armed="true"]::before {
-  border-color: color-mix(in oklab, var(--accent, var(--focus)) 45%, transparent);
-}
-
-.referent {
-  --accent: var(--text-faint);
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s2);
-  height: 28px;
-  padding: 0 10px 0 8px;
-  border: 1px solid color-mix(in oklab, var(--accent) 35%, var(--line-strong));
-  border-radius: var(--r-pill);
-  background: color-mix(in oklab, var(--accent) 10%, var(--surface-3));
-  flex: none;
-  max-width: 340px;
-}
-
-.referent[data-phase="idea"] {
-  --accent: var(--phase-idea);
-}
-.referent[data-phase="concept"] {
-  --accent: var(--phase-concept);
-}
-.referent[data-phase="component"] {
-  --accent: var(--phase-component);
-}
-.referent[data-phase="building"] {
-  --accent: var(--phase-building);
-}
-.referent[data-phase="built"] {
-  --accent: var(--phase-built);
-}
-.referent[data-phase="failed"] {
-  --accent: var(--phase-failed);
-}
-.referent[data-kind="edge"] {
-  --accent: var(--phase-concept);
-}
-
-.referent-kind {
-  font-family: var(--font-mono);
-  font-size: var(--t-xs);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: color-mix(in oklab, var(--accent) 65%, var(--text-dim));
-}
-
-.referent-id {
-  font-family: var(--font-mono);
-  font-size: var(--t-sm);
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.referent-clear {
-  margin-left: 2px;
-  color: var(--text-faint);
-  font-size: var(--t-md);
-  line-height: 1;
-}
-
-.referent-clear:hover {
-  color: var(--text);
-}
-
-.steer-input {
-  flex: 1;
-  /* the chips and hint around it can squeeze a flex child to nothing; a
-     narrow window still gets a readable box that wraps on words */
-  min-width: 12ch;
-  /* one line tall at rest; the script sets the height to fit, up to five lines */
-  --steer-line: 22px;
-  min-height: var(--steer-line);
-  max-height: calc(var(--steer-line) * 5);
-  padding: 3px 0;
-  border: 0;
-  background: none;
-  color: var(--text);
-  font-family: var(--font-ui);
-  font-size: var(--t-lg);
-  line-height: var(--steer-line);
-  letter-spacing: -0.005em;
-  resize: none;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-}
-
-.steer-input::placeholder {
-  color: var(--text-faint);
-}
-
-.steer-input:focus {
-  outline: none;
-}
-
-.steer-hint {
-  font-family: var(--font-mono);
-  font-size: var(--t-xs);
-  color: var(--text-faint);
-  letter-spacing: 0.06em;
-  white-space: nowrap;
-}
 
 .btn {
   display: inline-flex;
@@ -2244,17 +1975,6 @@ kbd {
   cursor: default;
   background: var(--surface-2);
   color: var(--text-faint);
-}
-
-.btn-abort {
-  border-color: color-mix(in oklab, var(--phase-failed) 45%, var(--line-strong));
-  background: color-mix(in oklab, var(--phase-failed) 14%, var(--surface-2));
-  color: color-mix(in oklab, var(--phase-failed) 70%, var(--text));
-}
-
-.btn-abort:hover {
-  background: color-mix(in oklab, var(--phase-failed) 24%, var(--surface-2));
-  color: var(--text);
 }
 
 /* ==========================================================================
@@ -2411,83 +2131,6 @@ kbd {
 .entry-tool .entry-role {
   color: var(--phase-concept);
   opacity: 0.7;
-}
-
-/* ==========================================================================
-   onboarding call to action (brownfield entry)
-   ========================================================================== */
-
-.onboard {
-  margin-top: var(--s5);
-  pointer-events: auto;
-}
-
-.onboard-or {
-  display: flex;
-  align-items: center;
-  gap: var(--s3);
-  margin-bottom: var(--s4);
-  font-family: var(--font-mono);
-  font-size: var(--t-xs);
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-}
-
-.onboard-or span {
-  height: 1px;
-  background: var(--line-strong);
-}
-
-.onboard-or span:first-child {
-  width: 20px;
-}
-
-.onboard-or span:last-child {
-  flex: 1;
-}
-
-.onboard-row {
-  display: flex;
-  align-items: center;
-  gap: var(--s3);
-  margin-top: var(--s4);
-}
-
-.btn-onboard {
-  height: 34px;
-  padding: 0 var(--s4);
-  flex: none;
-  border-color: color-mix(in oklab, var(--phase-built) 45%, var(--line-strong));
-  background: color-mix(in oklab, var(--phase-built) 16%, var(--surface-2));
-  color: var(--text);
-  font-size: var(--t-md);
-}
-
-.btn-onboard:hover {
-  background: color-mix(in oklab, var(--phase-built) 26%, var(--surface-2));
-}
-
-.onboard-focus {
-  flex: 1;
-  min-width: 0;
-  height: 34px;
-  padding: 0 var(--s3);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-md);
-  background: var(--surface);
-  color: var(--text);
-  font-family: var(--font-ui);
-  font-size: var(--t-md);
-}
-
-.onboard-focus::placeholder {
-  color: var(--text-faint);
-}
-
-.onboard-focus:focus {
-  outline: none;
-  border-color: color-mix(in oklab, var(--focus) 45%, var(--line-strong));
 }
 
 /* ==========================================================================
@@ -3398,142 +3041,6 @@ kbd {
 }
 
 /* ==========================================================================
-   terminal drawer — the session's own terminal, over the bottom of the canvas
-   ========================================================================== */
-
-/* A drawer, not a view: it takes the lower half of the stage and leaves the
-   canvas, the header and the breadcrumb above it visible, so the reader can see
-   what they are coming back to. It clears the steering dock, whose height the
-   dock itself publishes as `--dock-h`. */
-.term {
-  position: absolute;
-  z-index: 7;
-  right: var(--s4);
-  left: var(--s4);
-  bottom: calc(var(--dock-h, 88px) + var(--s4));
-  height: min(46vh, 460px);
-  flex-direction: column;
-  padding: var(--s3);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-lg);
-  /* opaque: a bubble's edge showing through a shell is just noise */
-  background: var(--bg);
-  box-shadow: var(--shadow-3);
-  animation: term-in var(--dur) var(--ease);
-}
-
-/* it comes up from where the dock is, which is where the click that opened it
-   was aimed */
-@keyframes term-in {
-  from {
-    opacity: 0;
-    transform: translateY(18px);
-  }
-}
-
-.term-head {
-  display: flex;
-  align-items: center;
-  gap: var(--s3);
-  padding: 0 var(--s2) var(--s2);
-}
-
-.term-title {
-  font-family: var(--font-mono);
-  font-size: var(--t-xs);
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-}
-
-.term-where {
-  font-size: var(--t-xs);
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.term-shell {
-  font-size: var(--t-xs);
-  color: var(--text-faint);
-  margin-right: auto;
-}
-
-.term-hint {
-  flex: none;
-  color: var(--text-faint);
-  font-size: var(--t-xs);
-}
-
-/* the other way out, for a reader who never learns a key */
-.term-close {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  border-radius: var(--r-sm);
-  color: var(--text-faint);
-  font-size: var(--t-lg);
-  line-height: 1;
-  transition:
-    color var(--dur-fast) var(--ease),
-    background var(--dur-fast) var(--ease);
-}
-
-.term-close:hover {
-  background: var(--surface-3);
-  color: var(--text);
-}
-
-.term-body {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--surface);
-  box-shadow: var(--shadow-2);
-  overflow: hidden;
-}
-
-.term-host {
-  position: absolute;
-  inset: var(--s3);
-}
-
-/* xterm draws its own scrollbar area; keep it in the instrument's palette */
-.term-host .xterm-viewport {
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) transparent;
-}
-
-.term-veil {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--s4);
-  background: color-mix(in oklab, var(--bg) 78%, transparent);
-  font-family: var(--font-mono);
-  font-size: var(--t-sm);
-  letter-spacing: 0.04em;
-  color: var(--text-dim);
-  text-align: center;
-}
-
-.term-veil-action {
-  cursor: pointer;
-  transition: color var(--dur-fast) var(--ease);
-}
-
-.term-veil-action:hover {
-  color: var(--text);
-}
-
-/* ==========================================================================
    PRODUCT LAYER
 
    The capability card. It shares its geometry with a component card on purpose
@@ -4246,7 +3753,7 @@ kbd {
 .now-pill {
   position: absolute;
   left: var(--s4);
-  /* clears the zoom controls, which are themselves lifted over the steering bar */
+  /* clears the zoom controls, which are themselves lifted off the stage floor */
   bottom: 128px;
   display: flex;
   align-items: baseline;
@@ -4327,7 +3834,7 @@ kbd {
 }
 
 /* ==========================================================================
-   variations on one canvas — pips, rings, the filter, the steering target
+   variations on one canvas — pips, rings, the filter
    ========================================================================== */
 
 /* Where else a bubble lives: one dot per variation that has it, in that
@@ -4453,53 +3960,6 @@ kbd {
   width: 100%;
 }
 
-/* Which variation the sentence goes to. It sits between the referent chip and
-   the input because that is the order the sentence is read in: this thing, on
-   this branch, says what. */
-.steer-target {
-  position: relative;
-  flex: none;
-}
-
-.steer-target-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px var(--s2);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-pill);
-  background: var(--surface-2);
-  color: var(--text-dim);
-  font-size: var(--t-xs);
-  cursor: pointer;
-}
-
-.steer-target[data-live="false"] .steer-target-chip {
-  border-color: color-mix(in oklab, var(--phase-failed) 45%, var(--line-strong));
-  color: color-mix(in oklab, var(--phase-failed) 45%, var(--text-dim));
-}
-
-.steer-target-chip:disabled {
-  cursor: default;
-}
-
-.steer-target-key {
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-}
-
-.steer-target-name {
-  color: var(--text);
-}
-
-.steer-target-menu {
-  position: absolute;
-  bottom: calc(100% + var(--s2));
-  left: 0;
-  width: 260px;
-}
-
 /* what the same bubble says in the other variations, when they disagree */
 .tl-where {
   display: flex;
@@ -4552,15 +4012,6 @@ kbd {
   flex-direction: column;
   gap: 2px;
   overflow: hidden;
-}
-
-.term-branch {
-  flex: none;
-  padding: 2px var(--s2);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-pill);
-  font-size: var(--t-xs);
-  color: var(--text-dim);
 }
 
 /* ==========================================================================
@@ -4866,15 +4317,13 @@ kbd {
    The pill is a line of text, so it says it is still going the way text does:
    a highlight travelling across the words. A new line comes up from below and
    the line it replaces keeps rising out of the pill's clipped top, which is
-   what makes the change read as a stack rather than a swap. */
+   what makes the change read as a stack rather than a swap.
 
-/* The dock below the canvas grows and shrinks with the turn's card, and the
-   shell publishes its measured height as `--dock-h`. The pill rides the same
-   lift the zoom controls take (dock height plus the dock's own bottom inset)
-   and then clears the controls row itself, so it never ends up underneath
-   either of them however tall the dock gets. */
+   The pill rides the same lift the zoom controls take (the stage's own bottom
+   inset plus one step) and then clears the controls row itself, so it never
+   ends up underneath them. */
 .now-pill {
-  bottom: calc(var(--dock-h, 96px) + var(--s5) + var(--s3) + 38px);
+  bottom: calc(var(--s5) + var(--s3) + 38px);
 }
 
 .now-pill-slot {
@@ -5003,330 +4452,3 @@ kbd {
   }
 }
 
-/* ==========================================================================
-   next + autonomy — the call to action a turn ends on, and the toggle that
-   answers it for you
-   ========================================================================== */
-
-/* The card and the bar are one stack pinned to the bottom of the stage. The
-   bar used to be pinned on its own; the dock owns the placement now so the card
-   rides on top of a bar that grows with a dictated sentence. */
-.steer-dock {
-  position: absolute;
-  z-index: 8;
-  right: var(--s5);
-  bottom: var(--s5);
-  left: var(--s5);
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: var(--s2);
-}
-
-/* Where the turn left things. Same surface as the bar, one shade lighter on the
-   left edge: it reads as the sentence the bar is answering. */
-.next-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s2);
-  padding: var(--s3) var(--s4);
-  border: 1px solid var(--line-strong);
-  border-left: 2px solid color-mix(in oklab, var(--capability) 70%, var(--line-strong));
-  border-radius: var(--r-md);
-  background: color-mix(in oklab, var(--surface-2) 94%, transparent);
-  box-shadow: var(--shadow-2);
-  animation: next-in var(--dur) var(--ease) both;
-}
-
-/* a new card arrives from under the bar, so the eye is already there */
-@keyframes next-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.next-summary {
-  margin: 0;
-  display: flex;
-  align-items: baseline;
-  gap: var(--s2);
-  color: var(--text);
-  font-size: var(--t-lg);
-  line-height: 1.35;
-}
-
-/* whose turn ended, when more than one variation is on the canvas */
-.next-branch {
-  flex: none;
-  padding: 2px var(--s2);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-pill);
-  color: var(--text-dim);
-  font-size: var(--t-xs);
-}
-
-/* the one thing only the user can settle: it gets the accent, the choices are
-   merely convenient */
-.next-question {
-  margin: 0;
-  padding-left: var(--s3);
-  border-left: 2px solid color-mix(in oklab, var(--phase-building) 70%, transparent);
-  color: color-mix(in oklab, var(--phase-building) 30%, var(--text));
-  font-size: var(--t-md);
-  line-height: 1.4;
-}
-
-.next-choices {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s2);
-}
-
-.next-choice {
-  padding: 6px var(--s3);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-pill);
-  background: var(--surface-3);
-  color: var(--text);
-  font-family: var(--font-ui);
-  font-size: var(--t-md);
-  cursor: pointer;
-  transition:
-    border-color var(--dur-fast) var(--ease),
-    transform var(--dur-fast) var(--ease);
-}
-
-/* the agent puts what it recommends first, and the card says so */
-.next-choice[data-lead="true"] {
-  border-color: color-mix(in oklab, var(--capability) 55%, var(--line-strong));
-  background: color-mix(in oklab, var(--capability) 14%, var(--surface-3));
-}
-
-.next-choice:hover {
-  border-color: var(--focus);
-  transform: translateY(-1px);
-}
-
-.next-choice:active {
-  transform: translateY(0);
-}
-
-.next-hint,
-.next-done {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: var(--t-xs);
-  letter-spacing: 0.06em;
-  color: var(--text-faint);
-}
-
-/* Hand the wheel over. On, this is the loudest thing in the bar on purpose: an
-   agent deciding for itself is something the reader must never discover by
-   accident. */
-.steer-auto {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px var(--s2);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-pill);
-  background: var(--surface-2);
-  color: var(--text-dim);
-  font-size: var(--t-xs);
-  white-space: nowrap;
-  cursor: pointer;
-  transition:
-    border-color var(--dur-fast) var(--ease),
-    color var(--dur-fast) var(--ease);
-}
-
-.steer-auto:hover:not(:disabled) {
-  border-color: var(--focus);
-  color: var(--text);
-}
-
-.steer-auto:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-.steer-auto[data-on="true"] {
-  border-color: color-mix(in oklab, var(--phase-built) 55%, var(--line-strong));
-  background: color-mix(in oklab, var(--phase-built) 14%, var(--surface-2));
-  color: color-mix(in oklab, var(--phase-built) 30%, var(--text));
-  animation: auto-breathe 2.4s var(--ease) infinite;
-}
-
-.steer-auto-beat {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--phase-built);
-  animation: auto-beat 1.6s var(--ease) infinite;
-}
-
-@keyframes auto-breathe {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 color-mix(in oklab, var(--phase-built) 40%, transparent);
-  }
-  55% {
-    box-shadow: 0 0 0 6px color-mix(in oklab, var(--phase-built) 0%, transparent);
-  }
-}
-
-@keyframes auto-beat {
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  55% {
-    opacity: 0.45;
-    transform: scale(0.75);
-  }
-}
-
-/* ==========================================================================
-   start a session — what stands where the end-of-turn card would be when
-   nothing is running in the variation being steered
-
-   Same surface and same place as the card it replaces: the dock is where the
-   thing to do next lives, and with no harness in this checkout the thing to do
-   next is to start one.
-   ========================================================================== */
-
-.start-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s2);
-  padding: var(--s3) var(--s4);
-  border: 1px solid var(--line-strong);
-  border-left: 2px solid color-mix(in oklab, var(--phase-built) 70%, var(--line-strong));
-  border-radius: var(--r-md);
-  background: color-mix(in oklab, var(--surface-2) 94%, transparent);
-  box-shadow: var(--shadow-2);
-  animation: next-in var(--dur) var(--ease) both;
-  text-align: left;
-}
-
-.start-title {
-  margin: 0;
-  color: var(--text);
-  font-size: var(--t-lg);
-  line-height: 1.35;
-}
-
-/* what is actually installed; nothing else is offered, because nothing else
-   could be started */
-.start-picks {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s2);
-}
-
-.start-pick {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px var(--s3);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-pill);
-  background: var(--surface-3);
-  color: var(--text-dim);
-  font-size: var(--t-sm);
-  cursor: pointer;
-  transition:
-    border-color var(--dur-fast) var(--ease),
-    color var(--dur-fast) var(--ease);
-}
-
-.start-pick:hover {
-  border-color: var(--focus);
-  color: var(--text);
-}
-
-.start-pick input {
-  width: 13px;
-  height: 13px;
-  accent-color: var(--focus);
-}
-
-.start-pick:has(input:checked) {
-  border-color: color-mix(in oklab, var(--phase-built) 55%, var(--line-strong));
-  background: color-mix(in oklab, var(--phase-built) 14%, var(--surface-3));
-  color: var(--text);
-}
-
-/* a machine with no coding agent on it cannot be talked around; say what to do */
-.start-none {
-  margin: 0;
-  color: color-mix(in oklab, var(--phase-failed) 30%, var(--text-dim));
-  font-size: var(--t-sm);
-  line-height: 1.5;
-}
-
-.start-opt {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  align-items: center;
-  gap: 6px var(--s2);
-  cursor: pointer;
-}
-
-.start-opt input {
-  width: 14px;
-  height: 14px;
-  accent-color: var(--focus);
-}
-
-.start-opt-label {
-  font-size: var(--t-md);
-  color: var(--text);
-}
-
-.start-help {
-  grid-column: 2;
-  font-size: var(--t-sm);
-  line-height: 1.5;
-  color: var(--text-faint);
-}
-
-.start-row {
-  display: flex;
-  align-items: center;
-  gap: var(--s3);
-}
-
-/* where the session will actually run — the one fact the card cannot leave out */
-.start-where {
-  font-family: var(--font-mono);
-  font-size: var(--t-xs);
-  letter-spacing: 0.06em;
-  color: var(--text-faint);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .next-card,
-  .start-card,
-  .term {
-    animation: none;
-  }
-
-  .next-choice:hover {
-    transform: none;
-  }
-
-  .steer-auto[data-on="true"],
-  .steer-auto-beat {
-    animation: none;
-  }
-}

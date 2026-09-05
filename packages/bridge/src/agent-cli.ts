@@ -1,16 +1,16 @@
 /**
- * Shape's agent as its own process: the half that needs the harnesses, the
- * target repo's filesystem, git, `ps` and a tty. It connects OUT to a Shape
+ * Shape's agent as its own process: the half that needs the target repo's
+ * filesystem, git, `ps` and the user's terminal. It connects OUT to a Shape
  * server (`--server`) and serves the loopback link (`/link`) for
- * harness-side processes — hooks and the MCP sidecar — on 127.0.0.1 only, so
- * those never hold server credentials.
+ * harness-side processes — hooks, the MCP sidecar, the omp extension — on
+ * 127.0.0.1 only, so those never hold server credentials.
  *
- * One agent per REPO, one harness per worktree the user opens; `--cwd` may be
- * any worktree of it and is the variation that gets the first harness.
+ * One agent per REPO; `--cwd` may be any worktree of it. It starts no coding
+ * session: the sessions it shows are the ones already running in the repo's
+ * worktrees, which report in over that link.
  *
  * Run: node src/agent-cli.ts --server ws://host:port
- *        [--token <t>] [--allow-terminal] [--cwd <dir>] [--backend <id>]
- *        [--omp "<cmd ...>"] [--link-port <n>]
+ *        [--token <t>] [--cwd <dir>] [--link-port <n>]
  */
 
 import { resolve } from "node:path";
@@ -26,25 +26,12 @@ const LINK_PORT = 4401;
 interface Cli {
   /** the Shape server's agent endpoint, already normalized */
   server: string;
-  /** `--cwd <dir>`: the worktree to open first; the project is its whole repo */
+  /** `--cwd <dir>`: any worktree of the repo to watch; the project is the repo */
   cwd: string;
   /** loopback port for `/link` */
   linkPort: number;
-  /**
-   * `--backend <id>`: which harness to start. A project's own
-   * `.shape/config.json` beats it; with neither, and more than one harness
-   * installed, the browser asks.
-   */
-  backend?: string;
-  /** `--omp "<cmd ...>"`: the omp executable and its leading args */
-  ompCommand?: string[];
   /** `--token <t>`: beats `SHAPE_TOKEN` and the saved credentials */
   token?: string;
-  /**
-   * `--allow-terminal`: off by default. A remote agent's terminal pane is a
-   * shell on this machine, so the operator has to ask for it.
-   */
-  allowTerminal: boolean;
 }
 
 /**
@@ -69,7 +56,7 @@ function agentUrl(raw: string): string {
 
 function parseArgv(argv: string[]): Cli {
   let server: string | null = null;
-  const cli: Cli = { server: "", cwd: process.cwd(), linkPort: LINK_PORT, allowTerminal: false };
+  const cli: Cli = { server: "", cwd: process.cwd(), linkPort: LINK_PORT };
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -86,20 +73,9 @@ function parseArgv(argv: string[]): Cli {
       if (Number.isNaN(parsed)) throw new Error(`--link-port expects a number, got ${next}`);
       cli.linkPort = parsed;
       i++;
-    } else if (arg === "--backend" && next !== undefined) {
-      cli.backend = next.trim();
-      i++;
-    } else if (arg === "--omp" && next !== undefined) {
-      cli.ompCommand = next
-        .trim()
-        .split(/\s+/)
-        .filter((token) => token.length > 0);
-      i++;
     } else if (arg === "--token" && next !== undefined) {
       cli.token = next.trim();
       i++;
-    } else if (arg === "--allow-terminal") {
-      cli.allowTerminal = true;
     } else {
       throw new Error(`unknown argument ${arg}`);
     }
@@ -109,9 +85,9 @@ function parseArgv(argv: string[]): Cli {
   return cli;
 }
 
-// A bad flag, an unknown --backend id or a broken config file is a startup
-// error, not a stack trace: the operator needs to read what went wrong. A
-// server that is merely not up yet is NOT one of those — the link retries.
+// A bad flag is a startup error, not a stack trace: the operator needs to read
+// what went wrong. A server that is merely not up yet is NOT one of those —
+// the link retries.
 try {
   const cli = parseArgv(process.argv.slice(2));
   // `--token`, then `SHAPE_TOKEN`, then what `shape login` saved for this
@@ -136,9 +112,6 @@ try {
 
   const agent = new AgentRuntime({
     cwd: cli.cwd,
-    ...(cli.backend === undefined ? {} : { backend: cli.backend }),
-    ...(cli.ompCommand === undefined ? {} : { ompCommand: cli.ompCommand }),
-    allowTerminal: cli.allowTerminal,
     sockets,
     link,
     // a retarget that failed has left this process with nowhere to stand;
@@ -161,10 +134,10 @@ try {
     });
   }
 
-  // The loopback link listens BEFORE the harness starts, and that order
-  // matters: a hook-driven adapter's first event (Claude Code fires
-  // SessionStart within a second of the TUI coming up) arrives over it, and a
-  // hook that finds nobody listening exits silently.
+  // The loopback link listens BEFORE the agent attaches, and that order
+  // matters: a session's first event (Claude Code fires SessionStart within a
+  // second of the TUI coming up) arrives over it, and a hook that finds nobody
+  // listening exits silently.
   await sockets.listen();
   await agent.start();
   // a stop or a refused token settles the same gate: we were never attached,

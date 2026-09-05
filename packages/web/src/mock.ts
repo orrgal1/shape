@@ -1,12 +1,12 @@
 /**
  * `?mock=1` runs the canvas with no bridge at all: a hand-built GraphDoc that
  * exercises every visual state, plus a timer that moves the agent's activity
- * around so pulses are observable. Utterances echo into the transcript.
+ * around so pulses are observable.
  *
  * `?mock=1&empty=1` is the brownfield entry state instead: a session whose
  * target already holds code the extractor has read — so the reality strip is on
  * the canvas — but whose intent layer is still empty, which is what the compact
- * "not mapped yet" card and the "Map this project" call to action are for.
+ * "not mapped yet" card is for.
  */
 import {
   emptyGraph,
@@ -18,11 +18,9 @@ import {
   type GraphDoc,
   type GraphEdge,
   type IntentNode,
-  type Next,
   type ProjectSummary,
   type ProjectTools,
   type RevisionInfo,
-  type ServerMsg,
   type SessionInfo,
   type WorktreeInfo,
   type WorktreeSession,
@@ -86,7 +84,7 @@ export function trioGraph(): GraphDoc {
         id: "web-canvas",
         parentId: null,
         label: "Web canvas UI",
-        summary: "Renders the living graph and turns clicks plus speech into steering.",
+        summary: "Draws the living graph and lets a reader walk it.",
         phase: "building",
         status: "Reworking layout so small layers spread instead of stacking.",
         codeRefs: ["packages/web"],
@@ -95,7 +93,7 @@ export function trioGraph(): GraphDoc {
         id: "bridge",
         parentId: null,
         label: "Bridge",
-        summary: "Runs omp and keeps the canvas and the session in agreement.",
+        summary: "Watches the sessions and keeps the canvas and their work in agreement.",
         phase: "built",
         codeRefs: ["packages/bridge"],
       },
@@ -114,7 +112,7 @@ export function trioGraph(): GraphDoc {
         source: "web-canvas",
         target: "bridge",
         kind: "dataflow",
-        label: "utterances",
+        label: "what to look at",
       },
       {
         id: "web-canvas--bridge-2",
@@ -154,25 +152,25 @@ const MOCK_WORKTREES: readonly WorktreeInfo[] = [
 ];
 
 /**
- * The two harnesses the fixture runs, and the two answers a "Go to terminal"
- * click can get: the main variation's session lives in the user's own terminal
- * (herdr brought it forward, nothing changes on this screen), and the spike's
- * was started before herdr was installed, so Shape owns its pty and shows it in
- * the drawer.
+ * The two harnesses the fixture reports, and the two answers a "Go to terminal"
+ * click can get: the main variation's session lives in a herdr tab in the
+ * user's own terminal, so it can be brought forward, and the spike's is a
+ * Claude Code session Shape only hears through hooks — nowhere it can send
+ * anybody, so that variation offers no terminal button at all.
  */
 const MOCK_BACKEND: BackendInfo = {
   id: "omp",
   label: "omp",
-  capabilities: { steerMidTurn: true, hostTool: true, events: "native", resume: true, terminal: "external" },
+  capabilities: { steerMidTurn: false, hostTool: true, events: "native", resume: false, terminal: "external" },
 };
 
-const MOCK_PANE_BACKEND: BackendInfo = {
+const MOCK_HOOKED_BACKEND: BackendInfo = {
   id: "claude",
   label: "Claude Code",
-  capabilities: { steerMidTurn: false, hostTool: true, events: "hooks", resume: true, terminal: "pane" },
+  capabilities: { steerMidTurn: false, hostTool: true, events: "hooks", resume: false, terminal: "none" },
 };
 
-/** what the fixture machine has installed: herdr to launch with, two harnesses to launch */
+/** what the fixture machine has installed: herdr, and the two harnesses it found */
 function mockTools(): ProjectTools {
   return {
     launcher: "herdr",
@@ -184,7 +182,7 @@ function mockTools(): ProjectTools {
   };
 }
 
-/** the harnesses running in the fixture: one per variation the user opened */
+/** the harnesses reporting in from the fixture: one per variation with a session */
 function mockRunning(): WorktreeSession[] {
   return [
     {
@@ -196,47 +194,13 @@ function mockRunning(): WorktreeSession[] {
     {
       worktree: MOCK_SPIKE,
       session: { sessionId: "mock-spike", sessionName: "voice-first capture", model: MOCK_MODEL },
-      backend: MOCK_PANE_BACKEND,
+      backend: MOCK_HOOKED_BACKEND,
       state: "streaming",
     },
   ];
 }
 
 const MOCK_MODEL = { provider: "anthropic", id: "claude-fable-5" };
-
-/**
- * Where each variation's last turn left things. Both cards are the shape the
- * real thing takes: the main one ends on a decision the user has to make, the
- * spike ends on choices only — so the card, its question line and the "or say
- * it your way" hint are all reachable with no bridge.
- */
-function mockNexts(): Record<string, Next | null> {
-  return {
-    [MOCK_MAIN]: {
-      summary: "The notebook saves recordings and writes them up, and the export kit is the last piece left.",
-      choices: [
-        { label: "Build the export kit", say: "Build the export kit next and show me what a finished export looks like." },
-        { label: "Show me a walkthrough", say: "Walk me through what happens when I record a note today." },
-        { label: "Leave export for later", say: "Leave the export kit for later and tidy up what is already built." },
-      ],
-      question: "Should an export be one file per recording, or one file for the whole trip?",
-    },
-    [MOCK_SPIKE]: {
-      summary: "Voice macros work end to end on this branch, but nothing proves they keep working.",
-      choices: [
-        { label: "Add the checks", say: "Add checks that prove the voice macros keep working, then mark them done." },
-        { label: "Merge it into main", say: "Bring the voice macros over to the main line of work." },
-      ],
-      question: null,
-    },
-    [MOCK_QUIET]: null,
-  };
-}
-
-/** nothing runs on its own until the toggle is clicked, exactly like a fresh bridge */
-function mockAutonomous(): Record<string, boolean> {
-  return { [MOCK_MAIN]: false, [MOCK_SPIKE]: false, [MOCK_QUIET]: false };
-}
 
 export function mockSession(targetHasCode: boolean): SessionInfo {
   return {
@@ -245,11 +209,9 @@ export function mockSession(targetHasCode: boolean): SessionInfo {
     worktrees: MOCK_WORKTREES.map((entry) => ({ ...entry })),
     sessions: mockRunning(),
     agentConnected: true,
-    // the fixture offers the GitHub option so the create form's full shape is reachable
-    canPublish: true,
     // the mock has no agent behind it, so there is no directive on disk
     directivePath: null,
-    // and no herdr either, so no manager tab: the pill reads "none"
+    // no manager tab was found or opened here, so the header pill reads "none"
     manager: null,
   };
 }
@@ -352,7 +314,6 @@ const MOCK_SESSIONS: readonly DiscoveredSession[] = [
     startedAt: new Date(Date.now() - 62 * MINUTE_MS).toISOString(),
     resumeCommand: ["omp", "--resume", "01a05f7c-2b41-7f00-9d3a-6c1e4b8a0d92"],
     attach: "none",
-    spawnedByShape: false,
   },
   {
     harness: "claude",
@@ -364,7 +325,6 @@ const MOCK_SESSIONS: readonly DiscoveredSession[] = [
     startedAt: new Date(Date.now() - 18 * MINUTE_MS).toISOString(),
     resumeCommand: ["claude", "--resume", "9f31c0de-7ab2-4c15-8f60-2d7e9a441bb3"],
     attach: "socket",
-    spawnedByShape: false,
   },
   {
     harness: "codex",
@@ -376,7 +336,6 @@ const MOCK_SESSIONS: readonly DiscoveredSession[] = [
     startedAt: new Date(Date.now() - 3 * MINUTE_MS).toISOString(),
     resumeCommand: null,
     attach: "daemon",
-    spawnedByShape: false,
   },
 ];
 
@@ -431,7 +390,7 @@ export function sampleGraph(): GraphDoc {
         id: "whisper-worker",
         parentId: "transcriber",
         label: "Whisper worker",
-        summary: "Runs the local model off the main thread, one utterance at a time.",
+        summary: "Runs the local model off the main thread, one recording at a time.",
         phase: "built",
         modelRole: "small",
         // a symbol ref beside the path one: this bubble IS that class, which is
@@ -444,7 +403,7 @@ export function sampleGraph(): GraphDoc {
         label: "Punctuator",
         summary: "Restores sentence boundaries the acoustic model drops.",
         phase: "failed",
-        status: "Drops the second sentence of every two-sentence utterance.",
+        status: "Drops the second sentence of every two-sentence note.",
       },
       {
         id: "notebook",
@@ -883,7 +842,7 @@ const MOCK_TRANSCRIPT: readonly { worktree: string; role: TranscriptRole; text: 
   {
     worktree: MOCK_MAIN,
     role: "assistant",
-    text: "The punctuator is failing on multi-sentence utterances; I am reading the timing data before changing the model.",
+    text: "The punctuator is failing on multi-sentence notes; I am reading the timing data before changing the model.",
   },
   { worktree: MOCK_MAIN, role: "tool", text: "read packages/capture/asr/punctuate.ts:1-80" },
   { worktree: MOCK_SPIKE, role: "user", text: "On this branch, try it hands-free: no sentences, just calls." },
@@ -943,9 +902,6 @@ export function startMock(): () => void {
       projectId: MOCK_PROJECT_ID,
       sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })),
       revisions: {},
-      // an unmapped project has said nothing yet, so it offers nothing yet
-      nexts: {},
-      autonomous: mockAutonomous(),
       tools: mockTools(),
     });
     // after `hello`, which would otherwise report a live bridge
@@ -964,8 +920,6 @@ export function startMock(): () => void {
       projectId: MOCK_PROJECT_ID,
       sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })),
       revisions: { [MOCK_MAIN]: mockRevisions(7) },
-      nexts: {},
-      autonomous: mockAutonomous(),
       tools: mockTools(),
     });
     store.setConn("mock");
@@ -983,8 +937,6 @@ export function startMock(): () => void {
     projectId: MOCK_PROJECT_ID,
     sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })),
     revisions: { [MOCK_MAIN]: mockRevisions(41), [MOCK_SPIKE]: mockRevisions(44) },
-    nexts: mockNexts(),
-    autonomous: mockAutonomous(),
     tools: mockTools(),
   });
   store.setConn("mock");
@@ -1027,130 +979,25 @@ export function startMock(): () => void {
   };
 }
 
-/**
- * The session_started a fixture variation comes up with. One builder because a
- * session now begins two ways — the Start card asking for it, and a sentence
- * arriving at a variation that has none — and both must land the same frame.
- */
-function mockStarted(found: WorktreeInfo, backend: BackendInfo): ServerMsg {
-  return {
-    type: "session_started",
-    worktree: found.id,
-    session: { sessionId: `mock-${found.id}`, sessionName: found.branch ?? "detached", model: MOCK_MODEL },
-    backend,
-  };
-}
-
-/**
- * What the bridge does with an utterance or a survey aimed at a variation with
- * nothing running: it opens the harness there, broadcasts session_started, and
- * only then delivers. The fixture keeps that ordering because the canvas reads
- * the session out of the store while rendering the turn. A path the fixture has
- * never heard of fails the way the room does, with no turn appended.
- */
-function mockWake(worktree: string): boolean {
-  const store = useApp.getState();
-  if (store.session?.sessions.some((entry) => entry.worktree === worktree) === true) return true;
-  const found = MOCK_WORKTREES.find((entry) => entry.id === worktree);
-  if (found === undefined) {
-    store.pushError(`open_worktree failed for ${worktree}: not a variation of this fixture project`);
-    return false;
-  }
-  store.ingest(mockStarted(found, MOCK_BACKEND));
-  store.appendTranscript(
-    found.id,
-    "tool",
-    `started ${MOCK_BACKEND.label} here to hear this (mock: no harness is really running)`,
-  );
-  return true;
-}
-
 export function mockSend(msg: ClientMsg): void {
   const store = useApp.getState();
   // mock mode is also how the adopt UI is verified: every outbound frame is
   // announced, because there is no socket to watch for it
   console.info(`[mock] client frame ${JSON.stringify(msg)}`);
-  if (msg.type === "abort") {
-    store.ingest({ type: "agent", worktree: msg.worktree, state: "idle" });
-    store.appendTranscript(msg.worktree, "tool", "abort requested (mock)");
-    return;
-  }
-  if (msg.type === "set_autonomous") {
-    // the one other frame the fixture answers honestly: the bridge's own answer
-    // is exactly this broadcast plus a line saying what changed
-    store.ingest({ type: "autonomous", worktree: msg.worktree, on: msg.on });
-    store.appendTranscript(
-      msg.worktree,
-      "tool",
-      msg.on
-        ? "autonomous mode on — it decides and keeps going until the work is finished"
-        : "autonomous mode off — it stops at the end of each turn again",
-    );
-    return;
-  }
-  if (msg.type === "onboard") {
-    if (!mockWake(msg.worktree)) return;
-    // The same frame means two things now, and which one is decided by the
-    // canvas it was sent from: with bubbles on it, nothing is refused any more
-    // — the room walks the difference between the map and the code instead.
-    if (useApp.getState().doc.nodes.length > 0) {
-      store.appendTranscript(msg.worktree, "tool", "catch-up requested (mock: no harness is really running)");
-      store.ingest({ type: "agent", worktree: msg.worktree, state: "streaming" });
-      return;
-    }
-    store.appendTranscript(
-      msg.worktree,
-      "tool",
-      msg.focus === undefined
-        ? "onboard requested (mock: no bridge attached, so no skeleton lands)"
-        : `onboard requested, focus "${msg.focus}" (mock: no bridge attached)`,
-    );
-    // a delivered survey is a turn: the harness starts working, which is what
-    // turns the empty state into the one line worth reading while it runs
-    store.ingest({ type: "agent", worktree: msg.worktree, state: "streaming" });
-    return;
-  }
-  if (msg.type === "open_worktree") {
-    // the one frame the fixture can answer honestly: a harness coming up in a
-    // variation is a session_started, and the mock has a session to hand
-    const found = MOCK_WORKTREES.find((entry) => entry.path === msg.path);
-    if (found === undefined) {
-      store.pushError(`open_worktree "${msg.path}" is not a variation of this fixture project`);
-      return;
-    }
-    // which harness the card asked for decides where its terminal is: the one
-    // the fixture launches through herdr lives in the user's own terminal, and
-    // the other is Shape's own pty in the drawer
-    const backend = msg.backend === "claude" ? MOCK_PANE_BACKEND : MOCK_BACKEND;
-    store.ingest(mockStarted(found, backend));
-    if (msg.autonomous === true) store.ingest({ type: "autonomous", worktree: found.id, on: true });
-    store.appendTranscript(
-      found.id,
-      "tool",
-      `started ${backend.label} here${msg.autonomous === true ? ", running on its own" : ""}${
-        msg.remember === true ? ", remembered for this project" : ""
-      } (mock: no harness is really running)`,
-    );
-    return;
-  }
   if (msg.type === "focus_terminal") {
-    // exactly what the room does with the agent's answer: a harness Shape owns
-    // the pty of asks for the drawer, and one in the user's own terminal is
-    // focused over there and says nothing back
+    // exactly what the room does with the agent's answer: a session in a herdr
+    // tab is brought forward over there and says nothing back to this screen,
+    // and one whose terminal Shape cannot reach is refused out loud
     const running = useApp.getState().session?.sessions.find((entry) => entry.worktree === msg.worktree);
     if (running === undefined) {
-      store.pushError(`focus_terminal: nothing is running in ${msg.worktree} (mock)`);
+      store.pushError(`focus_terminal: nothing is reporting in from ${msg.worktree} (mock)`);
       return;
     }
-    if (running.backend.capabilities.terminal === "pane") {
-      store.ingest({ type: "terminal", worktree: msg.worktree, open: true });
+    if (running.backend.capabilities.terminal !== "external") {
+      store.pushError(`focus_terminal: ${running.backend.label} has no terminal Shape can reach (mock)`);
       return;
     }
     store.appendTranscript(msg.worktree, "tool", "brought its own terminal window forward (mock)");
-    return;
-  }
-  if (msg.type === "close_worktree") {
-    store.ingest({ type: "session_stopped", worktree: msg.worktree, reason: "stopped from the variations menu" });
     return;
   }
   if (msg.type === "switch_project") {
@@ -1163,13 +1010,6 @@ export function mockSend(msg: ClientMsg): void {
     // the chooser is a window on the machine the agent runs on, and mock mode
     // is a fixture in a browser: there is no such machine to open it on
     store.pushError("pick_folder rejected: mock mode has no machine to choose a folder on — this needs the bridge");
-    return;
-  }
-  if (msg.type === "create_project") {
-    // same reason as a switch: creating a folder needs the bridge, so the mock
-    // reports the request (publishing included) rather than faking a project
-    const where = msg.github === null ? "" : `, on GitHub as ${msg.github.visibility}`;
-    store.pushError(`create_project "${msg.path}"${where} needs the bridge — mock mode has one fixture project`);
     return;
   }
   if (msg.type === "discover") {
@@ -1239,18 +1079,4 @@ export function mockSend(msg: ClientMsg): void {
     });
     return;
   }
-  // the mock has no shell: pty frames are the terminal pane's business
-  if (msg.type !== "utterance") return;
-  // typing into a variation with nothing running there is how a session starts
-  // now: the harness comes up first, then hears the sentence
-  if (!mockWake(msg.worktree)) return;
-  const where = msg.referent === null ? "whole project" : `${msg.referent.kind} ${msg.referent.id}`;
-  // the flag only rides on a greenfield utterance, and with no bridge attached
-  // there is nothing to draw — so the mock just names the turn it would be
-  const how =
-    msg.productFirst === undefined ? "" : msg.productFirst ? " · product picture first" : " · straight to building";
-  // anything said spends the card the last turn ended on, bridge or no bridge
-  store.ingest({ type: "next", worktree: msg.worktree, next: null });
-  store.appendTranscript(msg.worktree, "user", msg.text);
-  store.appendTranscript(msg.worktree, "tool", `steer -> ${where}${how} (mock: no bridge attached)`);
 }

@@ -516,11 +516,11 @@ export interface LayerEdge {
   kind: EdgeKind;
   label: string | null;
   /**
-   * The document relation this line stands for, and therefore a legitimate
-   * steering referent. A single relation stays steerable even when it is drawn
-   * between ancestors — it exists, it is merely rendered one level up. Null only
-   * when several relations collapse into one line, where no single referent
-   * exists and offering one would be a lie.
+   * The document relation this line stands for, and therefore the one it
+   * selects. A single relation stays addressable even when it is drawn between
+   * ancestors — it exists, it is merely rendered one level up. Null only when
+   * several relations collapse into one line, where no single relation is meant
+   * and naming one would be a lie.
    */
   edgeId: string | null;
   /**

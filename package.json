@@ -2,7 +2,7 @@
   "name": "shape",
   "private": true,
   "version": "0.0.1",
-  "description": "Shape — an agent-maintained, live picture of the system you are building, rendered as drillable bubbles; click a bubble and speak to steer the agent",
+  "description": "Shape — an agent-maintained, live picture of the system you are building, rendered as drillable bubbles: what each part promises, what the code actually does, and where the two disagree",
   "license": "MIT",
   "repository": {
     "type": "git",

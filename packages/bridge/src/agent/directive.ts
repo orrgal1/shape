@@ -47,6 +47,10 @@ Shape is a live canvas of this project that the user is watching while you work:
 capabilities, parts, infrastructure and checks of the thing being built. It is their only view of
 your work, and it is keyed to this project, so every worktree of it draws on one shared canvas.
 
+The canvas is something they READ. Nothing they do there reaches you — there is no message, no
+choice and no interruption coming back from it — so keep it current as you go and let it say
+where things stand on its own. Direction reaches you where you are running: this terminal.
+
 ## This project
 
 - canvas link: \`SHAPE_LINK=${opts.linkUrl}\`

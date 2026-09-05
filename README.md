@@ -6,9 +6,10 @@ drillable bubbles. The agent declares the **intent** layer (what each part of th
 promises, in plain English) while it works; a **reality** layer is derived mechanically from
 the code itself (workspace packages, the imports between them, the infrastructure its config
 files prove, the checks that attest it); where the two disagree, **drift** is rendered on the
-bubble instead of quietly rotting like a README diagram. To steer, you click a bubble or a
-relation and speak — or type — one sentence. Selection is the referent, the sentence is the
-requirement, and the running agent gets both as an addressed instruction.
+bubble instead of quietly rotting like a README diagram. The canvas is a picture, not a
+console: it is where you read what each part claims, what the code proves, and what every
+session is doing right now. Agents are directed where they actually run — your terminal, or
+the manager beside it — and never from the browser.
 
 ![Shape canvas](docs/shape-canvas.png)
 
@@ -19,15 +20,16 @@ requirement, and the running agent gets both as an addressed instruction.
   built-in type stripping.
 - **pnpm 11.** Pinned by `packageManager` in `package.json`, so `corepack enable` is enough
   to get the right version.
-- **A coding harness**, one or both of:
-  - `omp` — [oh-my-pi](https://github.com/can1357/oh-my-pi); Shape loads its own extension
-    into the session.
-  - `claude` — Claude Code; Shape wires it from the outside with an MCP server and hooks.
-- **herdr — optional, recommended.** A terminal multiplexer: with it installed, the harness
-  session runs in a tab of your own terminal, which you can look at and type into; without it
-  Shape owns a pty and the browser renders the session for you.
-- **`gh`, authenticated — optional.** Used by "start a new project → publish to GitHub" from
-  the canvas, and by manager mode (see below).
+- **A coding harness that reports in**, one or both of:
+  - `omp` — [oh-my-pi](https://github.com/can1357/oh-my-pi); the session loads Shape's own
+    extension, which every builder started from the project's manager tab is handed
+    automatically.
+  - `claude` — Claude Code; the link ships the MCP server and the hooks it loads.
+- **herdr — optional, recommended.** A terminal multiplexer: with it, Shape finds (or opens)
+  the project's manager tab, every builder started there gets the link, and "go to the
+  terminal" on the canvas raises the tab a session is running in. Without it Shape still draws
+  whatever sessions report in — there is simply no terminal for the canvas to send you to.
+- **`gh`, authenticated — optional.** Used by manager mode (see below).
 
 ## Quick start
 
@@ -52,7 +54,7 @@ moves the home directory, `--db <file>` names another database).
 
 An existing repo is better mapped through the `visualize` skill than by hand — next section.
 
-## Onboard an existing repo
+## Map an existing repo
 
 Install the `visualize` skill once per machine, from this checkout:
 
@@ -61,42 +63,43 @@ ln -s "$PWD/skills/visualize" ~/.claude/skills/
 ```
 
 Then, from any repo, say "onboard this repo to Shape". The skill starts (or reuses) the bridge
-and web server, retargets the bridge at that repo, triggers the onboarding survey, and hands
-back the canvas URL. See [`skills/visualize/SKILL.md`](skills/visualize/SKILL.md) for what it
-does step by step, and [`docs/onboarding.md`](docs/onboarding.md) for the pipeline itself:
-a mechanical package skeleton first, then an agent survey turn that must anchor every bubble
-to real paths, then drift verification.
+and web server, retargets the bridge at that repo, and hands back the canvas URL. The map
+starts itself: the bridge reads the checkout, and on a canvas with no bubbles it seeds one
+bubble per workspace package with the imports between them, so the picture is ground truth
+before any agent has said a word. The meaning on top of it — what each part promises, the
+capabilities above them — is written by an agent through the `canvas` tool while it works in
+the repo. See [`skills/visualize/SKILL.md`](skills/visualize/SKILL.md) for the steps and
+[`docs/onboarding.md`](docs/onboarding.md) for the automatic map itself.
 
 ## Architecture
 
 ```
 browser (Vite dev :5173)
-   │  WebSocket  ws://127.0.0.1:4400/ws
+   │  WebSocket  ws://127.0.0.1:4400/ws     reads the picture; no path to an agent
    ▼
 server half   packages/bridge/src/server/
-   │  graph + revision store, steering composer, graph-discipline preamble,
-   │  drift, activity, onboarding gate
+   │  graph + revision store, drift, activity, the automatic map
    │  agent link: in-memory in local mode, ws://<host>:4400/agent when split
    ▼
 agent half    packages/bridge/src/agent/
-   │  harness detection, launcher (herdr tab | Shape's own pty), backend adapter
-   │  per harness, reality extraction, worktrees
+   │  tool detection, the project's manager tab under herdr, reality extraction,
+   │  worktrees, session discovery
    ▼
-harness  — a real interactive session in a real terminal, cwd = the worktree
+harness  — a real interactive session in a real terminal, started by you or by the
+           manager, cwd = the worktree
    omp:     omp --extension packages/link/src/omp-extension.ts
    claude:  claude --mcp-config <the link's MCP server> --settings <the link's hooks>
    │  loopback link  ws://127.0.0.1:4400/link
    └───────────────────────────────► back up to the agent half
 ```
 
-The agent half starts the harness the way a person would — a terminal in the worktree running
-the harness's own interactive command — and the harness talks back over the loopback link.
-Both integrations register exactly one tool, `canvas`, and the agent only ever mutates the
-picture through it (`upsert_node`, `remove_node`, `upsert_edge`, `remove_edge`, `set_phase`):
-the server validates each op, applies it, and broadcasts the whole document to every connected
-browser. Steering is delivered as `steer` when the harness can accept mid-turn input and a
-turn is streaming, otherwise as a fresh `prompt`, and the transcript says honestly when an
-utterance is queued for the next turn.
+Shape never starts a session and never types into one. A harness that dials the loopback link
+becomes a session of the worktree it runs in, and everything the canvas knows about it — what
+it is doing, what it just wrote — arrives over that link. Both integrations register exactly
+one tool, `canvas`, and the agent only ever mutates the picture through it (`upsert_node`,
+`remove_node`, `upsert_edge`, `remove_edge`, `set_phase`): the server validates each op,
+applies it, and broadcasts the whole document to every connected browser. Nothing travels the
+other way — there is no frame a browser can send that reaches an agent.
 
 Packages:
 
@@ -104,7 +107,7 @@ Packages:
   127.0.0.1:4400 and the SQLite graph/revision store. Also ships the `server`, `agent` and
   `login` CLIs for split mode.
 - `packages/web` — Vite + React + React Flow canvas: layer policy, layout and motion, side
-  panel, steering bar, project/worktree switcher, session pane.
+  panel, project/worktree switcher, revisions and comparison.
 - `packages/shared` — the contract both sides import: types, `applyOps` validation, the
   `canvas` tool schema, the WebSocket and link message shapes, and revision diffing.
   `packages/shared/src/index.ts` is the machine-readable form of `CONTRACTS.md` and wins on
@@ -140,40 +143,38 @@ Where state lives:
   are keyed per repo path, so a worktree keeps a canvas of its own.
 - `~/.shape/recents.json` — recently targeted projects; `~/.shape/servers.json` — tokens
   saved by `pnpm login` (mode 0600).
-- `<target>/.shape/config.json` — optional, and yours: which harness backend to use here.
-- The bridge appends `.shape/` to the target repo's `.git/info/exclude`, so a project-local
-  config never lands in a commit. Nothing else is written into the target project.
+- `~/.shape/server/projects/<key>/shape-directive.md` — one file per project saying what Shape
+  is, where this project's link is, and how to call the `canvas` tool; a session you started by
+  hand is pointed at it.
+- The bridge appends `.shape/` to the target repo's `.git/info/exclude`, so a canvas an older
+  Shape left in the repo never lands in a commit. Nothing is written into the target project.
 
 ## Integrations
 
-- **Harnesses.** `omp` and Claude Code are the two supported harnesses, each behind one
-  adapter (`packages/bridge/src/agent/backend/`). Any other detected harness gets the generic
-  adapter, which watches the session instead of talking to it.
-- **herdr — optional launcher, recommended.** When herdr is installed and its socket answers,
-  every session becomes a tab in your own terminal
-  (`packages/bridge/src/agent/launcher/herdr.ts`) and Shape is plainly a layer over a normal
-  workflow. Otherwise Shape's own pty carries the session and the browser renders it.
-  `SHAPE_LAUNCHER=herdr|pty` forces the choice; a forced `herdr` that does not answer still
-  falls back rather than leaving the agent unable to start anything.
+- **Harnesses.** `omp` and Claude Code are the two integrated harnesses: omp loads Shape's own
+  extension inside the session, Claude Code is wired from the outside with the link's MCP
+  server and its hooks. Any other session reports in through the link's one-shot CLI. Nothing
+  is asked of a harness beyond dialing the loopback link — Shape never starts one.
+- **herdr — optional, recommended.** When herdr is installed and its socket answers, Shape
+  finds or opens the project's manager tab (`packages/bridge/src/agent/manager.ts`), so every
+  builder started from there is handed the link, and "go to the terminal" raises the tab a
+  session is running in (`packages/bridge/src/agent/launcher/herdr.ts`). Without herdr,
+  sessions still report in from wherever you started them; the canvas simply has no terminal to
+  send you to.
 - **The manager skill — optional adapter**, see below.
-- **Dictation — nothing vendor-specific.** Selecting a bubble focuses the steering field;
-  anything that types text there commits on Enter. Wispr Flow works, so does any other
-  dictation tool, so does a keyboard. There is no dictation dependency in the code.
 
 ## Manager mode
 
-Shape is meant to hand work off the canvas to the [manager
-skill](https://github.com/orrgal1/manager-skill), which uses GitHub issues as the board and
-runs one builder session per issue, each in its own herdr tab and its own git worktree: a
-bubble you point at becomes an issue, and that issue becomes a session you can watch. It needs
-`gh` installed and authenticated. The coupling is real work in progress, not a shipped
-feature: finding or opening the manager tab when a project opens
-([#3](https://github.com/orrgal1/shape/issues/3)), making in-flight builders and an existing
-manager shape-aware ([#5](https://github.com/orrgal1/shape/issues/5)), dispatching canvas work
-through the manager instead of Shape's own harness
-([#6](https://github.com/orrgal1/shape/issues/6)) and the manager panel on the canvas — board,
-quota, priority and cap ([#8](https://github.com/orrgal1/shape/issues/8)) are all still open.
-Until they land, run the manager skill yourself and keep Shape as the picture beside it.
+Shape is the picture beside the [manager skill](https://github.com/orrgal1/manager-skill),
+which uses GitHub issues as the board and runs one builder session per issue, each in its own
+herdr tab and its own git worktree. Every builder it starts is Shape-aware, so an issue you
+dispatch in the terminal shows up on the canvas as a session working in that variation. It
+needs `gh` installed and authenticated. Shape finds or opens the manager tab when a project
+opens ([#3](https://github.com/orrgal1/shape/issues/3), landed); making sessions that were
+already running Shape-aware ([#5](https://github.com/orrgal1/shape/issues/5)) and the manager
+panel on the canvas — board, quota, priority and cap
+([#8](https://github.com/orrgal1/shape/issues/8)) — are still open. Work is dispatched in the
+manager, never from the canvas.
 
 ## Split and on-prem modes
 
@@ -190,12 +191,12 @@ On-prem — anything but loopback needs tokens:
 pnpm server -- --host 0.0.0.0 --port 4400 --token-file tokens.json --data-dir /var/lib/shape
 #   tokens.json: [{ "token": "<16+ chars>", "tenant": "acme" }, …]
 pnpm login -- ws://<server-host>:4400 <token>                # stores it in ~/.shape/servers.json (0600)
-pnpm agent -- --server ws://<server-host>:4400 --cwd <repo> [--allow-terminal]
+pnpm agent -- --server ws://<server-host>:4400 --cwd <repo>
 ```
 
 Browsers open `http://<web-host>:5173/?server=<server-host>:4400&token=<token>` once; the
-client keeps both in localStorage and strips them from the address bar. The canvas turns
-read-only ("agent offline") while a project's agent is away and resumes when it re-attaches.
+client keeps both in localStorage and strips them from the address bar. A project whose agent
+is away says "agent offline" and stops updating until it re-attaches.
 `CONTRACTS.md` has the wire; the smoke tests that exercise these modes are listed in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
@@ -203,44 +204,41 @@ read-only ("agent offline") while a project's agent is away and resumes when it 
 
 Early, and dogfooded daily. The v1 slice works end to end:
 
-- Greenfield: speak an idea → the agent decomposes it into bubbles → it builds, advancing
-  each bubble's phase (`idea → concept → component → building → built | failed`) as it goes.
-- Product first: the first words about an empty canvas become a bubble immediately, and the
-  agent spends that turn naming the product and 3 to 5 promises under it, then stops for you
-  to correct the picture before anything is built. Switchable off in the empty state.
-- Onboarding an existing repo: mechanical package skeleton, then an agent survey turn anchored
-  to real paths, then drift verification.
+- Greenfield: as an agent decomposes an idea into bubbles and builds them, each bubble's phase
+  advances (`idea → concept → component → building → built | failed`) on the canvas while it
+  happens.
+- Mapping an existing repo: the mechanical package skeleton seeds an empty canvas on its own,
+  the agent working in the repo gives the bubbles their meaning, and drift verifies the result.
 - Single-layer drill-down as the default view: one layer at a time, drill chip and breadcrumb,
   relations lifted to the nearest visible ancestors, liveness and drift bubbled up.
 - Git worktrees as architecture variations, each with its own canvas state.
 - Revision snapshots with compare: every accepted change bumps a revision, and any two
   revisions can be diffed.
-- Start a new project from the canvas: folder + git + optional GitHub (public/private) in
-  one form.
-- Watch it work: the Canvas | Session switch (or Ctrl + backtick) shows the agent's session as
-  it runs — what you asked, what it is saying, and one line per tool call. It is read-only,
-  and a tab that opens it late is redrawn from the session so far. A harness with its own
-  terminal shows that terminal instead.
+- Sessions per variation: every session that reports in says what it is doing — its transcript,
+  one line per tool call, the sentence being written right now — and under herdr "go to the
+  terminal" takes you to the tab it runs in.
 
 Known rough edges: drift UX has only been exercised on synthetic drift, the reality extractor
-covers pnpm/TypeScript monorepos (other stacks degrade to a pure agent survey), empty-state
-copy can overlap reality ghosts, and manager mode is partly wired (above).
+covers pnpm/TypeScript monorepos (on other stacks the canvas starts empty and waits for an
+agent to draw it), empty-state copy can overlap reality ghosts, and manager mode is partly
+wired (above).
 
 ## Docs
 
 - [`CONTRACTS.md`](CONTRACTS.md) — the authoritative cross-package contracts: topology, graph
   document, `canvas` tool, WebSocket and link protocols, drift, revisions.
   `packages/shared/src/index.ts` is its machine-readable form and wins on disagreement.
-- [`docs/vision.md`](docs/vision.md) — the design document: what this is for and why it is
-  shaped this way.
-- [`docs/onboarding.md`](docs/onboarding.md) — the brownfield pipeline: mechanical skeleton,
-  survey turn, verification.
-- [`docs/research/`](docs/research/) — the background reading behind the canvas stack, the
-  voice/canvas prior art, and dictation integration.
+- [`docs/vision.md`](docs/vision.md) — the original design document: what this is for and why
+  it is shaped this way. Written when the canvas was also meant to be the way you direct
+  agents; the header says which half of it Shape kept.
+- [`docs/onboarding.md`](docs/onboarding.md) — the automatic map of an existing repo:
+  reality extraction, the mechanical skeleton, verification.
+- [`docs/research/`](docs/research/) — dated research briefs behind the canvas stack and the
+  voice/canvas prior art, kept as the reading that led here, not as a description of Shape.
 - [`docs/notes/`](docs/notes/) — historical session and idea-funnel notes, kept for
   archaeology and not maintained.
-- [`skills/visualize/SKILL.md`](skills/visualize/SKILL.md) — the onboarding skill, step by
-  step.
+- [`skills/visualize/SKILL.md`](skills/visualize/SKILL.md) — the skill that puts a repo on the
+  canvas, step by step.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to run the checks and open a change.
 - [`SECURITY.md`](SECURITY.md) — how to report a vulnerability.
 - [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — the ground rules.

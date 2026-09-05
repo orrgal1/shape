@@ -1,7 +1,8 @@
 # Security policy
 
-Shape drives real coding agents in real terminals against real repositories, so a bug in it can
-be a bug in your machine. Reports are welcome and taken seriously. See the
+Shape watches real coding agents working in real terminals on real repositories, and keeps what
+they report, so a bug in it can be a bug in your machine. Reports are welcome and taken
+seriously. See the
 [README](README.md) for what the components below are.
 
 ## Reporting a vulnerability
@@ -36,7 +37,7 @@ The parts of Shape that face something other than their own process:
   in `packages/shared/src/index.ts`). Browsers connect on `/ws`.
 - **Auth and bind guards on the standalone server.** A non-loopback `--host` without
   `--token-file` is a startup failure by design — an unauthenticated server on a routable
-  address would hand every graph and every steering channel to the network
+  address would hand every graph and every transcript to the network
   (`packages/bridge/src/server-cli.ts`, `isLoopbackHost` in `packages/bridge/src/server/auth.ts`).
   The token file is `[{ token, tenant }, …]`; tokens shorter than 16 characters are rejected at
   startup, a malformed file never half-loads, and token values are kept out of logs
@@ -44,7 +45,7 @@ The parts of Shape that face something other than their own process:
   cannot be claimed by a frame; it selects the room key, the project list and what
   `select_project` can reach (`packages/bridge/src/server/server.ts`,
   `packages/bridge/src/wsserver.ts`). A refused upgrade is a 401 before any socket exists.
-  Anything that leaks a graph, a transcript or a steer across tenants, or that gets a socket
+  Anything that leaks a graph or a transcript across tenants, or that gets a socket
   without a valid token, is in scope.
 - **The agent link protocol on `/agent`.** How a remote agent joins a server and claims a
   project (`AGENT_WS_PATH` in `packages/shared/src/index.ts`,
@@ -53,11 +54,14 @@ The parts of Shape that face something other than their own process:
   `parseServerToAgentMsg` in `packages/bridge/src/linkframes.ts`, and `parseClientMsg` in
   `packages/bridge/src/server/ws.ts` for browser frames. A frame that gets past a validator is
   in scope.
-- **Terminal exposure.** A remote agent's terminal pane is a shell on the machine the agent runs
-  on, so it is off unless the operator passes `--allow-terminal`; without it the capability is
-  reported as `terminal: "none"` and pty frames are dropped
-  (`packages/bridge/src/agent-cli.ts`, `packages/bridge/src/agent/runtime.ts`). Reaching a shell
-  on an agent started without that flag is in scope.
+- **Terminal exposure.** Nothing in the browser reaches a session: there is no terminal in the
+  client, no way to type into an agent, and no frame that starts one. The one action that
+  touches a terminal at all is `focus_terminal`, which asks the agent to bring the herdr tab a
+  session runs in to the front of the machine the AGENT runs on — a tab switch and a window
+  raise, nothing typed (`packages/bridge/src/agent/launcher/herdr.ts`; `SHAPE_TERMINAL_APP`
+  names the bundle to raise, `SHAPE_OPEN` replaces the `open` binary). An agent with no herdr
+  reports `terminal: "none"` and the canvas does not offer the action at all. Reaching a shell, or
+  running anything beyond raising a window that already exists, is in scope.
 - **The loopback link on `/link`.** What the harness-side pieces speak to the agent, validated by
   `parseLinkMsg` (`packages/bridge/src/agent/linkparse.ts`). It is loopback only.
 - **The link MCP server** (`packages/link/src/mcp.ts`) — a stdio process the harness launches,
@@ -69,9 +73,7 @@ The parts of Shape that face something other than their own process:
   partial write. Inside the target repository the canvas writes only `.shape/`, and adds that one
   line to the repository's `.git/info/exclude` so it stays out of every branch
   (`ensureGitExclude` in `packages/bridge/src/agent/worktrees.ts`). A canvas op that writes
-  anywhere else in the target, or escapes `.shape/`, is in scope. (The separate "new project"
-  flow, `packages/bridge/src/agent/newproject.ts`, does scaffold and commit a repository — but
-  only one the user asked it to create.)
+  anywhere else in the target, or escapes `.shape/`, is in scope.
 - **Stored state.** Graphs, revisions, the project registry and audit lines live in one SQLite
   database — `~/.shape/shape.db` locally, `<data-dir>/shape.db` for a server
   (`packages/bridge/src/server/sqlite.ts`). `shape login` writes the agent's server tokens to
@@ -82,14 +84,15 @@ The parts of Shape that face something other than their own process:
 ## Out of scope
 
 - Vulnerabilities in the harnesses themselves — [omp](https://github.com/can1357/oh-my-pi) or
-  Claude Code — or in herdr. Report those to their projects. Shape launching a harness that then
-  does something unsafe on its own is their bug, not Shape's; Shape handing a harness something
-  it should not have is Shape's.
-- Vulnerabilities in a user's own project. Shape points an agent at your repository and the agent
-  writes code there; what that code does is not Shape's security boundary.
-- "The agent can run commands." That is what a coding agent is. Shape's boundary is who can
-  reach the agent, not what the agent is capable of once you have asked it to work.
+  Claude Code — or in herdr. Report those to their projects. Shape never starts a harness; a
+  session doing something unsafe on its own is its own bug, and Shape handing a harness
+  something it should not have is Shape's.
+- Vulnerabilities in a user's own project. Shape watches an agent work in your repository and
+  the agent writes code there; what that code does is not Shape's security boundary.
+- "The agent can run commands." That is what a coding agent is. Shape's boundary is what it
+  serves to a browser and what it accepts from a link, not what an agent is capable of in a
+  terminal you started it in.
 - A loopback-bound bridge being reachable by other processes on the same machine. Local mode
-  trusts the local user, which is the same trust model as the harness it drives.
+  trusts the local user, which is the same trust model as the harness it watches.
 - Missing hardening with no reachable impact — a header, a rate limit, a dependency advisory that
   does not apply to a code path Shape executes. Say what breaks and it becomes interesting.

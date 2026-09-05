@@ -358,10 +358,10 @@ function remindersGraph(): GraphDoc {
 const PLAYGROUND_BACKEND: BackendInfo = {
   id: "omp",
   label: "omp",
-  capabilities: { steerMidTurn: true, hostTool: true, events: "native", resume: true, terminal: "external" },
+  capabilities: { steerMidTurn: false, hostTool: true, events: "native", resume: false, terminal: "external" },
 };
 
-/** what the playground machine has: herdr to launch with, omp to launch */
+/** what the playground machine has: herdr, and the omp session reporting in through it */
 const PLAYGROUND_TOOLS: ProjectTools = {
   launcher: "herdr",
   launchers: [{ id: "herdr", label: "herdr", path: "/usr/local/bin/herdr", version: "0.9.2" }],
@@ -372,9 +372,9 @@ const PLAYGROUND_MODEL = { provider: "anthropic", id: "claude-fable-5" };
 
 /**
  * The project's real worktrees: `main` plus the `feature/reminders` checkout
- * that adds packages/scheduler. Both are running a harness, because the merged
- * canvas, the target chip and the two-line "now" pill are only true to life
- * with work happening in two variations at once.
+ * that adds packages/scheduler. Both have a harness reporting in, because the
+ * merged canvas, the variations pill and the two-line "now" pill are only true
+ * to life with work happening in two variations at once.
  */
 const PLAYGROUND_SESSION: SessionInfo = {
   cwd: PLAYGROUND_ROOT,
@@ -398,7 +398,6 @@ const PLAYGROUND_SESSION: SessionInfo = {
     },
   ],
   agentConnected: true,
-  canPublish: true,
   directivePath: null,
   // this fixture runs on herdr, so it carries the manager the bridge would have
   // opened there — the header pill's populated state is reachable in the playground
@@ -445,24 +444,6 @@ export function startPlaygroundMock(): () => void {
     // this fixture is about layout, not adoption: nothing to attach to
     sessions: [],
     revisions: {},
-    // where the last turn left each variation: the root ends on a decision, the
-    // reminders branch on choices alone
-    nexts: {
-      [PLAYGROUND_ROOT]: {
-        summary: "Invoices go out and get paid, and the reminder schedule is the piece still open.",
-        choices: [
-          { label: "Set the schedule", say: "Set the reminder schedule to three days before a bill is due." },
-          { label: "Show me the emails", say: "Show me exactly what a reminder email says before it goes out." },
-        ],
-        question: "How long after a due date should chasing stop?",
-      },
-      [PLAYGROUND_REMINDERS]: {
-        summary: "Reminders send on time on this branch, with nothing yet proving they keep sending.",
-        choices: [{ label: "Add the checks", say: "Add checks that prove reminders keep going out on time." }],
-        question: null,
-      },
-    },
-    autonomous: { [PLAYGROUND_ROOT]: false, [PLAYGROUND_REMINDERS]: false },
     tools: PLAYGROUND_TOOLS,
   });
   // after `hello`, which would otherwise report a live bridge

@@ -2,7 +2,7 @@
   "name": "@shape/bridge",
   "private": true,
   "version": "0.0.1",
-  "description": "Shape bridge: harness adapters, the canvas host tool, graph and revision store, WebSocket server",
+  "description": "Shape bridge: the canvas host tool, session observation, reality extraction, graph and revision store, WebSocket server",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -26,7 +26,6 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@lydell/node-pty": "1.2.0-beta.15",
     "@orrgal1/manager-skill": "github:orrgal1/manager-skill#4a2f29ef854b58c6a99422bb30ecf698875fd5fd",
     "typescript": "^5.7.0",
     "ws": "^8.18.0"

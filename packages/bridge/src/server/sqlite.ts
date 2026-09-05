@@ -115,7 +115,7 @@ class SqliteStorage implements Storage {
   readonly #moveAuditLine: StatementSync;
   readonly #countGraphs: StatementSync;
   readonly #dropProject: StatementSync;
-  /** one broken database is reported once, not per steer */
+  /** one broken database is reported once, not per audit line */
   #auditFailed = false;
 
   constructor(file: string) {
@@ -412,7 +412,7 @@ ALTER TABLE projects_v2 RENAME TO projects;
       this.#putAudit.run(tenant, key, worktree, entry.at, JSON.stringify(entry));
     } catch (err) {
       // the record is best effort: whatever is wrong with the database, the
-      // user still gets to steer, and the operator is told once
+      // canvas still gets its bubbles, and the operator is told once
       if (!this.#auditFailed) {
         this.#auditFailed = true;
         console.error(`[bridge] audit write failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -429,8 +429,8 @@ ALTER TABLE projects_v2 RENAME TO projects;
    *
    * Whatever sits under the new key is dropped first (its graph is empty by the
    * time we get here, and its revisions are revisions of that empty canvas), but
-   * its AUDIT lines stay: they record steering that really went through this
-   * project and are not the canvas's to overwrite. The moved audit lines are
+   * its AUDIT lines stay: they record what really happened to this project's
+   * canvases and are not the canvas's to overwrite. The moved audit lines are
    * re-stamped with the new project id so an operator reading the record is not
    * shown a key nothing answers to any more.
    */

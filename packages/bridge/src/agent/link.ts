@@ -1,13 +1,13 @@
 /**
  * The loopback link endpoint (`ws://127.0.0.1:<port>/link`): harness-side
  * processes — the MCP server (`packages/link/src/mcp.ts`), a Claude Code hook
- * (`packages/link/src/hook.ts`), any adapter sidecar — talking to the agent
- * runtime that owns their harness.
+ * (`packages/link/src/hook.ts`), the omp extension — talking to the agent
+ * runtime that watches their worktree.
  *
  * It terminates on the AGENT half by design: those callers are children of the
- * harness, they hold no server credentials, and everything they say has to be
- * indistinguishable from what the native adapter reports (`ExternalIo` feeds
- * the runtime's own `BackendEvents`). A `canvas_call` is answered on the socket
+ * harness, they hold no server credentials, and everything they say is how
+ * Shape learns a session exists at all (`ExternalIo` feeds the runtime's
+ * per-worktree `AgentEvents` sink). A `canvas_call` is answered on the socket
  * that asked and nowhere else; the graph broadcast is the part everyone sees.
  *
  * Trusted exactly as much as the browser hub is: loopback bind plus per-frame
@@ -74,9 +74,9 @@ export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptio
     /**
      * The cwd of the session this socket greeted for, if any. A harness that
      * drops its socket without saying goodbye (killed, crashed, the terminal
-     * closed) has still ended its session, and the adapter has to hear about
-     * it — so a close is replayed as the `bye` it never sent. Adapters treat a
-     * second goodbye as no news.
+     * closed) has still ended its session, and the canvas has to stop showing
+     * it — so a close is replayed as the `bye` it never sent. A second goodbye
+     * for a session already dropped is no news to the runtime.
      */
     let greeted: string | null = null;
     // no hello here: a link client is not a browser, it only ever gets answers

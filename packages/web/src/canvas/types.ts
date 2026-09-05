@@ -48,8 +48,8 @@ export interface BubbleData extends Record<string, unknown> {
   isSelected: boolean;
   /**
    * The fold: one bubble standing for the parts a layer had no room for. It has
-   * no document identity, so it is not a steering referent, and its drill
-   * affordance says "open" rather than counting children.
+   * no document identity, so it cannot be selected, and its drill affordance
+   * says "open" rather than counting children.
    */
   isMore: boolean;
   /** direct children, i.e. what drilling in reveals */
@@ -153,7 +153,7 @@ export type StripNodeType = Node<StripData, "strip">;
 export type CanvasNode = BubbleNodeType | GhostNodeType | StripNodeType;
 
 export interface RelData extends Record<string, unknown> {
-  /** null for reality edges: derived, not authored, and not steerable */
+  /** null for reality edges: derived from the code, not authored on the canvas */
   kind: EdgeKind | null;
   label: string;
   /**
@@ -172,8 +172,8 @@ export interface RelData extends Record<string, unknown> {
   geom: EdgeGeom;
   /**
    * The document relation this line stands for, or null when several relations
-   * collapse into it. Null means the line is not a legitimate steering referent
-   * and must not offer to be one.
+   * collapse into it. Null means the line addresses nothing in the document and
+   * must not offer to be selected.
    */
   edgeId: string | null;
   /** document relations collapsed into this line; 1 unless it is a bundle */

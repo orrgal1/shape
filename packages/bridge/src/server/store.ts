@@ -13,18 +13,10 @@ import type {
   GraphEdge,
   IntentNode,
   LinkGap,
-  Next,
   OpRejection,
   RealityLayer,
 } from "../../../shared/src/index.ts";
 import type { Storage } from "./storage.ts";
-
-/** receipt a gate supplies for a vetoed op; subject.path is op-relative
- *  (e.g. "/node/codeRefs/0") — the store absolutizes it to /ops/<i>/... */
-export type GateVeto = Omit<OpRejection, "index">;
-
-/** extra per-op veto layered on top of shared validation; null = accept */
-export type OpGate = (op: CanvasOp) => GateVeto | null;
 
 export interface CanvasToolOutcome {
   /** text content for host_tool_result */
@@ -41,12 +33,6 @@ export interface CanvasToolOutcome {
    */
   touched: string[];
   /**
-   * The card this call says the turn ends on, or null when it carried none (or
-   * carried a malformed one, which is a receipt rather than a card). Ephemeral:
-   * the room holds it until something is said, and the graph never sees it.
-   */
-  next: Next | null;
-  /**
    * Bubbles this call left unconnected across the layers (user decision
    * 2026-09-04: connection is the default). Same receipt shape as a rejection
    * and reported on the same text, but `severity: "warning"` — the op landed,
@@ -58,7 +44,8 @@ export interface CanvasToolOutcome {
 /**
  * Boundary validator: the arguments came off the wire from the model. `next` is
  * passed through unread — it is checked after the ops have applied, so a
- * malformed card costs the call its card and never its canvas work.
+ * malformed card costs the call nothing but its receipt and never its canvas
+ * work.
  */
 function parseCanvasArgs(raw: unknown): { ops: CanvasOp[]; note?: string; next?: unknown } | string {
   if (raw === null || typeof raw !== "object") return "arguments must be an object with an `ops` array";
@@ -228,8 +215,8 @@ export class GraphStore {
     if ("edges" in stored && Array.isArray(stored.edges)) doc.edges = stored.edges as GraphEdge[];
     if ("reality" in stored && stored.reality !== null && typeof stored.reality === "object") {
       // a row written before parts, infrastructure or verification existed has
-      // none of those lists, and every reader (the survey prompt, drift, the
-      // client) expects arrays
+      // none of those lists, and every reader (the mechanical skeleton, drift,
+      // the client) expects arrays
       const stale = stored.reality as RealityLayer;
       doc.reality = {
         ...stale,
@@ -268,17 +255,11 @@ export class GraphStore {
 
   /**
    * Apply a `canvas` host tool call. Caller broadcasts/persists on `changed`.
-   * `gate` is an extra per-op veto (onboarding validation mode); its reasons are
-   * reported at the op's original index alongside shared validation rejections.
    * `linkWarnings` is the connection-is-the-default half: on by default, and
-   * turned off for the product-first turn, where the build side the links point
-   * at is exactly what the agent is not allowed to draw yet.
+   * turned off for the mechanical skeleton the server seeds by itself, which is
+   * one flat pile of parts with nothing to be connected to yet.
    */
-  applyCanvasCall(
-    rawArgs: unknown,
-    gate: OpGate | null = null,
-    opts: { linkWarnings?: boolean } = {},
-  ): CanvasToolOutcome {
+  applyCanvasCall(rawArgs: unknown, opts: { linkWarnings?: boolean } = {}): CanvasToolOutcome {
     const parsed = parseCanvasArgs(rawArgs);
     if (typeof parsed === "string") {
       const receipt: OpRejection = {
@@ -296,31 +277,13 @@ export class GraphStore {
         changed: false,
         transcript: `canvas: rejected (${parsed})`,
         touched: [],
-        next: null,
         warnings: [],
       };
     }
 
-    const rejections: OpRejection[] = [];
-    const admitted: CanvasOp[] = [];
-    const originalIndex: number[] = [];
-    parsed.ops.forEach((op, index) => {
-      const veto = gate === null ? null : gate(op);
-      if (veto !== null) {
-        rejections.push({ ...veto, index, subject: { ...veto.subject, path: `/ops/${index}${veto.subject.path}` } });
-        return;
-      }
-      admitted.push(op);
-      originalIndex.push(index);
-    });
-
     const before = this.doc.rev;
-    const result = applyOps(this.doc, admitted);
-    for (const r of result.rejections) {
-      const index = originalIndex[r.index] ?? r.index;
-      rejections.push({ ...r, index, subject: { ...r.subject, path: r.subject.path.replace(`/ops/${r.index}`, `/ops/${index}`) } });
-    }
-    rejections.sort((a, b) => a.index - b.index);
+    const result = applyOps(this.doc, parsed.ops);
+    const rejections = [...result.rejections];
 
     // Which bubbles this call actually moved, and the op that moved each: an op
     // the validator refused never touched anything, and its index is the one
@@ -329,13 +292,12 @@ export class GraphStore {
     const refused = new Set(result.rejections.map((r) => r.index));
     const touched: string[] = [];
     const touchedAt = new Map<string, number>();
-    admitted.forEach((op, index) => {
+    parsed.ops.forEach((op, index) => {
       if (refused.has(index)) return;
-      const at = originalIndex[index] ?? index;
       const remember = (id: unknown): void => {
         if (typeof id !== "string" || id === "") return;
         touched.push(id);
-        if (!touchedAt.has(id)) touchedAt.set(id, at);
+        if (!touchedAt.has(id)) touchedAt.set(id, index);
       };
       if (op?.op === "upsert_node") {
         remember(op.node?.id);
@@ -344,10 +306,12 @@ export class GraphStore {
       if (op?.op === "set_phase") remember(op.id);
     });
 
-    // The card the turn ends on, checked last: it is not an op, so a malformed
-    // one is reported at no op index (like `canvas/bad-args`) and the ops that
-    // landed still stand. The graph never sees it either way.
-    let next: Next | null = null;
+    // The card the turn ends on, checked last and then dropped: `next` is part
+    // of the tool contract, so a session on a harness that still sends one is
+    // not made to change its calls, and a malformed card is still worth a
+    // receipt — but Shape is a picture now, and nothing here or above reads a
+    // card. It is not an op either, so the receipt names no op index (like
+    // `canvas/bad-args`) and the ops that landed still stand.
     if (parsed.next !== undefined) {
       const checked = parseNext(parsed.next);
       if (typeof checked === "string") {
@@ -360,11 +324,9 @@ export class GraphStore {
           evidence: { next: parsed.next },
           supportedFixes: [
             "send next as { summary: one sentence <= 200 chars, choices: up to 4 { label <= 40 chars, say }, question: string | null }",
-            "leave `next` off this call and send it on the last canvas call of the turn",
+            "leave `next` off this call",
           ],
         });
-      } else {
-        next = checked;
       }
     }
 
@@ -388,7 +350,6 @@ export class GraphStore {
       changed: this.doc.rev !== before,
       transcript: `canvas: ${summary}`,
       touched,
-      next,
       warnings,
     };
   }
@@ -400,10 +361,10 @@ export class GraphStore {
   }
 
   /**
-   * This canvas was just mapped against the code: the survey or catch-up prompt
-   * has been DELIVERED. A revision like any other, so the mark is persisted and
-   * broadcast with the graph it belongs to — the automatic trigger reads it back
-   * to decide whether this HEAD has already been caught up (server/room.ts).
+   * This canvas was just mapped against the code: the mechanical skeleton has
+   * landed on it. A revision like any other, so the mark is persisted and
+   * broadcast with the graph it belongs to — the room reads it back to decide
+   * whether this HEAD has already been drawn (server/room.ts).
    */
   setSurveyed(surveyed: { head: string | null; at: string }): void {
     this.doc.surveyed = surveyed;

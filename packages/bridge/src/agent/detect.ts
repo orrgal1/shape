@@ -1,26 +1,27 @@
 /**
- * What is installed where this agent runs: the launchers Shape can start a
- * real terminal session with, and the coding harnesses it can start in one.
+ * What is installed where this agent runs: the terminal multiplexer Shape can
+ * see the user's sessions in, and the coding harnesses present on this
+ * machine.
  *
- * Shape does not presume to be the harness. It looks at PATH, asks each tool
- * for its version, and offers the user what is actually there — so the
- * "start a session" card lists the truth about this machine rather than a
- * hardcoded assumption that omp exists.
+ * Shape starts none of them. This is a description of the machine, which the
+ * canvas shows so a person can tell "no session is reporting in" from "there
+ * is nothing here to report in" — and so the manager pass knows whether it
+ * has a herdr to open its tab in.
  *
  * Cheap on purpose: PATH is walked in process (no `which` subprocess), and
  * only the tools that were FOUND are asked for a version, each with a 3 s
  * ceiling. Nothing here throws; a tool that cannot be classified is simply not
- * offered.
+ * reported.
  */
 
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import { delimiter, isAbsolute, join } from "node:path";
-import type { Harness, HarnessId, ToolInfo } from "../../../shared/src/index.ts";
+import type { HarnessId, ToolInfo } from "../../../shared/src/index.ts";
 
-/** every harness Shape can launch, in the order the picker offers them */
-export const HARNESS_IDS: readonly HarnessId[] = [
+/** every harness Shape knows how to recognize, in the order it lists them */
+const HARNESS_IDS: readonly HarnessId[] = [
   "omp",
   "claude",
   "codex",
@@ -32,8 +33,8 @@ export const HARNESS_IDS: readonly HarnessId[] = [
 ];
 
 /**
- * Plain English, as each tool calls itself. This is what a person reads in the
- * picker, so it is the product's name and never the executable.
+ * Plain English, as each tool calls itself. This is what a person reads on the
+ * canvas, so it is the product's name and never the executable.
  */
 const HARNESS_LABELS: Record<HarnessId, string> = {
   omp: "oh-my-pi",
@@ -46,7 +47,7 @@ const HARNESS_LABELS: Record<HarnessId, string> = {
   copilot: "GitHub Copilot CLI",
 };
 
-/** the launchers Shape knows how to drive; only herdr for now, and its own pty */
+/** the terminal multiplexers Shape can talk to; only herdr for now */
 const LAUNCHER_LABELS: Record<string, string> = { herdr: "herdr" };
 
 const LAUNCHER_IDS: readonly string[] = Object.keys(LAUNCHER_LABELS);
@@ -56,21 +57,6 @@ const VERSION_TIMEOUT_MS = 3_000;
 
 /** what `--version` may print before we stop believing it is a version */
 const MAX_VERSION_LENGTH = 60;
-
-/**
- * Discovery classifies RUNNING processes with a smaller, older union than the
- * launchable ids (`Harness` vs `HarnessId` in shared): it spells Cursor's CLI
- * "cursor", the executable is `cursor-agent`. Everything else is spelled the
- * same in both.
- */
-export function harnessIdFor(harness: Harness): HarnessId {
-  return harness === "cursor" ? "cursor-agent" : harness;
-}
-
-/** Is `id` one of the harnesses Shape can launch? */
-export function isHarnessId(id: string): id is HarnessId {
-  return HARNESS_IDS.includes(id as HarnessId);
-}
 
 /**
  * The first executable named `name` on PATH. Absolute names are honoured as
@@ -163,25 +149,11 @@ export interface DetectedTools {
   harnesses: ToolInfo[];
 }
 
-/** Everything Shape could start here, launchers and harnesses, in one pass. */
+/** Everything installed here, multiplexer and harnesses, in one pass. */
 export async function detectTools(): Promise<DetectedTools> {
   const [launchers, harnesses] = await Promise.all([
     forced(process.env.SHAPE_FORCE_LAUNCHERS, LAUNCHER_LABELS) ?? detect(LAUNCHER_IDS, LAUNCHER_LABELS),
     forced(process.env.SHAPE_FORCE_HARNESSES, HARNESS_LABELS) ?? detect(HARNESS_IDS, HARNESS_LABELS),
   ]);
   return { launchers, harnesses };
-}
-
-/** The harnesses Shape has an adapter for, out of what was detected. */
-export function launchableHarnesses(tools: DetectedTools): HarnessId[] {
-  const ids: HarnessId[] = [];
-  for (const tool of tools.harnesses) {
-    if (isHarnessId(tool.id)) ids.push(tool.id);
-  }
-  return ids;
-}
-
-/** What a detected harness is called in plain English; the id when unknown. */
-export function harnessLabel(id: string): string {
-  return HARNESS_LABELS[id as HarnessId] ?? id;
 }

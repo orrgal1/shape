@@ -1,39 +1,44 @@
 /**
- * The agent half of Shape: everything that needs a harness, the target repo's
- * filesystem, git, `ps` or a tty. It owns the harness lifecycle, the reality
- * extraction, worktrees/session discovery, the terminal panes and the loopback
- * link; it owns no canvas state at all.
+ * The agent half of Shape: everything that needs the target repo's
+ * filesystem, git, `ps` or the user's terminal. It watches the sessions
+ * running in the repo's worktrees, extracts the reality layer, lists
+ * worktrees and discoverable sessions, and terminates the loopback link; it
+ * owns no canvas state at all.
  *
  * It talks to a Shape server over one `AgentEnd` (`transport.ts`) in Link v2
  * frames: `attach` first, then events and answers to the server's requests.
  * In local mode the other end is a `ProjectRoom` in this same process, which
  * is why every stderr line here still says `[bridge]`.
  *
- * ONE AGENT, ONE REPO, N HARNESSES. All the worktrees of a repo are one
- * project (one key, one canvas), and Shape runs a harness in each worktree the
- * user opens — `#harnesses`, keyed by worktree id (the realpath of its
+ * SHAPE STARTS NOTHING. A session appears because something inside a worktree
+ * of this repo spoke on the loopback link — the omp extension greeting, a
+ * Claude Code hook firing, an MCP sidecar calling the canvas — and it
+ * disappears when that session says goodbye. There is no way in from the
+ * browser: nothing here launches a harness, types at one, aborts one or
+ * changes how it approves its own work.
+ *
+ * ONE AGENT, ONE REPO, N WORKTREES. All the worktrees of a repo are one
+ * project (one key, one canvas), and each of them may have a session
+ * reporting in — `#sessions`, keyed by worktree id (the realpath of its
  * directory). Everything that is about one variation is stamped with that id
  * on the way out and routed by it on the way in: events, canvas calls,
- * deliveries, reality, the terminal pane. `switch` only ever means "another
- * repo"; a path inside this one opens a variation instead.
+ * reality. `switch` only ever means "another repo"; a path inside this one is
+ * already on the canvas, so it only refreshes the worktree list.
  *
- * Three rules shape the code:
- * - ONE `BackendEvents` sink per harness, for that harness's whole life. The
- *   native adapter and the loopback link (hooks, MCP, sidecars) must land in
- *   the same place, or a hook-driven harness would lose its transcript and
+ * Two rules shape the code:
+ * - ONE `AgentEvents` sink per worktree, for as long as a session reports in
+ *   from it. Hooks, the MCP sidecar and the harness's own extension must land
+ *   in the same place, or a hook-driven session would lose its transcript and
  *   activity — and they must land in the sink of the worktree they came from,
  *   which is why link callers report their cwd.
  * - Outbound frames queue until the server has answered `attached` for the
  *   current attach. Claude Code fires SessionStart within a second of coming
  *   up, well before the room exists; those frames are not allowed to vanish.
- * - Delivery, open/close and retarget are one serial chain: two prompts racing
- *   an idle session, or a retarget landing mid-delivery, are the bugs this
- *   prevents.
  */
 
 import { execFile, type ChildProcess } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { readdir, realpath, stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { LINK_WS_PATH } from "../../../shared/src/index.ts";
@@ -41,7 +46,6 @@ import type {
   AgentState,
   BackendInfo,
   DiscoveredSession,
-  HarnessId,
   ManagerHandle,
   RealityLayer,
   WorktreeInfo,
@@ -54,20 +58,16 @@ import type {
 } from "../../../shared/src/link.ts";
 import type { AgentEnd } from "../transport.ts";
 import type { SocketServer } from "../wsserver.ts";
-import { createBackend, loadShapeConfig, rememberBackend, resolveBackend } from "./backend/index.ts";
-import type { Backend, BackendEvents } from "./backend/types.ts";
-import { harnessIdFor, launchableHarnesses, detectTools, type DetectedTools } from "./detect.ts";
+import { detectTools, type DetectedTools } from "./detect.ts";
 import { LINK_CLI, directivePath, renderDirective, writeDirective } from "./directive.ts";
 import { discoverSessions } from "./discover.ts";
-import type { LinkTarget } from "./external.ts";
+import type { AgentEvents, LinkHello, LinkTarget } from "./external.ts";
+import type { HerdrLauncher } from "./launcher/herdr.ts";
 import { chooseLauncher } from "./launcher/index.ts";
-import type { Launched, Launcher } from "./launcher/types.ts";
 import { mountLoopbackLink, type LoopbackLink } from "./link.ts";
 import { attachManager } from "./manager.ts";
-import { createProject, probeGitHub, type GithubRequest } from "./newproject.ts";
-import { SKIP_DIRS, hasSourceCode, synthesizeSkeleton } from "./onboarding-fs.ts";
-import { PtyManager, isPtyMsg } from "./pty.ts";
-import { extractReality, gitFileIndex } from "./reality.ts";
+import { hasSourceCode, synthesizeSkeleton } from "./onboarding-fs.ts";
+import { extractReality } from "./reality.ts";
 import { pushRecent } from "./recents.ts";
 import { ensureGitExclude, legacyProjectKey, listWorktrees, projectKey, repoIdentity } from "./worktrees.ts";
 
@@ -81,13 +81,6 @@ const NO_REALITY: RealityLayer = {
   extractedAt: null,
   head: null,
 };
-
-/** fs walk bounds for `file_index` on a non-git target: a big repo, not a whole disk */
-const MAX_WALK_FILES = 20_000;
-const MAX_WALK_DIRS = 5_000;
-
-/** the GitHub CLI to shell out to; overridable so smokes never touch a real account */
-const GH_BINARY = process.env.SHAPE_GH ?? "gh";
 
 /**
  * The command that opens the folder chooser, when a smoke (or an operator on a
@@ -152,9 +145,6 @@ function folderChooser(platform: string): { command: string; args: string[] } | 
  */
 const SERVER_UNREACHABLE = "Shape server unreachable — the canvas was not updated";
 
-/** deliver receipts kept for dedupe: a reconnect only re-sends what is unacknowledged */
-const MAX_RECEIPTS = 64;
-
 /**
  * Distinct caller spellings the link router remembers before starting over.
  * Generous for honest callers (a handful of directories per project) and a
@@ -165,23 +155,9 @@ const MAX_LINK_ROUTES = 256;
 export interface AgentRuntimeOptions {
   /**
    * The directory to open. Any worktree of the repo will do: the project is
-   * the repo, and this is the variation that gets the first harness.
+   * the repo, and this is the variation the agent stands in.
    */
   cwd: string;
-  /**
-   * `--backend <id>`: the operator's default for this process. Beaten by a
-   * project's own `.shape/config.json` — a project that wrote down its choice
-   * keeps it — and by whatever an `open_worktree` asks for explicitly.
-   */
-  backend?: string;
-  /** `--omp "<cmd ...>"`: replaces the omp adapter's command */
-  ompCommand?: string[];
-  /**
-   * The terminal pane is a shell on the target machine, so a remote agent only
-   * offers it when the operator asks. Off means no pty at all: the advertised
-   * capability is `"none"` and every `pty_*` frame is ignored.
-   */
-  allowTerminal: boolean;
   /** the runtime mounts the loopback link (`/link`) here in start() */
   sockets: SocketServer;
   link: AgentEnd;
@@ -190,48 +166,31 @@ export interface AgentRuntimeOptions {
 }
 
 /**
- * One running harness and everything that belongs to its worktree alone. The
- * runtime holds one per opened variation; closing the variation disposes the
- * whole record.
+ * One session Shape is watching, and everything that belongs to its worktree
+ * alone. Shape starts nothing: the record appears when a caller from that
+ * worktree first speaks on the link, and is dropped when the session says
+ * goodbye.
  */
-interface Harness {
-  /** worktree id: the realpath of the directory the harness runs in */
+interface Observed {
+  /** worktree id: the realpath of the directory the session runs in */
   readonly worktree: string;
-  readonly cwd: string;
-  readonly backend: Backend;
+  /** the one sink for this worktree: every link event that comes out of it */
+  readonly events: AgentEvents;
   /**
-   * The launcher's handle on this session — focus it, kill it, type at it.
-   * Null only while the session is coming up: the record is registered before
-   * `start` so a harness that greets during startup finds its sink.
+   * What the session called itself in its `hello`. Null while nothing has
+   * greeted — a hook or an MCP sidecar proves a session is there without
+   * saying which harness it is.
    */
-  launched: Launched | null;
-  /** the one sink for this harness: native adapter events AND loopback frames */
-  readonly events: BackendEvents;
-  /** this worktree's terminal pane; null when the terminal is gated off */
-  readonly pty: PtyManager | null;
+  harness: string | null;
+  /** a canvas call has come from here, so the tool really is reaching Shape */
+  hostTool: boolean;
   session: AgentSession;
   state: AgentState;
-  /** started with its own approval prompts off */
-  autonomous: boolean;
-  /** the server's preamble has been spent on this harness's first prompt */
-  promptSent: boolean;
 }
 
-/** Backend failures arrive as Errors whose message is already user-facing. */
+/** Failures arrive as Errors whose message is already user-facing. */
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/** What an `open_worktree` (or an adopt, or a startup) asks for. */
-interface OpenOptions {
-  /** the harness the frame named; beats every config layer */
-  backend?: string;
-  /** continue this harness session instead of starting a fresh one */
-  resumeSessionId?: string;
-  /** start it with its own approval prompts off */
-  autonomous?: boolean;
-  /** write the harness choice to `<cwd>/.shape/config.json` */
-  remember?: boolean;
 }
 
 async function isDirectory(path: string): Promise<boolean> {
@@ -242,52 +201,10 @@ async function isDirectory(path: string): Promise<boolean> {
   }
 }
 
-/**
- * `file_index` for a target git cannot describe. Bounded because the answer
- * only has to be good enough to validate codeRefs against; symlinked
- * directories are left out rather than followed into a cycle.
- */
-async function walkFileIndex(cwd: string): Promise<string[]> {
-  const files: string[] = [];
-  const queue: string[] = [""];
-  let dirs = 0;
-  while (queue.length > 0 && files.length < MAX_WALK_FILES && dirs < MAX_WALK_DIRS) {
-    const rel = queue.shift();
-    if (rel === undefined) break;
-    dirs++;
-    let entries;
-    try {
-      entries = await readdir(rel === "" ? cwd : join(cwd, rel), { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      // posix separators throughout: these paths are matched against codeRefs,
-      // which are written by hand and always posix
-      const child = rel === "" ? entry.name : `${rel}/${entry.name}`;
-      if (entry.isDirectory()) {
-        // dot directories other than these are kept: git tracks .github and
-        // friends, and the index has to agree with what an agent can reference
-        if (SKIP_DIRS[entry.name] !== true) queue.push(child);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      files.push(child);
-      if (files.length >= MAX_WALK_FILES) break;
-    }
-  }
-  return files;
-}
-
 export class AgentRuntime {
   readonly #sockets: SocketServer;
   readonly #link: AgentEnd;
   readonly #onExit: (reason: string) => void;
-  /** `--backend`, kept for every harness we open: an adopt overrides it once */
-  readonly #cliBackend: string | undefined;
-  readonly #cliOmpCommand: string[] | undefined;
-  /** `--allow-terminal`: false gates every pane off for good */
-  readonly #allowTerminal: boolean;
 
   /** the directory the agent was pointed at; changed by a retarget */
   #cwd: string;
@@ -295,31 +212,25 @@ export class AgentRuntime {
   #projectCwd = "";
   /** sha256 of machine + the repo's common dir: every worktree shares it */
   #projectKey = "";
-  /** the worktree `#cwd` sits in: the one that gets a harness at startup */
+  /** the worktree `#cwd` sits in */
   #primary = "";
-  /**
-   * The project's harness as the picker names it: the backend of the first
-   * worktree opened. Per-harness backends travel in `sessions`. Null when
-   * nothing resolved — the project is attached, nothing is running, and the
-   * browser asks what to start.
-   */
-  #projectBackend: BackendInfo | null = null;
   /**
    * What is installed here, detected once at startup and again on `discover`.
    * Project-wide: one agent process sees one PATH.
    */
   #tools: DetectedTools = { launchers: [], harnesses: [] };
   /**
-   * How sessions get a terminal, chosen once for this process: the user's own
-   * multiplexer when there is one, else a pty Shape owns.
+   * The user's terminal multiplexer, when there is one. It is how a session's
+   * tab is brought forward and where the project's manager lives; null means
+   * no session here has a terminal Shape can reach.
    */
-  #launcher!: Launcher;
+  #launcher: HerdrLauncher | null = null;
 
-  /** one harness per opened worktree, keyed by worktree id */
-  readonly #harnesses = new Map<string, Harness>();
+  /** one record per worktree with a session reporting in, keyed by worktree id */
+  readonly #sessions = new Map<string, Observed>();
   /** every worktree of the repo (a non-git target gets exactly one) */
   #worktrees: WorktreeInfo[] = [];
-  /** last extraction per worktree; a variation nobody opened can still have one */
+  /** last extraction per worktree; a variation with no session can still have one */
   readonly #realities = new Map<string, { layer: RealityLayer; head: string | null }>();
   /** worktrees with an extraction in flight, so an idle storm cannot pile up */
   readonly #realityBusy = new Set<string>();
@@ -331,17 +242,11 @@ export class AgentRuntime {
 
   #loopback: LoopbackLink | null = null;
   #targetHasCode = false;
-  /**
-   * `gh` is installed and signed in here. Probed once per process in start():
-   * an auth check per attach would cost a subprocess on every retarget, and a
-   * login that changes mid-session is not worth the round trip.
-   */
-  #canPublish = false;
   #discovered: DiscoveredSession[] = [];
   #recents: string[] = [];
   /**
-   * Where this project's directive was written, for a launcher that wants to
-   * point a builder's brief at it. Null when the write failed.
+   * Where this project's directive was written, so a session Shape has no
+   * integration with can still find the canvas. Null when the write failed.
    */
   #directivePath: string | null = null;
   /**
@@ -351,19 +256,17 @@ export class AgentRuntime {
    */
   #manager: ManagerHandle | null = null;
 
-  /** the server's preamble, from `attached`; prepended to each harness's first prompt */
-  #preamble = "";
   /**
-   * Delivery, opening/closing a variation and retargeting are serialized: two
-   * prompts racing an idle session would have the second one judged against a
-   * state that no longer holds, and a retarget must never land mid-delivery.
+   * Retargeting is serialized: two switches racing would leave the agent
+   * standing in one repo while everything it has told the room describes the
+   * other.
    */
-  #delivering: Promise<void> = Promise.resolve();
+  #retargeting: Promise<void> = Promise.resolve();
   /**
    * The folder chooser standing in front of the user right now. Deliberately
-   * NOT on `#delivering`: a dialog is open for as long as a person browses, and
-   * nothing typed at the canvas may queue behind that. One at a time — one
-   * machine has one user in front of it.
+   * NOT on `#retargeting`: a dialog is open for as long as a person browses,
+   * and nothing else may queue behind that. One at a time — one machine has
+   * one user in front of it.
    */
   #picking: ChildProcess | null = null;
 
@@ -378,38 +281,28 @@ export class AgentRuntime {
    */
   readonly #attachGate = Promise.withResolvers<void>();
 
-  /** pending canvas calls (native host tool and loopback), by frame id */
+  /** pending canvas calls, by frame id */
   readonly #calls = new Map<string, (result: { text: string; isError: boolean }) => void>();
   #callSeq = 0;
-  /**
-   * The last MAX_RECEIPTS `delivered` answers, by deliver id. Kept per room,
-   * not per harness: deliver ids are the room's and unique across its
-   * worktrees, and a variation that is closed and reopened must not make a
-   * replayed id look fresh.
-   */
-  readonly #receipts = new Map<string, { worktree: string; mode: "prompt" | "steer"; queued: boolean }>();
   #stopped = false;
 
   constructor(opts: AgentRuntimeOptions) {
     this.#sockets = opts.sockets;
     this.#link = opts.link;
     this.#onExit = opts.onExit;
-    this.#cliBackend = opts.backend;
-    this.#cliOmpCommand = opts.ompCommand;
     this.#cwd = opts.cwd;
-    this.#allowTerminal = opts.allowTerminal;
   }
 
   /**
-   * Bring the agent up: link endpoint, what is installed, the launcher, the
-   * project's facts, the first session, then `attach`.
+   * Bring the agent up: link endpoint, what is installed, the user's terminal
+   * multiplexer, the project's facts, then `attach`.
    *
-   * The order matters — the loopback link is mounted first so a harness that
+   * The order matters — the loopback link is mounted first so a session that
    * greets (or a hook that fires) during startup finds somebody listening, and
-   * `attach` goes last so the hello it triggers already carries the running
-   * session. A startup always ends with a session on the primary variation:
-   * the resolution cannot come up empty, so the only way past this is a
-   * harness that failed to start, which throws.
+   * `attach` goes last so the hello it triggers already carries whatever has
+   * reported in. A startup opens no session at all: the project is attached
+   * with the sessions that happen to be there, which is usually none, and the
+   * canvas shows the repo either way.
    */
   async start(): Promise<void> {
     this.#link.onMessage((msg) => this.#onServerMsg(msg));
@@ -418,25 +311,14 @@ export class AgentRuntime {
     this.#link.onReconnect(() => this.#onLinkBack());
     this.#loopback = mountLoopbackLink(this.#sockets, { route: (cwd) => this.#routeLink(cwd) });
     this.#tools = await detectTools();
-    this.#launcher = await chooseLauncher({
-      tools: this.#tools,
-      pty: {
-        pane: (worktree) => this.#harnesses.get(worktree)?.pty ?? null,
-        requestTerminal: (worktree) => this.#post({ type: "terminal", worktree, open: true }),
-      },
-    });
+    this.#launcher = await chooseLauncher(this.#tools);
     console.error(
-      `[bridge] launcher: ${this.#launcher.id}; harnesses here: ${this.#tools.harnesses.map((tool) => tool.id).join(", ") || "none"}`,
+      `[bridge] terminal: ${this.#launcher === null ? "none" : "herdr"}; harnesses here: ${this.#tools.harnesses.map((tool) => tool.id).join(", ") || "none"}`,
     );
-    this.#canPublish = await probeGitHub(GH_BINARY);
     await this.#openProject();
-    // before the first harness: the config the manager pass writes is what
-    // every builder the manager launches later comes up with
+    // the config the manager pass writes is what every builder the manager
+    // launches later comes up with, so it is written before anything reports in
     await this.#attachManager();
-    // announced by `attach`, not by a frame of its own: the room does not exist
-    // yet
-    const primary = await this.#openHarness(this.#primary);
-    this.#projectBackend = this.#backendInfo(primary);
     this.#sendAttach();
     await this.#attachGate.promise;
   }
@@ -474,7 +356,7 @@ export class AgentRuntime {
   }
 
   // -------------------------------------------------------------------------
-  // project and harness lifecycle
+  // project lifecycle
   // -------------------------------------------------------------------------
 
   /**
@@ -507,14 +389,14 @@ export class AgentRuntime {
   }
 
   /**
-   * Drop this project's directive on disk, so a harness Shape never registered
+   * Drop this project's directive on disk, so a session Shape never registered
    * a tool in can still find the canvas. Called from every `#openProject` —
    * startup and every `switch` — which is also how it keeps up with the link
    * URL: the URL is fixed for this process (the socket server's port is set at
    * construction), so the only way it changes is a new agent, whose first
    * `#openProject` rewrites the file. `writeDirective` skips an identical
    * write, so re-opening the same project costs a read.
-   * Never fatal: without the file the tool-bearing harnesses are unaffected.
+   * Never fatal: without the file the tool-bearing sessions are unaffected.
    */
   async #writeDirective(): Promise<void> {
     const path = directivePath(this.#projectKey);
@@ -537,8 +419,11 @@ export class AgentRuntime {
   /**
    * Find or open this project's manager (issue #3, `./manager.ts`). Runs after
    * `#openProject`, because the directive it points the manager's builders at
-   * is written there, and before any harness, because those builders inherit
-   * Shape's integration from the config this pass writes.
+   * is written there.
+   *
+   * This is the ONE session Shape opens rather than observes, and it is a
+   * manager, not a worker: it reads the manager skill and dispatches builders
+   * into their own worktrees, each of which reports in on its own.
    *
    * `attachManager` reports every failure itself and answers null, so there is
    * nothing to catch: a project without a manager still has a canvas.
@@ -557,133 +442,104 @@ export class AgentRuntime {
   }
 
   /**
-   * Start a harness in one worktree: its own resolution (a variation may name
-   * a different harness), its own event sink, its own terminal pane. The
-   * resolution always names a harness — with nothing chosen it is omp — so a
-   * worktree that is opened either gets a session or throws saying why.
-   * Throws when the chosen harness could not start; the caller decides whether
-   * that is a startup error or an `open_worktree` refusal.
+   * How one observed session is described on the wire, derived fresh each
+   * time. Everything in it is either what the session itself said or a plain
+   * fact about this machine: Shape cannot steer a session it does not drive,
+   * cannot resume one it never started, and can only reach a terminal when
+   * herdr is hosting it.
    */
-  async #openHarness(worktree: string, opts?: OpenOptions): Promise<Harness> {
-    const cwd = worktree;
-    const config = await loadShapeConfig({ cwd, ompCommand: this.#cliOmpCommand });
-    const id = resolveBackend({
-      explicit: opts?.backend,
-      config,
-      cli: this.#cliBackend,
-      detected: launchableHarnesses(this.#tools),
-    });
-    // the choice is recorded BEFORE the session starts: the user asked to
-    // remember it, not to remember it if it worked
-    if (opts?.remember === true) await rememberBackend(cwd, id);
+  #backendInfo(observed: Observed): BackendInfo {
+    const harness = observed.harness;
+    return {
+      id: harness ?? "unknown",
+      label: harness ?? "agent",
+      capabilities: {
+        steerMidTurn: false,
+        hostTool: observed.hostTool,
+        // a session that greeted reports its own events; one that never did is
+        // known only through the hooks and tool calls that reach the link
+        events: harness === null ? "hooks" : "native",
+        resume: false,
+        terminal: this.#launcher === null ? "none" : "external",
+      },
+    };
+  }
 
-    const backend = createBackend(id, config);
-    const autonomous = opts?.autonomous === true;
-    const harness: Harness = {
+  /**
+   * A session Shape had not seen before just spoke from `worktree`. Nothing
+   * was started: a caller reporting in IS the session appearing, so the record
+   * is created here and the room hears about it at once. What that session is
+   * gets refined the moment it greets — until then all Shape knows is the
+   * directory the work is happening in.
+   */
+  #observe(worktree: string): Observed {
+    const observed: Observed = {
       worktree,
-      cwd,
-      backend,
-      launched: null,
-      events: this.#backendEvents(worktree),
-      // The pane exists before the session starts: the pty launcher attaches
-      // the harness to it the moment it comes up. Under a launcher whose
-      // terminal is the user's own there is no pane at all — Shape must not
-      // offer a second, different terminal for the same variation — so every
-      // `pty_*` frame for it is dropped.
-      pty:
-        this.#allowTerminal && this.#launcher.id === "pty"
-          ? new PtyManager({ worktree, cwd, broadcast: (msg) => this.#post(msg) })
-          : null,
+      events: this.#agentEvents(worktree),
+      harness: null,
+      hostTool: false,
       session: { sessionId: null, sessionName: null, model: null },
       state: "idle",
-      autonomous,
-      promptSent: false,
     };
-    // registered before start() so a harness that greets — or a hook that
-    // fires — during startup finds its sink
-    this.#harnesses.set(worktree, harness);
+    this.#sessions.set(worktree, observed);
+    this.#postSessionStarted(observed);
+    console.error(`[bridge] a session is reporting in from ${this.#label(worktree)} (${worktree})`);
+    return observed;
+  }
 
-    let launched: Launched;
-    try {
-      launched = await backend.start({
-        launcher: this.#launcher,
-        worktree,
-        cwd,
-        // the project, not this variation: one herdr workspace per project,
-        // named after the repo, and one tab in it per variation
-        project: { path: this.#projectCwd, label: basename(this.#projectCwd) },
-        // harness-side processes reach US, never the server
-        linkUrl: this.#sockets.url(LINK_WS_PATH),
-        autonomous,
-        events: harness.events,
-        ...(opts?.resumeSessionId === undefined ? {} : { resumeSessionId: opts.resumeSessionId }),
-      });
-    } catch (err) {
-      this.#harnesses.delete(worktree);
-      harness.pty?.dispose();
-      throw err;
-    }
-    harness.launched = launched;
-    const session = backend.session();
-    harness.session = { sessionId: session.sessionId, sessionName: null, model: session.model };
-    return harness;
+  /** The session in `worktree` as the room draws it, with whatever is known now. */
+  #postSessionStarted(observed: Observed): void {
+    this.#post({
+      type: "session_started",
+      worktree: observed.worktree,
+      session: observed.session,
+      backend: this.#backendInfo(observed),
+    });
   }
 
   /**
-   * How one harness is described on the wire, derived fresh each time: an
-   * adapter on the loopback link only learns what the harness really supports
-   * when it greets, and an agent started without `--allow-terminal` answers
-   * "no terminal" whatever its launcher could do.
+   * The harness itself greeted. This is where an observed session stops being
+   * a directory somebody is working in and becomes a named session: the
+   * harness, its session id and model, and whether the canvas tool is really
+   * registered in it. The room is told again, because everything it heard the
+   * first time was what Shape had to assume.
    */
-  #backendInfo(harness: Harness): BackendInfo {
-    const capabilities = harness.backend.capabilities;
-    return {
-      id: harness.backend.id,
-      label: harness.backend.label,
-      capabilities: this.#allowTerminal ? capabilities : { ...capabilities, terminal: "none" },
-    };
+  #onHello(worktree: string, hello: LinkHello): void {
+    const observed = this.#sessions.get(worktree);
+    if (observed === undefined) return;
+    observed.harness = hello.harness;
+    observed.hostTool = observed.hostTool || hello.capabilities.tool;
+    observed.session = { sessionId: hello.sessionId, sessionName: null, model: hello.model };
+    this.#postSessionStarted(observed);
+    console.error(
+      `[bridge] ${hello.harness} in ${this.#label(worktree)} greeted (session ${hello.sessionId ?? "unnamed"})`,
+    );
   }
 
   /**
-   * Dispose one harness. `reason` is null for a teardown/retarget, where the
-   * room is about to be replaced anyway and a `session_stopped` per variation
-   * would be noise.
+   * A session ended (`bye`, or the link socket dropped, which the endpoint
+   * replays as one). The variation loses its session and the canvas says so —
+   * and that is all: the project stays attached with its canvas, the other
+   * variations keep reporting, and the next session to speak from that
+   * directory appears the same way this one did.
    */
-  async #closeHarness(harness: Harness, reason: string | null): Promise<void> {
-    // deleted first: the adapter's own `onExit` during dispose must not be
-    // reported as a harness that died on its own
-    this.#harnesses.delete(harness.worktree);
-    // the session dies with it; the pane must not be left pointing at it
-    harness.pty?.attach(null);
-    try {
-      await harness.backend.dispose();
-    } catch (err) {
-      console.error(`[bridge] ${errText(err)}`);
-    }
-    harness.pty?.dispose();
-    if (reason !== null) this.#post({ type: "session_stopped", worktree: harness.worktree, reason });
-  }
-
-  /**
-   * A session ended on its own (crash, `/exit`, the user quit the TUI, the
-   * terminal tab was closed). The variation loses its session and the canvas
-   * says so — and that is all: the project stays attached with its canvas, the
-   * other variations keep running, and the browser can start another session
-   * whenever the user wants one. The agent has no reason to leave.
-   */
-  #onHarnessExit(worktree: string, reason: string): void {
-    const harness = this.#harnesses.get(worktree);
-    if (harness === undefined) return;
-    this.#harnesses.delete(worktree);
-    harness.pty?.attach(null);
-    // the session is already gone; this only releases what the adapter holds
-    harness.backend.dispose().catch((err: unknown) => console.error(`[bridge] ${errText(err)}`));
-    harness.pty?.dispose();
+  #onBye(worktree: string, reason: string): void {
+    if (!this.#sessions.delete(worktree)) return;
     this.#post({ type: "session_stopped", worktree, reason });
-    // the project's harness was this one and it is gone: the browser's picker
-    // must not keep naming it
-    if (this.#harnesses.size === 0) this.#projectBackend = null;
-    console.error(`[bridge] session in ${this.#label(worktree)} ended: ${reason}`);
+    console.error(`[bridge] the session in ${this.#label(worktree)} ended: ${reason}`);
+  }
+
+  /**
+   * Forget every session Shape was watching. A retarget tells the room about
+   * each one — the browsers are still looking at the project being left, and a
+   * session on it is no longer being watched — while a teardown says nothing,
+   * because the room is going away with us.
+   */
+  #dropSessions(reason: string | null): void {
+    const observed = [...this.#sessions.values()];
+    this.#sessions.clear();
+    if (reason === null) return;
+    for (const entry of observed) this.#post({ type: "session_stopped", worktree: entry.worktree, reason });
   }
 
   /**
@@ -693,11 +549,11 @@ export class AgentRuntime {
    */
   #sendAttach(): void {
     this.#outboxOpen = false;
-    const sessions: WorktreeSession[] = [...this.#harnesses.values()].map((harness) => ({
-      worktree: harness.worktree,
-      session: harness.session,
-      backend: this.#backendInfo(harness),
-      state: harness.state,
+    const sessions: WorktreeSession[] = [...this.#sessions.values()].map((observed) => ({
+      worktree: observed.worktree,
+      session: observed.session,
+      backend: this.#backendInfo(observed),
+      state: observed.state,
     }));
     const realities: Record<string, RealityLayer> = {};
     for (const [worktree, entry] of this.#realities) realities[worktree] = entry.layer;
@@ -714,10 +570,12 @@ export class AgentRuntime {
         key: this.#projectKey,
         label: basename(this.#projectCwd),
         cwd: this.#projectCwd,
-        backend: this.#projectBackend,
-        tools: { launcher: this.#launcher.id, launchers: this.#tools.launchers, harnesses: this.#tools.harnesses },
+        // the project's harness as a picker names it: the first session that
+        // reported in. Null while none has — which is the ordinary state of a
+        // project nobody is working in right now
+        backend: sessions[0]?.backend ?? null,
+        tools: { launcher: this.#launcher?.id ?? null, launchers: this.#tools.launchers, harnesses: this.#tools.harnesses },
         targetHasCode: this.#targetHasCode,
-        canPublish: this.#canPublish,
         directivePath: this.#directivePath,
         manager: this.#manager,
         legacyKeys,
@@ -738,8 +596,7 @@ export class AgentRuntime {
     // a dialog must not outlive the agent that opened it: nothing is left to
     // answer, and the user would be staring at a chooser nobody reads
     this.#picking?.kill();
-    const harnesses = [...this.#harnesses.values()];
-    for (const harness of harnesses) await this.#closeHarness(harness, null);
+    this.#dropSessions(null);
     this.#loopback?.close();
   }
 
@@ -786,7 +643,7 @@ export class AgentRuntime {
   }
 
   // -------------------------------------------------------------------------
-  // harness -> server
+  // sessions -> server
   // -------------------------------------------------------------------------
 
   /** The runtime's only way out: frames wait here until the room exists. */
@@ -805,21 +662,21 @@ export class AgentRuntime {
     for (const msg of queued) this.#link.send(msg);
   }
 
-  /** An adapter failure worth showing the user; the server logs and broadcasts it. */
+  /** A failure worth showing the user; the server logs and broadcasts it. */
   #error(message: string): void {
     this.#post({ type: "agent_error", message });
   }
 
   /**
-   * One harness's event sink, bound to its worktree for the harness's whole
-   * life. Every frame it produces names that worktree, so the room can file it
-   * against the right canvas without guessing.
+   * One worktree's event sink, bound to that worktree for as long as a session
+   * reports in from it. Every frame it produces names the worktree, so the
+   * room can file it against the right canvas without guessing.
    */
-  #backendEvents(worktree: string): BackendEvents {
+  #agentEvents(worktree: string): AgentEvents {
     return {
       onAgentState: (state) => {
-        const harness = this.#harnesses.get(worktree);
-        if (harness !== undefined) harness.state = state;
+        const observed = this.#sessions.get(worktree);
+        if (observed !== undefined) observed.state = state;
         // idle IS the end of a turn: this worktree's reality is worth re-deriving
         if (state === "idle") void this.#refreshReality(worktree);
         this.#post({ type: "agent_event", worktree, event: { kind: "state", state } });
@@ -841,16 +698,15 @@ export class AgentRuntime {
           event: { kind: "tool_end", name: info.name, isError: info.isError },
         }),
       onTurnEnd: () => this.#post({ type: "agent_event", worktree, event: { kind: "turn_end" } }),
-      onCanvasCall: (args) => this.#canvasCall(worktree, args),
-      // adapters driven by hooks or by the link cannot answer this themselves:
-      // only the harness knows which session it is on, and it tells us
+      // only the harness knows which session it is on, and a hook-driven one
+      // learns it long after the work started
       onSession: (info) => {
-        const harness = this.#harnesses.get(worktree);
-        if (harness !== undefined) {
-          harness.session = {
-            ...harness.session,
-            sessionId: info.sessionId ?? harness.session.sessionId,
-            model: info.model ?? harness.session.model,
+        const observed = this.#sessions.get(worktree);
+        if (observed !== undefined) {
+          observed.session = {
+            ...observed.session,
+            sessionId: info.sessionId ?? observed.session.sessionId,
+            model: info.model ?? observed.session.model,
           };
         }
         this.#post({
@@ -859,16 +715,13 @@ export class AgentRuntime {
           event: { kind: "session", sessionId: info.sessionId, model: info.model },
         });
       },
-      onExit: (reason) => this.#onHarnessExit(worktree, reason),
-      onError: (message) => this.#error(message),
     };
   }
 
   /**
-   * Hand a canvas call to the server and wait for its result. Every caller —
-   * a harness's native host tool and the loopback link — goes through here, so
-   * one counter is enough to correlate every answer, and the worktree it was
-   * made in travels with it.
+   * Hand a canvas call to the server and wait for its result. Every caller on
+   * the link goes through here, so one counter is enough to correlate every
+   * answer, and the worktree it was made in travels with it.
    */
   #canvasCall(worktree: string, args: unknown): Promise<{ text: string; isError: boolean }> {
     const id = `call-${++this.#callSeq}`;
@@ -904,60 +757,55 @@ export class AgentRuntime {
   }
 
   /**
-   * Route a loopback caller (MCP sidecar, hook, adapter sidecar) to the
-   * harness that owns it, by the directory it reports running in: the deepest
-   * worktree containing it wins.
+   * Route a loopback caller (the harness's own extension, a hook, an MCP
+   * sidecar) to the worktree it belongs to, by the directory it reports
+   * running in: the deepest worktree containing it wins. A worktree of this
+   * repo with nothing on record yet GAINS a session here — a caller speaking
+   * from it is the only evidence Shape ever gets that one exists.
    *
    * The cwd is canonicalized first and that is not optional. A worktree id is
    * a realpath, but a caller's spelling need not be one: `process.cwd()` is
    * canonical, while a hook reporting `$PWD` or a payload's `cwd` carries
    * whatever the user typed — and on macOS every `/tmp` path is a symlink to
-   * `/private/tmp`. Matching the raw string would refuse a harness that is
+   * `/private/tmp`. Matching the raw string would refuse a session that is
    * plainly inside the repo. Resolutions are memoized because the same handful
    * of directories repeat for a whole session; the cache is dropped whenever
    * the worktree list changes, since a path that resolved to nothing may now
    * be a variation.
    */
   #routeLink(cwd: string): LinkTarget | { error: string } {
-    let worktree = this.#linkRoutes.get(cwd);
-    if (worktree === undefined) {
-      worktree = this.#worktreeFor(this.#canonicalDir(cwd));
+    let resolved = this.#linkRoutes.get(cwd);
+    if (resolved === undefined) {
+      resolved = this.#worktreeFor(this.#canonicalDir(cwd));
       // a caller inventing paths must not grow this without bound
       if (this.#linkRoutes.size >= MAX_LINK_ROUTES) this.#linkRoutes.clear();
-      this.#linkRoutes.set(cwd, worktree);
+      this.#linkRoutes.set(cwd, resolved);
     }
-    if (worktree === null) {
+    if (resolved === null) {
       return { error: `${cwd} is not part of ${basename(this.#projectCwd)} — this Shape agent is on ${this.#projectCwd}` };
     }
-    const harness = this.#harnesses.get(worktree);
-    if (harness === undefined) {
-      return { error: `no Shape session is running on ${this.#label(worktree)} — open it from the variations menu` };
-    }
-    const backend = harness.backend;
+    const worktree = resolved;
+    const observed = this.#sessions.get(worktree) ?? this.#observe(worktree);
     return {
-      applyCanvas: (args) => this.#canvasCall(worktree, args),
-      events: harness.events,
-      // the frames only a harness ON the link sends go to its own adapter: it
-      // is the one that knows what a greeting or a receipt means for it, and
-      // the session id and capabilities it announces belong to this worktree
-      onHello: (hello, send) => {
-        backend.onHello?.(hello, send);
-        const session = backend.session();
-        harness.session = { sessionId: session.sessionId, sessionName: null, model: session.model };
+      applyCanvas: (args) => {
+        // a tool call is proof the canvas tool is registered in that session,
+        // which the room draws differently from a session Shape only overhears
+        if (!observed.hostTool) {
+          observed.hostTool = true;
+          this.#postSessionStarted(observed);
+        }
+        return this.#canvasCall(worktree, args);
       },
-      onDelivered: (receipt) => backend.onDelivered?.(receipt),
-      onBye: (reason) => backend.onBye?.(reason),
+      events: observed.events,
+      onHello: (hello) => this.#onHello(worktree, hello),
+      onBye: (reason) => this.#onBye(worktree, reason),
     };
   }
 
-  /**
-   * Agent sessions worth adopting: everything running on this machine except
-   * the harness children Shape itself spawned (adopting our own child would be
-   * a loop).
-   */
+  /** Agent sessions running on this machine, for the adopt picker. */
   async #discoverSessions(): Promise<DiscoveredSession[]> {
     try {
-      return (await discoverSessions()).filter((session) => !session.spawnedByShape);
+      return await discoverSessions();
     } catch (err) {
       console.error(`[bridge] session discovery failed: ${errText(err)}`);
       return [];
@@ -965,21 +813,12 @@ export class AgentRuntime {
   }
 
   // -------------------------------------------------------------------------
-  // server -> harness
+  // server -> agent
   // -------------------------------------------------------------------------
 
   #onServerMsg(msg: ServerToAgentMsg): void {
-    if (isPtyMsg(msg)) {
-      // the terminal is its own channel: never queued behind agent delivery.
-      // With the terminal gated off there is no pty and the frame is dropped
-      // without an answer — a stale tab must not be able to open a shell — and
-      // the same goes for a variation with no harness to own a pane.
-      this.#harnesses.get(msg.worktree)?.pty?.handle(msg);
-      return;
-    }
     switch (msg.type) {
       case "attached":
-        this.#preamble = msg.preamble;
         this.#openOutbox();
         this.#attachGate.resolve();
         return;
@@ -993,71 +832,30 @@ export class AgentRuntime {
         settle({ text: msg.text, isError: msg.isError });
         return;
       }
-      case "deliver": {
-        const { worktree, id, body } = msg;
-        this.#delivering = this.#delivering.then(() => this.#deliver(worktree, id, body));
-        return;
-      }
-      case "abort": {
-        // aborts must not queue behind an in-flight delivery
-        const harness = this.#harnesses.get(msg.worktree);
-        if (harness === undefined) return;
-        harness.backend.abort().catch((err: unknown) => this.#error(errText(err)));
-        return;
-      }
-      case "open_worktree": {
-        const { path, backend, resumeSessionId, autonomous, remember } = msg;
-        this.#delivering = this.#delivering.then(() =>
-          this.#openWorktreeByPath(path, {
-            ...(backend === undefined ? {} : { backend }),
-            ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
-            ...(autonomous === undefined ? {} : { autonomous }),
-            ...(remember === undefined ? {} : { remember }),
-          }),
-        );
-        return;
-      }
       case "focus_terminal":
-        // showing a terminal must not queue behind a delivery: the user is
+        // showing a terminal must not queue behind a retarget: the user is
         // asking to LOOK at something
         void this.#focusTerminal(msg.worktree);
         return;
-      case "close_worktree": {
-        const { worktree } = msg;
-        this.#delivering = this.#delivering.then(() => this.#closeWorktree(worktree));
-        return;
-      }
       case "switch": {
-        const { path, backend, resumeSessionId } = msg;
-        this.#delivering = this.#delivering.then(() =>
-          this.#switchProject(path, {
-            ...(backend === undefined ? {} : { backend }),
-            ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
-          }),
-        );
-        return;
-      }
-      case "create": {
-        const { path, github } = msg;
-        // a create ends in a retarget, so it belongs on the same chain as one:
-        // making a folder must never land in the middle of a delivery
-        this.#delivering = this.#delivering.then(() => this.#createProject(path, github));
+        const { path } = msg;
+        this.#retargeting = this.#retargeting.then(() => this.#switchProject(path));
         return;
       }
       case "adopt": {
         const { pid } = msg;
-        this.#delivering = this.#delivering.then(() => this.#adopt(pid));
+        this.#retargeting = this.#retargeting.then(() => this.#adopt(pid));
         return;
       }
       case "pick_folder":
-        // a dialog waits on a person, so it is never put on the delivery
-        // chain: prompts must not queue behind somebody browsing folders
+        // a dialog waits on a person, so it is never put on the retarget
+        // chain: nothing may queue behind somebody browsing folders
         this.#pickFolder();
         return;
       case "discover": {
-        // read-only scan: must not queue behind an in-flight delivery. The
-        // tools are re-detected with it — a harness installed since startup is
-        // exactly what somebody hitting "look again" is hoping to find.
+        // read-only scan: must not queue behind a retarget. The tools are
+        // re-detected with it — a harness installed since startup is exactly
+        // what somebody hitting "look again" is hoping to find.
         const { id } = msg;
         void detectTools().then((tools) => {
           this.#tools = tools;
@@ -1076,11 +874,6 @@ export class AgentRuntime {
       case "extract_reality":
         void this.#extractRealityNow(msg.worktree);
         return;
-      case "file_index": {
-        const { worktree, id } = msg;
-        void this.#fileIndex(worktree, id);
-        return;
-      }
       case "synthesize_skeleton": {
         const { worktree, id } = msg;
         if (this.#worktreeFor(worktree) === null) return;
@@ -1093,197 +886,49 @@ export class AgentRuntime {
     }
   }
 
-  /**
-   * Steer into a running turn when the backend can; otherwise the message goes
-   * as a prompt and the harness picks it up when the turn ends. The first
-   * prompt of a harness session carries the server's preamble — once per
-   * harness, because each variation's session starts knowing nothing. The
-   * receipt goes out before the send: it is what the server writes the "queued"
-   * line from.
-   *
-   * Something typed for a variation with no session STARTS one — a tab in the
-   * user's terminal — and the sentence is the first thing that session hears.
-   * Typing is the ask; there is nothing to refuse. Delivers are serialized
-   * under `#delivering`, so the open needs no lock of its own, and it posts
-   * the `session_started` the canvas draws the session from before the
-   * `delivered` receipt goes out. An open that fails has already said why:
-   * nothing is delivered, and no receipt is minted for an id the server may
-   * still retry.
-   *
-   * Deliver ids are idempotent. After a reconnect the server re-sends every
-   * deliver it holds no receipt for, and some of those did reach the harness
-   * before the gap: a known id is answered with the receipt it already earned
-   * and never handed to the backend twice.
-   */
-  async #deliver(worktree: string, id: string, body: string): Promise<void> {
-    const known = this.#receipts.get(id);
-    if (known !== undefined) {
-      this.#post({ type: "delivered", worktree: known.worktree, id, mode: known.mode, queued: known.queued });
-      return;
-    }
-
-    let harness = this.#harnesses.get(worktree);
-    if (harness === undefined) {
-      await this.#openVariation(worktree);
-      harness = this.#harnesses.get(worktree);
-      // the open reported its own `open_worktree failed …`; a receipt here
-      // would tell the user the sentence landed somewhere
-      if (harness === undefined) return;
-    }
-    const backend = harness.backend;
-
-    // the harness's own events are the truth about what it is doing: they are
-    // what the canvas is drawn from, and asking the adapter instead would let
-    // the two disagree
-    const streaming = harness.state === "streaming" || harness.state === "compacting";
-
-    const mode: "prompt" | "steer" = backend.capabilities.steerMidTurn && streaming ? "steer" : "prompt";
-    const message = streaming || harness.promptSent ? body : `${this.#preamble}${body}`;
-    if (!streaming) harness.promptSent = true;
-    const receipt = { worktree, mode, queued: mode === "prompt" && streaming };
-    this.#receipts.set(id, receipt);
-    // only the ids a reconnect could still re-send are worth remembering
-    if (this.#receipts.size > MAX_RECEIPTS) {
-      const oldest = this.#receipts.keys().next();
-      if (oldest.done !== true) this.#receipts.delete(oldest.value);
-    }
-    this.#post({ type: "delivered", worktree, id, mode: receipt.mode, queued: receipt.queued });
-
-    try {
-      await backend.send(message, mode);
-    } catch (err) {
-      this.#error(errText(err));
-    }
-  }
-
   // -------------------------------------------------------------------------
-  // variations and retargeting
+  // terminal and retargeting
   // -------------------------------------------------------------------------
-
-  /**
-   * `open_worktree`: run a harness in one of THIS repo's worktrees. The path
-   * is the room's (a browser picked it from the worktree list), so it is
-   * resolved and checked against the repo before anything is spawned. Every
-   * refusal starts with `open_worktree` — the room reads that prefix.
-   */
-  async #openWorktreeByPath(rawPath: string, opts?: OpenOptions): Promise<void> {
-    const expanded = rawPath.startsWith("~") ? join(homedir(), rawPath.slice(1)) : rawPath;
-    const target = await this.#realpath(resolve(expanded));
-    const worktree = this.#worktreeFor(target);
-    if (worktree === null) {
-      this.#error(`open_worktree rejected: "${rawPath}" is not a variation of ${basename(this.#projectCwd)}`);
-      return;
-    }
-    await this.#openVariation(worktree, opts);
-  }
-
-  /**
-   * Open (or re-open) one variation and tell the room. A variation that is
-   * already running is answered with the `session_started` it already earned —
-   * the room's open is finished either way, and the frame is the truth about
-   * that variation — except when the open asks for something DIFFERENT: an
-   * adopt, another harness, or approvals the running session does not have.
-   *
-   * An open either ends with a session in that variation or reports why it
-   * could not start one: the resolution itself never comes up empty.
-   */
-  async #openVariation(worktree: string, opts?: OpenOptions): Promise<void> {
-    const running = this.#harnesses.get(worktree);
-    if (running !== undefined) {
-      const replacing = opts?.backend !== undefined || opts?.resumeSessionId !== undefined;
-      if (!replacing) {
-        // "autonomous" is the one thing about a running session an open can
-        // still change: whether it approves its own tool calls
-        const autonomous = opts?.autonomous;
-        if (autonomous !== undefined && autonomous !== running.autonomous) {
-          try {
-            await running.backend.setAutonomous(autonomous);
-            running.autonomous = autonomous;
-          } catch (err) {
-            this.#error(errText(err));
-          }
-        }
-        this.#post({
-          type: "session_started",
-          worktree,
-          session: running.session,
-          backend: this.#backendInfo(running),
-        });
-        return;
-      }
-      // an adopt (or a different harness) REPLACES the session in that
-      // variation: the one the user picked is the one they want driving it
-      await this.#closeHarness(running, "replaced by the session you picked");
-    }
-
-    let harness: Harness;
-    try {
-      harness = await this.#openHarness(worktree, opts);
-    } catch (err) {
-      this.#error(`open_worktree failed for ${this.#label(worktree)}: ${errText(err)}`);
-      return;
-    }
-    // the first session of a project names its harness for the picker
-    this.#projectBackend ??= this.#backendInfo(harness);
-    this.#post({
-      type: "session_started",
-      worktree,
-      session: harness.session,
-      backend: this.#backendInfo(harness),
-    });
-    console.error(`[bridge] session started on ${this.#label(worktree)} (${harness.cwd})`);
-    // a variation the user reaches for may be brand new (a worktree added
-    // since the last scan), and the room's list has to catch up
-    await this.#refreshWorktrees(null);
-  }
 
   /**
    * `focus_terminal`: bring that variation's session in front of the user.
-   * What that means is the launcher's business — a herdr tab is focused for
-   * real, a pty answers with a `terminal` frame the browser opens its drawer
-   * on — so the only thing decided here is whether there is anything to show.
+   * Shape does not own the terminal, so this only asks herdr to switch to the
+   * tab whose agent runs in that directory and raises the application hosting
+   * it. Without herdr there is nothing to switch to — the session's
+   * capabilities say `terminal: "none"`, so the browser offers no button, and
+   * a frame that arrives anyway is answered with the reason.
    */
   async #focusTerminal(worktree: string): Promise<void> {
-    const harness = this.#harnesses.get(worktree);
-    if (harness === undefined || harness.launched === null) {
-      this.#error(`could not bring the terminal forward: no session is running on ${this.#label(worktree)}`);
+    if (!this.#sessions.has(worktree)) {
+      this.#error(`could not bring the terminal forward: no session is reporting in from ${this.#label(worktree)}`);
       return;
     }
-    if (!this.#allowTerminal) {
+    const launcher = this.#launcher;
+    if (launcher === null) {
       this.#error(
-        "could not bring the terminal forward: this Shape agent was started without --allow-terminal, so its terminal is not offered",
+        "could not bring the terminal forward: herdr is not running here, so Shape cannot reach a session's terminal",
       );
       return;
     }
     try {
-      await harness.launched.focus();
+      await launcher.focusCwd(worktree);
     } catch (err) {
       this.#error(`could not bring the terminal forward: ${errText(err)}`);
     }
   }
 
-  /** `close_worktree`: dispose one variation's harness, keep the rest running. */
-  async #closeWorktree(worktree: string): Promise<void> {
-    const harness = this.#harnesses.get(worktree);
-    if (harness === undefined) {
-      this.#error(`close_worktree rejected: no session is running on ${this.#label(worktree)}`);
-      return;
-    }
-    await this.#closeHarness(harness, "closed");
-    console.error(`[bridge] session on ${this.#label(worktree)} closed`);
-    await this.#refreshWorktrees(null);
-  }
-
   /**
    * A path the user pointed Shape at. Inside the current repo it is a
-   * VARIATION, not another project: the canvas already holds it, so it opens a
-   * harness there and nothing is retargeted. Another repo is the real switch —
-   * every harness is disposed, the new project is opened and re-`attach`ed.
+   * VARIATION, not another project: the canvas already holds it and its
+   * session (if any) is already being watched, so the only thing that can be
+   * out of date is the worktree list. Another repo is the real switch — every
+   * observed session is forgotten, the new project is opened and re-`attach`ed.
    *
-   * `opts.backend` is an adopt naming the harness it found; `opts.resumeSessionId`
-   * continues that harness's session instead of opening a fresh one.
+   * Nothing is started either way. A repo Shape retargets onto shows the
+   * sessions that report in from it, which may be none until somebody starts
+   * one themselves.
    */
-  async #switchProject(rawPath: string, opts?: OpenOptions): Promise<void> {
+  async #switchProject(rawPath: string): Promise<void> {
     const expanded = rawPath.startsWith("~") ? join(homedir(), rawPath.slice(1)) : rawPath;
     const target = resolve(expanded);
     if (!(await isDirectory(target))) {
@@ -1292,32 +937,27 @@ export class AgentRuntime {
     }
     const inRepo = this.#worktreeFor(await this.#realpath(target));
     if (inRepo !== null) {
-      await this.#openVariation(inRepo, opts);
+      // a variation the user reaches for may be brand new (a worktree added
+      // since the last scan), and the room's list has to catch up
+      await this.#refreshWorktrees(null);
       return;
     }
 
     try {
-      const harnesses = [...this.#harnesses.values()];
-      for (const harness of harnesses) await this.#closeHarness(harness, null);
-
+      this.#dropSessions("agent retargeted");
       this.#cwd = target;
-      // a switch is a new room, and deliver ids restart with it: keeping the
-      // old room's receipts would let a fresh `req-1` look like a repeat
-      this.#receipts.clear();
-      // frames from the new harness belong to a room the server has not opened
+      // frames from the new project belong to a room the server has not opened
       // yet: they wait for the `attached` that answers the attach below
       this.#outboxOpen = false;
 
       await this.#openProject();
       await this.#attachManager();
-      const primary = await this.#openHarness(this.#primary, opts);
-      this.#projectBackend = this.#backendInfo(primary);
       this.#sendAttach();
       console.error(`[bridge] switched target to ${target}`);
     } catch (err) {
       // no `attached` is coming for a switch that died: the queued frames
-      // belong to a harness that never attached, and the only thing worth
-      // delivering is why
+      // belong to a project that never attached, and the only thing worth
+      // saying is why
       this.#queue = [];
       this.#outboxOpen = true;
       const reason = `switch_project failed: ${String(err)}`;
@@ -1327,47 +967,12 @@ export class AgentRuntime {
   }
 
   /**
-   * Start a new project and move onto it. The `created` frame goes out AFTER
-   * the switch, through the ordinary outbox, so it reaches the room the new
-   * project just opened instead of the one we are leaving — the user reads it
-   * where they end up. A switch that fails reports itself; nothing extra is
-   * said here.
-   */
-  async #createProject(rawPath: string, github: GithubRequest): Promise<void> {
-    let created;
-    try {
-      created = await createProject(rawPath, github, { gh: GH_BINARY });
-    } catch (err) {
-      // nowhere to stand. The room's switch guard opens on a `create_project`
-      // prefix, so an unexpected failure (a folder that cannot be made) has to
-      // wear one too, or the canvas would refuse every later switch.
-      const reason = errText(err);
-      this.#error(reason.startsWith("create_project") ? reason : `create_project failed: ${reason}`);
-      return;
-    }
-
-    this.#recents = await pushRecent(created.target);
-    await this.#switchProject(created.target);
-    this.#post({
-      type: "created",
-      path: created.target,
-      repo: created.repo,
-      github: created.github,
-      warnings: created.warnings,
-    });
-  }
-
-  /**
-   * Adopt a session someone else started. The pid is resolved in a FRESH scan
-   * (the server's list is as old as its last discover), and a session with an
-   * id is resumed rather than restarted. A session running in one of this
-   * repo's worktrees becomes THAT variation's session; anywhere else it is a
-   * switch.
-   *
-   * Adopting means STARTING a session Shape can drive on the same transcript,
-   * because a process someone else launched has no Shape extension, no hooks
-   * and no link — there is nothing to attach to. Which is why it needs a
-   * harness Shape can resume, and a `--resume` to hand it.
+   * Adopt a session someone else started: point Shape at the repo it runs in.
+   * The pid is resolved in a FRESH scan (the server's list is as old as its
+   * last discover), and the switch is the whole of it — Shape does not touch
+   * that session. If it is shape-aware it appears on the canvas by itself, the
+   * moment it speaks on this agent's link; if it is not, the project is still
+   * attached and the directive on disk says how to join.
    */
   async #adopt(pid: number): Promise<void> {
     const session = (await this.#discoverSessions()).find((candidate) => candidate.pid === pid);
@@ -1379,17 +984,8 @@ export class AgentRuntime {
       this.#error(`adopt rejected: the working directory of pid ${pid} could not be read`);
       return;
     }
-    // discovery classifies processes with its own spelling; the launcher and
-    // the adapters use the launchable ids
-    const backend: HarnessId = harnessIdFor(session.harness);
-    console.error(
-      `[bridge] adopting ${backend} pid ${pid} in ${session.cwd}` +
-        (session.sessionId === null ? " (no session id: fresh start)" : ` (resume ${session.sessionId})`),
-    );
-    await this.#switchProject(session.cwd, {
-      backend,
-      ...(session.sessionId === null ? {} : { resumeSessionId: session.sessionId }),
-    });
+    console.error(`[bridge] adopting the ${session.harness} session of pid ${pid}: switching to ${session.cwd}`);
+    await this.#switchProject(session.cwd);
   }
 
   /**
@@ -1463,20 +1059,6 @@ export class AgentRuntime {
     this.#picking = child;
   }
 
-  /**
-   * Every file an agent may point a codeRef at, in one variation. Git is the
-   * truth where there is one; otherwise the fs walk stands in for it.
-   */
-  async #fileIndex(worktree: string, id: string): Promise<void> {
-    if (this.#worktreeFor(worktree) === null) {
-      this.#error(`file_index rejected: ${worktree} is not a variation of ${basename(this.#projectCwd)}`);
-      return;
-    }
-    const index = await gitFileIndex(worktree);
-    const files = index === null ? await walkFileIndex(worktree) : [...index.files];
-    this.#post({ type: "file_index", worktree, id, files });
-  }
-
   // -------------------------------------------------------------------------
   // reality layer (per worktree: HEADs differ)
   // -------------------------------------------------------------------------
@@ -1507,7 +1089,7 @@ export class AgentRuntime {
     }
   }
 
-  /** One worktree's HEAD moved while its harness was idle: re-derive and ship it. */
+  /** One worktree's HEAD moved while its session was idle: re-derive and ship it. */
   async #refreshReality(worktree: string): Promise<void> {
     if (this.#realityBusy.has(worktree)) return;
     this.#realityBusy.add(worktree);
@@ -1529,7 +1111,7 @@ export class AgentRuntime {
 
   /**
    * `extract_reality`: the server asked, so the layer goes out unconditionally.
-   * A variation with no harness is still a real directory — the room may want
+   * A variation with no session is still a real directory — the room may want
    * its reality to draw drift on a canvas nobody is working in.
    */
   async #extractRealityNow(worktree: string): Promise<void> {

@@ -7,9 +7,9 @@
  * picker while the canvas is live, the summary while a comparison is on screen —
  * because they are one control in two states, and only one is ever useful.
  *
- * The word "revision" stays off screen. A person steering by voice is choosing
- * between "12 minutes ago" and "an hour ago"; the version number is a machine
- * address, so it appears where machine addresses appear: small, in monospace.
+ * The word "revision" stays off screen. A reader is choosing between "12
+ * minutes ago" and "an hour ago"; the version number is a machine address, so
+ * it appears where machine addresses appear: small, in monospace.
  */
 import { Fragment, useEffect, useState } from "react";
 import type { RevisionInfo } from "../../shared/src/index.ts";
@@ -42,8 +42,8 @@ function timeAgo(at: string, now: number): string {
 /**
  * A comparison is always about ONE variation's history: the snapshot store is
  * keyed by worktree, and "rev 12" of two branches names two different graphs.
- * The variation is the steering target, which is the one the header pill and
- * the steering chip already say the reader is working on.
+ * The variation is the one the header pill already says the reader is looking
+ * at.
  */
 function Picker({ revisions, worktree }: { revisions: RevisionInfo[]; worktree: string }) {
   const beginCompare = useApp((state) => state.beginCompare);

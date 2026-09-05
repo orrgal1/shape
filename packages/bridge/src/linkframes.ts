@@ -137,13 +137,15 @@ function parseCapabilities(value: unknown): BackendCapabilities | null {
     return null;
   }
   const terminal = c.terminal;
+  // a registry row written by an older Shape can say `pane`: it described a
+  // terminal Shape hosted itself, and there is none to render any more
   if (terminal !== "external" && terminal !== "pane" && terminal !== "none") return null;
   return {
     steerMidTurn: c.steerMidTurn,
     hostTool: c.hostTool,
     events,
     resume: c.resume,
-    terminal,
+    terminal: terminal === "external" ? "external" : "none",
   };
 }
 
@@ -183,19 +185,21 @@ function parseToolList(value: unknown): ToolInfo[] | null {
  * What is installed where the agent runs. Absent means a REGISTRY ROW written
  * before detection existed (the same validator reads stored projects), which
  * reads as "nothing known" — harmless, because a row is never the answer to
- * "what can I start": the agent re-sends its tools on every attach. A present
- * but malformed value is a malformed frame.
+ * "what is on this machine": the agent re-sends its tools on every attach. A
+ * present but malformed value is a malformed frame.
  */
 function parseTools(value: unknown): ProjectTools | null {
-  if (value === undefined) return { launcher: "pty", launchers: [], harnesses: [] };
+  if (value === undefined) return { launcher: null, launchers: [], harnesses: [] };
   if (value === null || typeof value !== "object") return null;
   const t = value as Record<string, unknown>;
-  if (t.launcher !== "herdr" && t.launcher !== "pty") return null;
+  // `pty` is how an older Shape named the terminal it hosted itself; a row
+  // carrying it has no multiplexer Shape can reach, which is `null` now
+  if (t.launcher !== "herdr" && t.launcher !== "pty" && t.launcher !== null) return null;
   const launchers = parseToolList(t.launchers);
   if (launchers === null) return null;
   const harnesses = parseToolList(t.harnesses);
   if (harnesses === null) return null;
-  return { launcher: t.launcher, launchers, harnesses };
+  return { launcher: t.launcher === "herdr" ? "herdr" : null, launchers, harnesses };
 }
 
 /**
@@ -245,15 +249,12 @@ export function parseProject(value: unknown): AgentProject | null {
   if (!isId(p.key)) return null;
   if (typeof p.label !== "string" || typeof p.cwd !== "string") return null;
   if (typeof p.targetHasCode !== "boolean") return null;
-  // a registry row written before publishing existed still parses: the machine
-  // that wrote it never claimed it could publish
-  const canPublish = p.canPublish === true;
   // older registry rows and older agents never wrote a directive: null means
   // "no file to point a launcher at", which is a real state, not a bad frame
   const directivePath =
     typeof p.directivePath === "string" && p.directivePath.length > 0 ? p.directivePath : null;
-  // a project with no harness running is a real state (nothing resolved, or
-  // nothing installed): the room opens on the "start a session" card
+  // a project with no session reporting in is the ordinary state: the room
+  // opens on the canvas and waits for one to speak
   const backend = p.backend === null || p.backend === undefined ? null : parseBackend(p.backend);
   if (p.backend !== null && p.backend !== undefined && backend === null) return null;
   const tools = parseTools(p.tools);
@@ -265,24 +266,10 @@ export function parseProject(value: unknown): AgentProject | null {
     backend,
     tools,
     targetHasCode: p.targetHasCode,
-    canPublish,
     directivePath,
     manager: parseManager(p.manager),
     legacyKeys: parseLegacyKeys(p.legacyKeys),
   };
-}
-
-/**
- * The publish half of a create, both ways on the wire. Absent and null are the
- * same request — "just the folder" — so a client that omits the field is not a
- * malformed frame.
- */
-function parseGithubRequest(value: unknown): { visibility: "public" | "private" } | null | undefined {
-  if (value === null || value === undefined) return null;
-  if (typeof value !== "object") return undefined;
-  const g = value as Record<string, unknown>;
-  if (g.visibility !== "public" && g.visibility !== "private") return undefined;
-  return { visibility: g.visibility };
 }
 
 export function parseSession(value: unknown): AgentSession | null {
@@ -412,10 +399,10 @@ export function parseWorktrees(value: unknown): WorktreeInfo[] | null {
 }
 
 /**
- * The harnesses an agent is running, one per opened worktree. Every field is
- * load-bearing where this lands: the room keys its per-worktree state by
- * `worktree`, the client renders from `backend.capabilities`, and `state`
- * decides whether a worktree can be steered at all.
+ * The sessions an agent is watching, one per worktree with one reporting in.
+ * Every field is load-bearing where this lands: the room keys its per-worktree
+ * state by `worktree`, the client renders from `backend.capabilities`, and
+ * `state` is what the canvas draws as the session working or idle.
  */
 export function parseWorktreeSessions(value: unknown): WorktreeSession[] | null {
   if (!Array.isArray(value)) return null;
@@ -459,8 +446,8 @@ function parseSessions(value: unknown): DiscoveredSession[] | null {
   for (const row of rows) {
     if (row === null || typeof row !== "object") return null;
     const s = row as Record<string, unknown>;
-    // harness ids ARE backend ids; an id with no adapter is rejected by name
-    // where a session is adopted, not here
+    // a harness id with no meaning to this Shape is still a session somebody
+    // is running: what to do about it is decided where it is used, not here
     if (typeof s.harness !== "string" || typeof s.pid !== "number" || !Number.isInteger(s.pid)) {
       return null;
     }
@@ -473,8 +460,6 @@ function parseSessions(value: unknown): DiscoveredSession[] | null {
     const sessionFile = s.sessionFile ?? null;
     const startedAt = s.startedAt ?? null;
     if (!isNullableString(sessionFile) || !isNullableString(startedAt)) return null;
-    const spawnedByShape = s.spawnedByShape ?? false;
-    if (typeof spawnedByShape !== "boolean") return null;
     const attach = s.attach ?? "none";
     if (attach !== "socket" && attach !== "daemon" && attach !== "http" && attach !== "none") {
       return null;
@@ -494,7 +479,6 @@ function parseSessions(value: unknown): DiscoveredSession[] | null {
       startedAt,
       resumeCommand,
       attach,
-      spawnedByShape,
     });
   }
   return out;
@@ -582,59 +566,17 @@ export function parseAgentToServerMsg(raw: string): AgentToServerMsg | null {
       if (m.path === null) return { type: "folder_picked", path: null };
       if (!isId(m.path)) return null;
       return { type: "folder_picked", path: m.path };
-    case "delivered":
-      if (!isWorktree(m.worktree) || !isId(m.id)) return null;
-      if (m.mode !== "prompt" && m.mode !== "steer") return null;
-      if (typeof m.queued !== "boolean") return null;
-      return { type: "delivered", worktree: m.worktree, id: m.id, mode: m.mode, queued: m.queued };
     case "skeleton_result":
       if (!isWorktree(m.worktree) || !isId(m.id) || !Array.isArray(m.ops)) return null;
       // every op is validated by `applyOps`; a non-array is what it cannot survive
       return { type: "skeleton_result", worktree: m.worktree, id: m.id, ops: m.ops as CanvasOp[] };
-    case "file_index": {
-      if (!isWorktree(m.worktree) || !isId(m.id)) return null;
-      const files = parseStringArray(m.files);
-      if (files === null) return null;
-      return { type: "file_index", worktree: m.worktree, id: m.id, files };
-    }
     case "agent_error":
       if (typeof m.message !== "string") return null;
       return { type: "agent_error", message: m.message };
-    case "created": {
-      if (typeof m.path !== "string" || m.path.length === 0) return null;
-      if (m.repo !== "initialized" && m.repo !== "existing") return null;
-      let github: { url: string } | null = null;
-      if (m.github !== null && m.github !== undefined) {
-        if (typeof m.github !== "object") return null;
-        const url = (m.github as Record<string, unknown>).url;
-        if (typeof url !== "string" || url.length === 0) return null;
-        github = { url };
-      }
-      const warnings = parseStringArray(m.warnings);
-      if (warnings === null) return null;
-      return { type: "created", path: m.path, repo: m.repo, github, warnings };
-    }
     case "agent_exit":
     case "detached":
       if (typeof m.reason !== "string") return null;
       return { type: m.type, reason: m.reason };
-    case "terminal":
-      if (!isWorktree(m.worktree) || typeof m.open !== "boolean") return null;
-      return { type: "terminal", worktree: m.worktree, open: m.open };
-    case "pty_data":
-      if (!isWorktree(m.worktree) || typeof m.data !== "string") return null;
-      return { type: "pty_data", worktree: m.worktree, data: m.data };
-    case "pty_exit": {
-      if (!isWorktree(m.worktree)) return null;
-      const code = m.code ?? null;
-      if (code !== null && (typeof code !== "number" || !Number.isInteger(code))) return null;
-      return { type: "pty_exit", worktree: m.worktree, code };
-    }
-    case "pty_state":
-      if (!isWorktree(m.worktree)) return null;
-      if (typeof m.open !== "boolean" || typeof m.shell !== "string") return null;
-      if (typeof m.cwd !== "string") return null;
-      return { type: "pty_state", worktree: m.worktree, open: m.open, shell: m.shell, cwd: m.cwd };
     default:
       return null;
   }
@@ -652,69 +594,22 @@ export function parseServerToAgentMsg(raw: string): ServerToAgentMsg | null {
   const m = parsed as Record<string, unknown>;
   switch (m.type) {
     case "attached":
-      if (!isId(m.projectId) || typeof m.preamble !== "string") return null;
-      return { type: "attached", projectId: m.projectId, preamble: m.preamble };
+      if (!isId(m.projectId)) return null;
+      return { type: "attached", projectId: m.projectId };
     case "error":
       if (typeof m.message !== "string") return null;
       return { type: "error", message: m.message };
     case "canvas_result":
       if (!isId(m.id) || typeof m.text !== "string" || typeof m.isError !== "boolean") return null;
       return { type: "canvas_result", id: m.id, text: m.text, isError: m.isError };
-    case "deliver":
-      if (!isWorktree(m.worktree) || !isId(m.id) || typeof m.body !== "string") return null;
-      return { type: "deliver", worktree: m.worktree, id: m.id, body: m.body };
-    case "abort":
-      if (!isWorktree(m.worktree)) return null;
-      return { type: "abort", worktree: m.worktree };
-    case "open_worktree": {
-      // a worktree is opened BY PATH: its id is the realpath the agent resolves
-      if (typeof m.path !== "string" || m.path.trim().length === 0) return null;
-      const backend = m.backend;
-      if (backend !== undefined && typeof backend !== "string") return null;
-      const resumeSessionId = m.resumeSessionId;
-      if (resumeSessionId !== undefined && typeof resumeSessionId !== "string") return null;
-      // both flags come off a checkbox: absent is false, and anything that is
-      // not a boolean is a frame nobody meant to send
-      const autonomous = m.autonomous;
-      if (autonomous !== undefined && typeof autonomous !== "boolean") return null;
-      const remember = m.remember;
-      if (remember !== undefined && typeof remember !== "boolean") return null;
-      const msg: Extract<ServerToAgentMsg, { type: "open_worktree" }> = {
-        type: "open_worktree",
-        path: m.path.trim(),
-      };
-      if (backend !== undefined) msg.backend = backend;
-      if (resumeSessionId !== undefined) msg.resumeSessionId = resumeSessionId;
-      if (autonomous !== undefined) msg.autonomous = autonomous;
-      if (remember !== undefined) msg.remember = remember;
-      return msg;
-    }
     case "focus_terminal":
       if (!isWorktree(m.worktree)) return null;
       return { type: "focus_terminal", worktree: m.worktree };
-    case "close_worktree":
-      if (!isWorktree(m.worktree)) return null;
-      return { type: "close_worktree", worktree: m.worktree };
-    case "switch": {
+    case "switch":
+      // a repo is retargeted onto BY PATH: nothing is started, so there is
+      // nothing else to say about it
       if (typeof m.path !== "string" || m.path.trim().length === 0) return null;
-      const backend = m.backend;
-      if (backend !== undefined && typeof backend !== "string") return null;
-      const resumeSessionId = m.resumeSessionId;
-      if (resumeSessionId !== undefined && typeof resumeSessionId !== "string") return null;
-      const msg: Extract<ServerToAgentMsg, { type: "switch" }> = {
-        type: "switch",
-        path: m.path.trim(),
-      };
-      if (backend !== undefined) msg.backend = backend;
-      if (resumeSessionId !== undefined) msg.resumeSessionId = resumeSessionId;
-      return msg;
-    }
-    case "create": {
-      if (typeof m.path !== "string" || m.path.trim().length === 0) return null;
-      const github = parseGithubRequest(m.github);
-      if (github === undefined) return null;
-      return { type: "create", path: m.path.trim(), github };
-    }
+      return { type: "switch", path: m.path.trim() };
     case "adopt":
       if (typeof m.pid !== "number" || !Number.isInteger(m.pid) || m.pid <= 0) return null;
       return { type: "adopt", pid: m.pid };
@@ -726,27 +621,11 @@ export function parseServerToAgentMsg(raw: string): ServerToAgentMsg | null {
       if (!isId(m.id)) return null;
       return { type: m.type, id: m.id };
     case "synthesize_skeleton":
-    case "file_index":
       if (!isWorktree(m.worktree) || !isId(m.id)) return null;
-      return { type: m.type, worktree: m.worktree, id: m.id };
+      return { type: "synthesize_skeleton", worktree: m.worktree, id: m.id };
     case "extract_reality":
       if (!isWorktree(m.worktree)) return null;
       return { type: "extract_reality", worktree: m.worktree };
-    case "pty_open":
-    case "pty_resize": {
-      if (!isWorktree(m.worktree)) return null;
-      // a terminal size must be a real geometry: the pty is resized with it
-      const { cols, rows } = m;
-      if (typeof cols !== "number" || !Number.isInteger(cols) || cols <= 0) return null;
-      if (typeof rows !== "number" || !Number.isInteger(rows) || rows <= 0) return null;
-      return { type: m.type, worktree: m.worktree, cols, rows };
-    }
-    case "pty_input":
-      if (!isWorktree(m.worktree) || typeof m.data !== "string") return null;
-      return { type: "pty_input", worktree: m.worktree, data: m.data };
-    case "pty_close":
-      if (!isWorktree(m.worktree)) return null;
-      return { type: "pty_close", worktree: m.worktree };
     default:
       return null;
   }

@@ -3,8 +3,9 @@
  * the target project's disk — the bounded source probe that answers
  * `targetHasCode`, and the mechanical skeleton derived from the reality layer.
  *
- * The meaning-making half (survey prompt, survey-turn validation) lives in
- * `server/onboarding.ts`; it never touches the filesystem.
+ * That skeleton is the whole of the automatic map: the room asks for it when a
+ * project with code arrives on an empty canvas, applies the ops and is done.
+ * Nothing here asks an agent to explain anything.
  */
 
 import { readdir, readFile } from "node:fs/promises";

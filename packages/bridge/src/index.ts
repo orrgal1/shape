@@ -1,15 +1,15 @@
 /**
- * Shape in local mode: the canvas server and the agent that drives the coding
- * harnesses, in one process, joined by the in-memory link. Same frames and the
- * same records as remote mode — only the transport is shorter and the database
- * is the user's own (`~/.shape/shape.db`, or `$SHAPE_HOME`).
+ * Shape in local mode: the canvas server and the agent that watches the
+ * machine's coding sessions, in one process, joined by the in-memory link.
+ * Same frames and the same records as remote mode — only the transport is
+ * shorter and the database is the user's own (`~/.shape/shape.db`, or
+ * `$SHAPE_HOME`).
  *
  * `--cwd` may be ANY worktree of the repo: the project is the repo, all of its
- * worktrees share one canvas, and the one named here is the variation that gets
- * the first harness.
+ * worktrees share one canvas, and each of them shows whatever session is
+ * reporting in from it.
  *
- * Run: node src/index.ts [--cwd <dir>] [--port <n>] [--backend <id>] [--omp "<cmd ...>"]
- *                        [--db <file>]
+ * Run: node src/index.ts [--cwd <dir>] [--port <n>] [--db <file>]
  */
 
 import { homedir } from "node:os";
@@ -22,17 +22,9 @@ import { memoryLinkPair } from "./transport.ts";
 import { SocketServer } from "./wsserver.ts";
 
 interface Cli {
-  /** `--cwd <dir>`: the worktree to open first; the project is its whole repo */
+  /** `--cwd <dir>`: any worktree of the repo to watch; the project is the repo */
   cwd: string;
   port: number;
-  /**
-   * `--backend <id>`: which harness to start. A project's own
-   * `.shape/config.json` beats it; with neither, and more than one harness
-   * installed, the browser asks.
-   */
-  backend?: string;
-  /** `--omp "<cmd ...>"`: the omp executable and its leading args */
-  ompCommand?: string[];
   /** `--db <file>`: the database every project's canvas is kept in */
   db: string;
 }
@@ -56,12 +48,6 @@ function parseArgv(argv: string[]): Cli {
       if (Number.isNaN(parsed)) throw new Error(`--port expects a number, got ${next}`);
       cli.port = parsed;
       i++;
-    } else if (arg === "--backend" && next !== undefined) {
-      cli.backend = next.trim();
-      i++;
-    } else if (arg === "--omp" && next !== undefined) {
-      cli.ompCommand = next.trim().split(/\s+/).filter((token) => token.length > 0);
-      i++;
     } else if (arg === "--db" && next !== undefined) {
       cli.db = resolve(next);
       i++;
@@ -72,8 +58,8 @@ function parseArgv(argv: string[]): Cli {
   return cli;
 }
 
-// A bad --backend id or a broken config file is a startup error, not a stack
-// trace: the operator needs to read what went wrong.
+// A bad flag is a startup error, not a stack trace: the operator needs to read
+// what went wrong.
 try {
   const cli = parseArgv(process.argv.slice(2));
   const sockets = new SocketServer({ port: cli.port });
@@ -88,10 +74,6 @@ try {
   server.attachAgent(link.server);
   const agent = new AgentRuntime({
     cwd: cli.cwd,
-    ...(cli.backend === undefined ? {} : { backend: cli.backend }),
-    ...(cli.ompCommand === undefined ? {} : { ompCommand: cli.ompCommand }),
-    // local mode is the operator's own machine: the terminal pane stays on
-    allowTerminal: true,
     sockets,
     link: link.agent,
     // a retarget that failed has left this process with nowhere to stand:
@@ -104,11 +86,10 @@ try {
       }, 50),
   });
 
-  // The sessions live in the user's terminal and outlive this process unless
-  // told otherwise: a bridge stopped by its supervisor (or Ctrl-C) must close
-  // the tabs it opened, or the next bridge finds herdr still running its
-  // predecessor's harness. Registered before start() so a stop mid-startup
-  // settles too.
+  // Sessions live in the user's own terminal and outlive this process: a
+  // bridge stopped by its supervisor (or Ctrl-C) leaves them running and only
+  // stops watching. Registered before start() so a stop mid-startup settles
+  // too.
   let stopping = false;
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {
@@ -124,11 +105,11 @@ try {
     });
   }
 
-  // The socket listens BEFORE the harness is started, and that order matters:
-  // a hook-driven adapter's first event (Claude Code fires SessionStart within
-  // a second of the TUI coming up) arrives over the link, and a hook that finds
-  // nobody listening exits silently — the agent would never learn the session
-  // id. The banner is still printed last, so "canvas at ..." means fully up.
+  // The socket listens BEFORE the agent attaches, and that order matters: a
+  // session's first event (Claude Code fires SessionStart within a second of
+  // the TUI coming up) arrives over the link, and a hook that finds nobody
+  // listening exits silently — the agent would never learn the session id. The
+  // banner is still printed last, so "canvas at ..." means fully up.
   await sockets.listen();
   await agent.start();
   console.error(`[bridge] canvas at ${sockets.url(BRIDGE_WS_PATH)} (target ${cli.cwd})`);

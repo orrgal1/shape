@@ -1,49 +1,33 @@
 /**
- * The herdr launcher: a direct client of herdr's socket API, so a Shape
- * session is a real tab in the user's own terminal multiplexer.
+ * The herdr client: a direct client of herdr's socket API, so Shape can see
+ * the user's own terminal multiplexer and show them the tab a session runs in.
+ *
+ * Shape starts no coding sessions. What it uses herdr for is threefold: the
+ * project's MANAGER tab (`../manager.ts`), which Shape does open and prompt
+ * once; looking at what is live (`tabs`, `agents`) so the manager can be found
+ * again; and bringing a session's tab in front of the user (`focusCwd`).
  *
  * Wire (agent://HerdrMap, re-verified against the real herdr 0.8.0, protocol
  * 19): newline-delimited JSON over a unix socket, `{id, method, params}` ->
- * `{id, result}` | `{id, error:{code,message}}`. Two properties of that server
- * shape this whole client:
+ * `{id, result}` | `{id, error:{code,message}}`. One property of that server
+ * shapes this whole client: a request is answered with ONE line and then the
+ * server HANGS UP. A call therefore IS a connection: open, write the frame,
+ * read the first response line, done. The close that follows the answer is the
+ * protocol, not a failure — a close BEFORE the answer is the failure. Matching
+ * by id is not available either: a request herdr refuses at validation time
+ * comes back with `id: ""`, so the first response line on a connection
+ * carrying one request is that request's answer.
  *
- *   - A plain request is answered with ONE line and then the server HANGS UP.
- *     A call therefore IS a connection: open, write the frame, read the first
- *     response line, done. The close that follows the answer is the protocol,
- *     not a failure — a close BEFORE the answer is the failure. Matching by id
- *     is not available either: a request herdr refuses at validation time
- *     comes back with `id: ""`, so the first response line on a connection
- *     carrying one request is that request's answer.
- *   - An `events.subscribe` connection is the exception: it answers
- *     `{type:"subscription_started"}` and then STAYS OPEN, streaming
- *     `{event, data}` envelopes. `pane.exited` / `pane.closed` are global, but
- *     `pane.agent_status_changed` REQUIRES a `pane_id` (its subscription
- *     schema says so, and herdr answers `invalid_request` without it) — so
- *     status is one connection per launched pane, alongside one global
- *     lifecycle stream that reconnects itself.
- *
- * Launching is two steps because herdr's is: `tab.create` makes a tab whose
- * root pane sits at an idle shell, then `agent.start` runs the harness in that
- * pane and waits until herdr recognizes it. Pane ids are the durable handle
- * (agent names follow whoever occupies the pane), so everything after launch
- * is addressed by pane id.
- *
- * Placement is the other half of that: a project gets ONE workspace and each
- * of its variations ONE tab in it, so the user's tab strip reads the way the
- * canvas does. The workspace is found per launch (`workspace.list`, which is
- * cheap next to starting a harness) by the id Shape last used for the
- * project, then by a workspace herdr says is a checkout of it, then by its
+ * Opening the manager is two steps because herdr's is: `tab.create` makes a
+ * tab whose root pane sits at an idle shell, then `agent.start` runs omp in
+ * that pane and waits until herdr recognizes it. Placement is the other half:
+ * a project gets ONE workspace, found (`workspace.list`) by the id Shape last
+ * used for it, then by a workspace herdr says is a checkout of it, then by its
  * name; nothing matching means `workspace.create`, whose answer already
- * carries the first tab and root pane — so a project's first session IS that
- * root tab and asks for no tab of its own.
- *
- * Both halves of that — placement and the `agent.start` name retry — are
- * shared with `open`, the second way in: a tab Shape starts a harness in but
- * does not drive (the project's manager, `../manager.ts`). It differs in two
- * things only, and both matter. It subscribes to nothing, because nobody is
- * rendering that session, and the names it tries are the CALLER's in order
- * (`manager` first) rather than Shape's `shape-<slug>-<n>`, because a session
- * Shape has to recognize again after a restart is recognized by its name.
+ * carries the first tab and root pane — so the manager can take that root tab
+ * and asks for no tab of its own. The names `agent.start` is asked for are the
+ * caller's in order (`manager` first), because a session Shape has to
+ * recognize again after a restart is recognized by its name.
  *
  * Focusing is two steps for the same reason: `agent.focus` switches the tab
  * INSIDE herdr, but the terminal application hosting it is still behind the
@@ -51,16 +35,17 @@
  * is found by walking the herdr client's parent chain out to a `.app`
  * (`SHAPE_TERMINAL_APP` names it outright, for an operator or a test) and
  * raised with `open` (`SHAPE_OPEN` replaces that binary in a test). Where
- * nothing can be raised — another platform, a client over ssh or in a
- * bare console — the launcher advertises `terminal: "none"` and the browser
- * offers no "Go to terminal" button at all.
+ * nothing can be raised — another platform, a client over ssh or in a bare
+ * console — the tab is still switched, and the failure to raise the window is
+ * what the user is told.
  */
 
 import { execFile } from "node:child_process";
+import { realpath } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
-import type { AgentStatus, Launched, LaunchSpec, Launcher } from "./types.ts";
+import { basename, join, resolve as resolvePath } from "node:path";
+import type { HarnessId } from "../../../../shared/src/index.ts";
 
 /** the protocol version this client was written against (herdr 0.8.x) */
 const PROTOCOL = 19;
@@ -74,18 +59,14 @@ const CALL_TIMEOUT_MS = 30_000;
 /** `agent.start` waits for herdr to recognize the harness; its own ceiling */
 const START_TIMEOUT_MS = 60_000;
 
-/** names already taken on the server before a launch gives up (see `launch`) */
+/** names already taken on the server before an open gives up (see `#start`) */
 const MAX_NAME_ATTEMPTS = 20;
 
 /**
- * How long an utterance waits for a just-started agent to become addressable,
- * and how often it looks. `agent.start` answering is not that moment: the
- * agent stays `launch_pending` for a few seconds afterwards (herdr 0.8.0 is
- * watching the screen settle), and `agent.prompt` in that window is refused
- * with `agent_not_ready`. Retrying the prompt itself does not help — every
- * attempt keeps the agent pending for as long as the attempts continue (seen
- * against the same herdr: 10 s of 200 ms retries, then ready the moment they
- * stopped) — so readiness is READ off `agent.get` and the prompt sent once.
+ * How long a prompt waits for a just-started agent to become addressable.
+ * `agent.start` answering means herdr recognized the harness, not that it will
+ * take a prompt yet, so the pane is polled until it stops saying it is still
+ * launching.
  */
 const PROMPT_READY_MS = 15_000;
 const PROMPT_POLL_MS = 250;
@@ -108,27 +89,8 @@ const OPEN_BINARY = process.env.SHAPE_OPEN ?? "open";
 /** the app bundle to raise, named by an operator (or a test) who knows better */
 const TERMINAL_APP_ENV = "SHAPE_TERMINAL_APP";
 
-/** how long to wait before reopening a dropped event stream, and its ceiling */
-const RECONNECT_MS = 500;
-const RECONNECT_MAX_MS = 30_000;
-
 /** herdr agent names: `[a-z][a-z0-9_-]{0,31}`, unique among live agents */
 const MAX_AGENT_NAME = 32;
-
-const STATUSES: Record<string, AgentStatus> = {
-  idle: "idle",
-  working: "working",
-  blocked: "blocked",
-  done: "done",
-  unknown: "unknown",
-};
-
-/**
- * The events that are global, and the only ones this launcher needs globally:
- * a pane going away ends a session. An agent APPEARING is not interesting —
- * `agent.start` already waited for that — and status is per-pane by protocol.
- */
-const LIFECYCLE_SUBSCRIPTIONS: readonly Record<string, unknown>[] = [{ type: "pane.exited" }, { type: "pane.closed" }];
 
 /** ids herdr sees in its own log: one per request this process ever sends */
 let requests = 0;
@@ -159,6 +121,20 @@ class HerdrRefusal extends Error {
 /** an id herdr actually gave us, as opposed to a field of the wrong shape */
 function asId(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * A directory as the filesystem sees it, for comparing what herdr reports a
+ * session runs in with a worktree id (always a realpath). A path that cannot
+ * be resolved is judged by its spelling — the session may be running in a
+ * directory that has since been removed.
+ */
+async function canonical(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch {
+    return resolvePath(path);
+  }
 }
 
 /**
@@ -300,32 +276,13 @@ function raiseApp(app: string): Promise<string | null> {
 }
 
 /**
- * A herdr agent name out of a worktree directory: lowercase, `[a-z0-9_-]`,
- * suffixed with a counter so two sessions in the same directory (a restart
- * before herdr released the old name) cannot collide.
- */
-function agentName(cwd: string, seq: number): string {
-  const slug = (cwd.split("/").pop() ?? "shape").toLowerCase().replaceAll(/[^a-z0-9_-]+/g, "-");
-  const suffix = `-${String(seq)}`;
-  const room = MAX_AGENT_NAME - "shape-".length - suffix.length;
-  const trimmed = slug.slice(0, Math.max(1, room)).replace(/-+$/, "");
-  return `shape-${trimmed.length > 0 ? trimmed : "session"}${suffix}`;
-}
-
-/**
- * One framed connection to herdr: at most one request in flight on it, plus
- * the event stream a subscription turns it into.
- *
- * The lifetime is the protocol's: a request connection lives for exactly one
- * exchange (`HerdrConnection.call`), a subscription connection lives until
- * herdr or the launcher ends it.
+ * One framed connection to herdr, carrying exactly one request: that is the
+ * whole lifetime the protocol offers for a plain method (see the header).
  */
 class HerdrConnection {
   readonly #socket: Socket;
   #buffer = "";
   #pending: { settle: (result: Record<string, unknown>) => void; fail: (err: Error) => void } | null = null;
-  #onEvent: ((event: string, data: Record<string, unknown>) => void) | null = null;
-  #onGone: ((reason: string) => void) | null = null;
   /** why this connection ended, and the fact that it did */
   #reason: string | null = null;
 
@@ -343,7 +300,7 @@ class HerdrConnection {
     });
   }
 
-  static open(path: string): Promise<HerdrConnection> {
+  static #open(path: string): Promise<HerdrConnection> {
     const { promise, resolve, reject } = Promise.withResolvers<HerdrConnection>();
     const socket = connect(path);
     const timer = setTimeout(() => {
@@ -372,34 +329,16 @@ class HerdrConnection {
     params: Record<string, unknown>,
     timeoutMs = CALL_TIMEOUT_MS,
   ): Promise<Record<string, unknown>> {
-    const connection = await HerdrConnection.open(path);
+    const connection = await HerdrConnection.#open(path);
     try {
-      return await connection.request(method, params, timeoutMs);
+      return await connection.#request(method, params, timeoutMs);
     } finally {
-      connection.close();
+      connection.#close();
     }
   }
 
-  get closed(): boolean {
-    return this.#reason !== null;
-  }
-
-  onEvent(cb: (event: string, data: Record<string, unknown>) => void): void {
-    this.#onEvent = cb;
-  }
-
-  /** Told when this connection ends, at once if it already has. */
-  onGone(cb: (reason: string) => void): void {
-    if (this.#reason !== null) {
-      cb(this.#reason);
-      return;
-    }
-    this.#onGone = cb;
-  }
-
-  request(method: string, params: Record<string, unknown>, timeoutMs = CALL_TIMEOUT_MS): Promise<Record<string, unknown>> {
+  #request(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<Record<string, unknown>> {
     if (this.#reason !== null) return Promise.reject(new Error(this.#reason));
-    if (this.#pending !== null) return Promise.reject(new Error("a herdr connection carries one request at a time"));
     const id = `shape-${String(++requests)}`;
     const { promise, resolve, reject } = Promise.withResolvers<Record<string, unknown>>();
     const timer = setTimeout(() => {
@@ -421,8 +360,7 @@ class HerdrConnection {
   }
 
   /** Ends this connection on Shape's initiative: nobody is told it dropped. */
-  close(): void {
-    this.#onGone = null;
+  #close(): void {
     this.#gone("the launcher closed this connection");
     this.#socket.destroy();
   }
@@ -435,9 +373,6 @@ class HerdrConnection {
     // an answered request has no pending entry left: the close after the
     // answer is how herdr ends a plain exchange, and it fails nothing
     pending?.fail(new Error(reason));
-    const onGone = this.#onGone;
-    this.#onGone = null;
-    onGone?.(reason);
   }
 
   #onData(chunk: string): void {
@@ -456,11 +391,9 @@ class HerdrConnection {
         continue;
       }
       const frame = asRecord(raw);
-      // a push envelope carries an event name; a response carries result/error
-      if (typeof frame.event === "string") {
-        this.#onEvent?.(frame.event, asRecord(frame.data));
-        continue;
-      }
+      // this client subscribes to nothing, so a push envelope on a request
+      // connection answers nobody: it must not be mistaken for the answer
+      if (typeof frame.event === "string") continue;
       const entry = this.#pending;
       if (entry === null) continue;
       this.#pending = null;
@@ -474,118 +407,6 @@ class HerdrConnection {
       entry.settle(asRecord(frame.result));
     }
   }
-}
-
-/**
- * A subscription kept alive: `events.subscribe` on its own connection, the
- * stream that follows, and a reopen with growing backoff whenever herdr drops
- * it. The FIRST open is awaited — a subscription that cannot be established
- * at all is the caller's problem — and every reopen after that is this
- * object's business, announced once per outage so a restarting herdr does not
- * fill the log.
- */
-class HerdrSubscription {
-  readonly #path: string;
-  readonly #label: string;
-  readonly #subscriptions: readonly Record<string, unknown>[];
-  readonly #onEvent: (event: string, data: Record<string, unknown>) => void;
-  #connection: HerdrConnection | null = null;
-  #timer: NodeJS.Timeout | null = null;
-  #backoff = RECONNECT_MS;
-  #warned = false;
-  #stopped = false;
-
-  private constructor(opts: {
-    path: string;
-    label: string;
-    subscriptions: readonly Record<string, unknown>[];
-    onEvent: (event: string, data: Record<string, unknown>) => void;
-  }) {
-    this.#path = opts.path;
-    this.#label = opts.label;
-    this.#subscriptions = opts.subscriptions;
-    this.#onEvent = opts.onEvent;
-  }
-
-  static async open(opts: {
-    path: string;
-    label: string;
-    subscriptions: readonly Record<string, unknown>[];
-    onEvent: (event: string, data: Record<string, unknown>) => void;
-  }): Promise<HerdrSubscription> {
-    const subscription = new HerdrSubscription(opts);
-    await subscription.#connect();
-    return subscription;
-  }
-
-  /** The thing this watched is gone, or the launcher is: stop for good. */
-  close(): void {
-    this.#stopped = true;
-    if (this.#timer !== null) {
-      clearTimeout(this.#timer);
-      this.#timer = null;
-    }
-    this.#connection?.close();
-    this.#connection = null;
-  }
-
-  async #connect(): Promise<void> {
-    const connection = await HerdrConnection.open(this.#path);
-    try {
-      await connection.request("events.subscribe", { subscriptions: this.#subscriptions });
-    } catch (err) {
-      connection.close();
-      throw err;
-    }
-    if (this.#stopped) {
-      connection.close();
-      return;
-    }
-    connection.onEvent(this.#onEvent);
-    connection.onGone((reason) => {
-      this.#dropped(reason);
-    });
-    this.#connection = connection;
-    this.#backoff = RECONNECT_MS;
-    if (this.#warned) {
-      this.#warned = false;
-      console.error(`[bridge] herdr's ${this.#label} events are back`);
-    }
-  }
-
-  #dropped(reason: string): void {
-    this.#connection = null;
-    if (this.#stopped) return;
-    if (!this.#warned) {
-      this.#warned = true;
-      console.error(`[bridge] herdr's ${this.#label} events stopped (${reason}) — reconnecting`);
-    }
-    this.#retry();
-  }
-
-  #retry(): void {
-    if (this.#stopped || this.#timer !== null) return;
-    const delay = this.#backoff;
-    this.#backoff = Math.min(this.#backoff * 2, RECONNECT_MAX_MS);
-    this.#timer = setTimeout(() => {
-      this.#timer = null;
-      this.#connect().catch(() => {
-        this.#retry();
-      });
-    }, delay);
-    // a reconnect nobody is waiting for must not hold the process open
-    this.#timer.unref();
-  }
-}
-
-/** what one launched pane's subscribers are waiting to hear */
-interface PaneSinks {
-  status: Set<(status: AgentStatus) => void>;
-  exit: Set<(code: number | null) => void>;
-  /** this pane's own `pane.agent_status_changed` stream, released with it */
-  statuses: HerdrSubscription | null;
-  /** an exit is reported once; herdr may say `pane.exited` and `pane.closed` */
-  gone: boolean;
 }
 
 /** the tab a session was given, and the project workspace holding it */
@@ -613,6 +434,26 @@ export interface HerdrAgent {
   cwd: string | null;
 }
 
+/** what `open` needs to place a tab and start a harness in it */
+export interface HerdrOpenSpec {
+  /** where the harness runs */
+  cwd: string;
+  /** which harness this is; herdr needs it to recognize the pane */
+  kind: HarnessId;
+  /** the whole command line, argv[0] included (the executable) */
+  argv: string[];
+  /** added to the session's environment, never replacing it */
+  env: Record<string, string>;
+  /**
+   * The project this tab belongs to: its main worktree's realpath and the name
+   * a human calls it. herdr keeps every tab of one project in ONE workspace,
+   * so the workspace has to be findable (and namable) from the project.
+   */
+  project: { path: string; label: string };
+  /** what the tab is called where a human can see it */
+  label: string;
+}
+
 /** a harness started by `open`: a tab and a name, and nothing watching it */
 export interface HerdrOpened {
   paneId: string;
@@ -621,41 +462,30 @@ export interface HerdrOpened {
   agentName: string;
 }
 
-export class HerdrLauncher implements Launcher {
+export class HerdrLauncher {
   readonly id = "herdr" as const;
   readonly label = "herdr";
-  /**
-   * A herdr tab is the USER's terminal: Shape can focus it and raise the
-   * application hosting it, never embed it. When there is no such application
-   * to raise (`#terminalApp` is null) the button would be a lie, so the
-   * launcher offers no terminal at all — decided once, at probe time, because
-   * capabilities are sent to the browser before any session exists.
-   */
-  readonly terminal: "external" | "none";
 
   readonly #path: string;
   readonly #version: string;
   /** the app bundle to raise; a hint, re-probed when raising it fails */
   #terminalApp: string | null;
-  readonly #panes = new Map<string, PaneSinks>();
   /** project main worktree -> the workspace hosting that project's tabs */
   readonly #workspaces = new Map<string, string>();
-  /** the one stream that outlives every session: panes going away */
-  #lifecycle: HerdrSubscription | null = null;
   #seq = 0;
 
   private constructor(opts: { path: string; version: string; terminalApp: string | null }) {
     this.#path = opts.path;
     this.#version = opts.version;
     this.#terminalApp = opts.terminalApp;
-    this.terminal = opts.terminalApp === null ? "none" : "external";
   }
 
   /**
    * Is herdr here and talking? `session.snapshot` is the handshake: it proves
    * the socket belongs to a herdr server AND carries the protocol version to
-   * assert against. A refusal is not an error — Shape falls back to its own
-   * pty — so everything here answers `null` and says why on stderr.
+   * assert against. A refusal is not an error — a project without herdr simply
+   * has no terminal to show and no manager tab — so everything here answers
+   * `null` and says why on stderr.
    *
    * `herdr status` is shelled out first ONLY when the socket path is herdr's
    * own default: that call exists to autospawn the server, and an operator (or
@@ -677,7 +507,7 @@ export class HerdrLauncher implements Launcher {
       const protocol = snapshot.protocol;
       if (protocol !== PROTOCOL) {
         console.error(
-          `[bridge] herdr speaks protocol ${String(protocol)}, this Shape speaks ${String(PROTOCOL)} — using Shape's own terminal instead`,
+          `[bridge] herdr speaks protocol ${String(protocol)}, this Shape speaks ${String(PROTOCOL)} — Shape will not talk to it`,
         );
         return null;
       }
@@ -685,22 +515,11 @@ export class HerdrLauncher implements Launcher {
       const found = await findTerminalApp();
       if (found.app === null) {
         console.error(
-          `[bridge] herdr's terminal window cannot be raised from here (${found.why}) — "Go to terminal" is not offered`,
+          `[bridge] herdr's terminal window cannot be raised from here (${found.why}) — focusing a session switches its tab and nothing more`,
         );
       }
-      const launcher = new HerdrLauncher({ path, version, terminalApp: found.app });
-      // the one stream that must be up before Shape commits to herdr: without
-      // it a session that ends in the user's terminal would never be noticed
-      launcher.#lifecycle = await HerdrSubscription.open({
-        path,
-        label: "lifecycle",
-        subscriptions: LIFECYCLE_SUBSCRIPTIONS,
-        onEvent: (event, data) => {
-          launcher.#onEvent(event, data);
-        },
-      });
-      console.error(`[bridge] herdr ${version} (protocol ${String(PROTOCOL)}) will host the sessions`);
-      return launcher;
+      console.error(`[bridge] herdr ${version} (protocol ${String(PROTOCOL)}) hosts this machine's sessions`);
+      return new HerdrLauncher({ path, version, terminalApp: found.app });
     } catch (err) {
       console.error(`[bridge] herdr did not answer: ${err instanceof Error ? err.message : String(err)}`);
       return null;
@@ -711,7 +530,7 @@ export class HerdrLauncher implements Launcher {
    * herdr's server autospawns from its CLI, not from the socket accept loop
    * (agent://HerdrMap §1), so one benign subcommand is what guarantees there
    * is something to connect to. A missing binary answers nothing: the connect
-   * below fails and the pty launcher takes over.
+   * below fails and the project runs without herdr.
    */
   static #autospawn(): Promise<void> {
     const { promise, resolve } = Promise.withResolvers<void>();
@@ -723,97 +542,19 @@ export class HerdrLauncher implements Launcher {
     return this.#version;
   }
 
-  async launch(spec: LaunchSpec): Promise<Launched> {
-    const placed = await this.#place(spec);
-    const { tabId, paneId } = placed;
-
-    const sinks: PaneSinks = { status: new Set(), exit: new Set(), statuses: null, gone: false };
-    this.#panes.set(paneId, sinks);
-    // status is subscribed per pane (the protocol has no global form of it),
-    // and herdr already reports it DURING `agent.start` — so the stream goes
-    // up while the pane is still an idle shell. A status change nobody heard
-    // is a session the canvas believes is idle while it works.
-    try {
-      sinks.statuses = await HerdrSubscription.open({
-        path: this.#path,
-        label: `pane ${paneId}`,
-        subscriptions: [{ type: "pane.agent_status_changed", pane_id: paneId }],
-        onEvent: (event, data) => {
-          this.#onEvent(event, data);
-        },
-      });
-    } catch (err) {
-      // a session in the user's own terminal with no status is worth more than
-      // no session: a harness on the loopback link still says what it is doing
-      console.error(
-        `[bridge] herdr will not report status for pane ${paneId}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-
-    // the sequence is per Shape process, and every candidate it produces is a
-    // fresh number: see `#start` for why a name can be refused at all
-    const name = await this.#start(placed, spec, () => agentName(spec.cwd, ++this.#seq));
-
-    console.error(
-      `[bridge] herdr started ${spec.kind} as ${name} in pane ${paneId} of workspace ${placed.workspace} (${spec.cwd})`,
-    );
-
-    return {
-      handle: paneId,
-      focus: async () => {
-        try {
-          await this.#call("agent.focus", { target: paneId });
-        } catch {
-          // the pane may have lost its agent (the harness exited) while the tab
-          // is still there to look at, and that is still the right answer to
-          // "show me the terminal"
-          await this.#call("tab.focus", { tab_id: tabId });
-        }
-        // herdr switched its own tab; the terminal is still behind the browser
-        await this.#raise();
-      },
-      kill: async () => {
-        this.#forget(paneId);
-        await this.#call("tab.close", { tab_id: tabId });
-      },
-      onExit: (cb) => {
-        sinks.exit.add(cb);
-        return () => {
-          sinks.exit.delete(cb);
-        };
-      },
-      onStatus: (cb) => {
-        sinks.status.add(cb);
-        return () => {
-          sinks.status.delete(cb);
-        };
-      },
-      type: async (text) => {
-        // a driven session is only ever typed at after it greeted on the link,
-        // long past the readiness gap `prompt` waits out for a fresh pane
-        await this.#call("agent.prompt", { target: paneId, text });
-      },
-      interrupt: async () => {
-        await this.#call("agent.send_keys", { target: paneId, keys: ["esc"] });
-      },
-    };
-  }
-
   /**
    * Start a harness in a tab of this project's workspace and hand back where
-   * it landed — no status subscription, no exit sinks, no `Launched`.
+   * it landed — Shape does not watch it afterwards.
    *
-   * This is for a session Shape does not DRIVE but has to be able to find and
-   * talk to: the project's manager (`../manager.ts`). Placement is `launch`'s
-   * own, so a project with no workspace yet gets one whose root tab becomes
-   * this tab, renamed to `spec.label` — exactly what a project's first
-   * ordinary session gets.
+   * This is for the one session Shape opens rather than observes: the
+   * project's manager (`../manager.ts`). A project with no workspace yet gets
+   * one whose root tab becomes this tab, renamed to `spec.label`.
    *
    * The names are the caller's, in order, because a manager is known by name
    * to whoever reads the tab strip (`manager` first); only once every one of
    * them is taken does this fall back to numbering the last (`-2`, `-3`, …).
    */
-  async open(spec: LaunchSpec, names: readonly string[]): Promise<HerdrOpened> {
+  async open(spec: HerdrOpenSpec, names: readonly string[]): Promise<HerdrOpened> {
     const candidates = names.filter((name) => name.length > 0);
     if (candidates.length === 0) throw new Error("herdr cannot start an agent without a name to try");
     const last = candidates[candidates.length - 1] as string;
@@ -831,10 +572,10 @@ export class HerdrLauncher implements Launcher {
   }
 
   /**
-   * Type an utterance into a pane, after the gap between `agent.start`
-   * answering and herdr treating that agent as addressable (see
-   * PROMPT_READY_MS). A pane with no agent left in it is not going to become
-   * ready: `agent.get` refusing, or the wait running out, is the caller's.
+   * Type a prompt into a pane, after the gap between `agent.start` answering
+   * and herdr treating that agent as addressable (see PROMPT_READY_MS). A pane
+   * with no agent left in it is not going to become ready: `agent.get`
+   * refusing, or the wait running out, is the caller's.
    */
   async prompt(paneId: string, text: string): Promise<void> {
     const deadline = Date.now() + PROMPT_READY_MS;
@@ -850,6 +591,39 @@ export class HerdrLauncher implements Launcher {
       await promise;
     }
     await this.#call("agent.prompt", { target: paneId, text });
+  }
+
+  /**
+   * Bring the session running in `cwd` in front of the user: switch herdr to
+   * its tab, then raise the terminal application hosting it.
+   *
+   * The session is found by the DIRECTORY it runs in, because Shape did not
+   * start it and holds no pane id for it — the same match the manager pass
+   * makes, and for the same reason. Directories are compared as realpaths:
+   * herdr reports whatever spelling the session was started with. Nothing
+   * running there, and nothing that can be shown, both throw with the sentence
+   * the user reads.
+   */
+  async focusCwd(cwd: string): Promise<void> {
+    const wanted = await canonical(cwd);
+    let match: HerdrAgent | null = null;
+    for (const agent of await this.agents()) {
+      if (agent.cwd === null) continue;
+      if ((await canonical(agent.cwd)) !== wanted) continue;
+      match = agent;
+      break;
+    }
+    if (match === null) throw new Error(`no session in the user's herdr is running in ${cwd}`);
+    try {
+      await this.#call("agent.focus", { target: match.paneId });
+    } catch {
+      // the pane may have lost its agent (the harness exited) while the tab
+      // is still there to look at, and that is still the right answer to
+      // "show me the terminal"
+      await this.#call("tab.focus", { tab_id: match.tabId });
+    }
+    // herdr switched its own tab; the terminal is still behind the browser
+    await this.#raise();
   }
 
   /**
@@ -876,8 +650,8 @@ export class HerdrLauncher implements Launcher {
 
   /**
    * Every live agent on the server. `agent.list` is global by protocol — there
-   * is no per-workspace form — so the caller filters; the workspace id is on
-   * every row, which is what makes that cheap.
+   * is no per-workspace form — so the caller filters; the workspace id and the
+   * cwd are on every row, which is what makes that cheap.
    */
   async agents(): Promise<HerdrAgent[]> {
     const listed = await this.#call("agent.list", {});
@@ -914,7 +688,7 @@ export class HerdrLauncher implements Launcher {
    * Every other refusal takes the tab down with it: a tab with a dead shell in
    * it is litter in the user's terminal.
    */
-  async #start(placed: Placed, spec: LaunchSpec, nextName: (attempt: number) => string): Promise<string> {
+  async #start(placed: Placed, spec: HerdrOpenSpec, nextName: (attempt: number) => string): Promise<string> {
     for (let attempt = 0; ; attempt++) {
       const name = nextName(attempt);
       try {
@@ -927,17 +701,10 @@ export class HerdrLauncher implements Launcher {
         return name;
       } catch (err) {
         if (err instanceof HerdrRefusal && err.code === "agent_name_taken" && attempt < MAX_NAME_ATTEMPTS) continue;
-        this.#forget(placed.paneId);
         await this.#call("tab.close", { tab_id: placed.tabId }).catch(() => undefined);
         throw err;
       }
     }
-  }
-
-  dispose(): void {
-    for (const paneId of [...this.#panes.keys()]) this.#forget(paneId);
-    this.#lifecycle?.close();
-    this.#lifecycle = null;
   }
 
   /** every plain method: one connection, one answer, gone (see the header) */
@@ -967,12 +734,12 @@ export class HerdrLauncher implements Launcher {
   }
 
   /**
-   * Where this session's tab goes: the workspace that already hosts this
-   * project, or a new one named after it. The cache is only ever a hint — the
-   * user owns these workspaces and can close one between two launches — so
-   * every launch re-lists and a stale entry is dropped rather than trusted.
+   * Where this tab goes: the workspace that already hosts this project, or a
+   * new one named after it. The cache is only ever a hint — the user owns
+   * these workspaces and can close one between two opens — so every open
+   * re-lists and a stale entry is dropped rather than trusted.
    */
-  async #place(spec: LaunchSpec): Promise<Placed> {
+  async #place(spec: HerdrOpenSpec): Promise<Placed> {
     const found = await this.#findWorkspace(spec.project);
     if (found !== null) {
       try {
@@ -1026,13 +793,12 @@ export class HerdrLauncher implements Launcher {
 
   /**
    * A workspace of this project's own, because nothing hosts it yet. herdr
-   * answers with the workspace AND its first tab and root pane, so this
-   * session takes that root tab — renamed to say which variation it is — and
-   * the project's first session costs one call instead of two. The workspace
-   * opens in the SESSION's directory: that is the tree this harness must
-   * edit, and for a project's first session it is the main worktree anyway.
+   * answers with the workspace AND its first tab and root pane, so this tab
+   * takes that root tab — renamed to say what it is — and the project's first
+   * tab costs one call instead of two. The workspace opens in the tab's own
+   * directory, which for the manager is the main worktree.
    */
-  async #createWorkspace(spec: LaunchSpec): Promise<Placed> {
+  async #createWorkspace(spec: HerdrOpenSpec): Promise<Placed> {
     const created = await this.#call("workspace.create", {
       cwd: spec.cwd,
       label: spec.project.label,
@@ -1056,42 +822,5 @@ export class HerdrLauncher implements Launcher {
       );
     }
     return placed;
-  }
-
-  /** Stop watching a pane, releasing the connection its status came on. */
-  #forget(paneId: string): PaneSinks | null {
-    const sinks = this.#panes.get(paneId);
-    if (sinks === undefined) return null;
-    this.#panes.delete(paneId);
-    sinks.statuses?.close();
-    sinks.statuses = null;
-    return sinks;
-  }
-
-  #onEvent(event: string, data: Record<string, unknown>): void {
-    const paneId = typeof data.pane_id === "string" ? data.pane_id : null;
-    if (paneId === null) return;
-    const sinks = this.#panes.get(paneId);
-    if (sinks === undefined) return;
-    switch (event) {
-      case "pane.agent_status_changed": {
-        const status = typeof data.agent_status === "string" ? STATUSES[data.agent_status] : undefined;
-        if (status === undefined) return;
-        for (const cb of sinks.status) cb(status);
-        return;
-      }
-      case "pane.exited":
-      case "pane.closed": {
-        if (sinks.gone) return;
-        sinks.gone = true;
-        this.#forget(paneId);
-        const raw = data.exit_code;
-        const code = typeof raw === "number" && Number.isInteger(raw) ? raw : null;
-        for (const cb of sinks.exit) cb(code);
-        return;
-      }
-      default:
-        return;
-    }
   }
 }

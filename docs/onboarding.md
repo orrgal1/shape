@@ -1,136 +1,82 @@
-# Onboarding an existing project (design, 2026-08-28)
+# The automatic map of an existing project (design, 2026-08-28; read-only since 2026-09-05)
 
-Brownfield entry: point Shape at a repo that already exists, get a trustworthy canvas,
-continue steering/building from there. This is the funnel's original brownfield idea returning as
-a feature — the design decisions below are the corrections `notes/understand.md` derived, applied.
+Brownfield entry: point Shape at a repo that already exists and get a trustworthy canvas
+without anyone asking for one. Two mechanical stages fill the picture and a third verifies it.
+Nothing here is a prompt — Shape sends no instruction to any agent; the meaning on top of the
+skeleton is written by whatever session is working in the repo, in the turns it spends on real
+work (§Where the meaning comes from).
 
 ## Principle
 
 The agent never invents the skeleton. Mechanics produce the graph; the model produces the
-meaning; drift rendering verifies the result. Survey, not diary (notes/understand.md §self-report).
+meaning; drift rendering verifies the result. Survey, not diary
+(docs/notes/understand.md §self-report).
 
 ## Pipeline
 
-### Stage 1 — mechanical skeleton (instant, zero model cost)
+### Stage 1 — reality extraction
 
-On `onboard`, the bridge synthesizes intent nodes from `extractReality`:
+The server asks the agent for `extract_reality` on the worktree of a session that has just
+reported in, when that worktree has no reality yet, and again whenever a session in it goes
+idle on a new `HEAD`. Reality is the mechanical layer: workspace packages, the imports between
+them, the infrastructure the configuration files prove, the verifications the test and smoke
+files perform, the top-level classes and functions of each file
+(CONTRACTS.md §Reality layer + drift). It costs no model tokens and is agent-read-only.
+
+### Stage 2 — mechanical skeleton (instant, zero model cost)
+
+When a worktree's reality lands and its intent layer is EMPTY, the server asks the agent for
+`synthesize_skeleton` (`packages/bridge/src/agent/onboarding-fs.ts`) and applies the ops
+itself:
 
 - one `component` node per workspace package: id `slug(pkgName)`, `phase: "built"`,
-  `codeRefs: [pkgDir]`, label = short package name, summary = package.json `description`
-  or `"Workspace package at <dir> — survey pending."`
+  `codeRefs: [pkgDir]`, label = short package name, summary = the package's `package.json`
+  `description`, or a placeholder naming the directory when it has none.
 - one `depends` intent edge per cross-package reality edge.
 
-Level 1 = boundaries enforced by mechanism (workspace packages), per notes/understand.md's depth
-answer. The canvas fills with ground truth before the model says a word.
-
-### Stage 2 — agent survey turn
-
-Bridge composes an onboarding prompt (bridge/src/onboarding.ts) with these constraints:
-
-1. **Enrich, don't invent.** Rewrite each placeholder summary as the package's one-sentence
-   promise, derived from reading export surfaces, manifests, and imports — NOT from README
-   or doc prose (anti-diary rule, stated to the agent explicitly).
-2. **Boundary test** (verbatim from notes/understand.md): a bubble deserves to exist iff its promise
-   is stateable in one sentence and deleting it would break a named set of importers.
-3. **Altitude bounds:** 3–5 bubbles per layer — top level and every set of children alike.
-   6+ siblings means a grouping is missing, so the agent MUST introduce named parent bubbles
-   (plain-English group names saying what the group does for the system — "money rules",
-   "getting the word out" — each with its own one-sentence promise) and move the mechanical
-   package bubbles under them via `parentId`, never flattening. Stage 1 stays flat on purpose:
-   mechanics know packages, not domains, so grouping is the survey turn's first job. A group
-   bubble's `codeRefs` are the paths of the parts it holds, which satisfies validation mode.
-4. **Splits allowed with evidence.** Where the mechanical and architectural boundaries disagree
-   (one package holding several genuine seams), the agent may add child bubbles — each MUST
-   carry real `codeRefs`.
-5. Existing code keeps `phase: "built"`. Dataflow edge labels welcome where the relation is
-   read from code.
-6. Optional user `focus` utterance scopes the survey.
-7. **Product pass** (rule 9 of the prompt) — see §Stage 2b below.
-
-**Onboarding validation mode:** for the duration of the survey turn the bridge additionally
-rejects any `upsert_node` whose `codeRefs` are absent or do not resolve to existing paths under
-the target cwd. The agent cannot narrate structure it cannot point at. Product bubbles are the
-one exception, and they are held to the same bar by a different measure (§Stage 2b).
-
-### Stage 2b — the product pass
-
-Stages 1 and 2 survey the BUILD layer: the parts the project is made of. A canvas that stops
-there tells the user how the code is arranged and never says what the thing *does*, so the
-survey turn ends one layer up.
-
-The product pass starts from ONE bubble: the product itself. The agent creates it first —
-`layer: "product"`, `parentId: null`, label = the product's name in plain English (derived from
-the package name, the README title or the repository folder, said the way a person would say it),
-summary = the one-sentence promise of the whole thing. There is exactly one such bubble;
-`applyOps` rejects a second top-level product node with `op/second-root` (CONTRACTS.md §Graph
-document).
-
-Then the capabilities, as children of that root: 3–5 bubbles (`layer: "product"`, `parentId` =
-the root), each a capability said as a promise to a person ("split a bill with friends"), derived
-from the surfaces a user actually touches — screens and routes, commands, published entry points
-— and each cross-checked against code. Every capability MUST carry `realizes`: the ids of the
-build bubbles that deliver it. That is the only link between the layers (no cross-layer
-`parentId`, no cross-layer edges), and it is what makes the drill-down from a capability to its
-parts possible.
-
-**Anti-README rule, restated for the product layer.** A README names capabilities the code never
-grew; the survey is not allowed to repeat them. So product bubbles are exempt from
-codeRefs-must-exist (a capability owns no code of its own) but are gated instead: an
-`upsert_node` with `layer: "product"` **and a non-null `parentId`** is vetoed with code
-`onboarding/unrealized-product` unless at least one id in `realizes` resolves to a build node
-that already exists on the canvas (a build bubble upserted earlier in the same call counts). Same
-receipt shape as every other gate veto — `code` / `subject` / `evidence` / `supportedFixes`, the
-fixes being "point `realizes` at the build bubbles that make this real" or "drop the bubble".
-The product root is the one product bubble the gate lets through with an empty `realizes`: it
-stands for the whole build layer the survey has just grounded, and uniqueness is already enforced
-by `op/second-root`.
-
-Unrealized capabilities are still a legitimate canvas state *after* onboarding — that is how the
-user says "I want this next", and the client glows those bubbles. The gate only bars them from
-the survey turn, where every bubble must be a reading of existing code.
+Level 1 = boundaries enforced by mechanism (workspace packages), per
+docs/notes/understand.md's depth answer. The canvas fills with ground truth before any model
+says a word, and it is deliberately FLAT: mechanics know packages, not domains. The room
+records the seeding as one audit line (`kind: "onboard"`, with how many ops landed) and marks
+the canvas as mapped, so a project is seeded once and a canvas somebody has drawn is never
+overwritten.
 
 ### Stage 3 — verification render
 
-On terminal `agent_end` the existing reality/drift pass runs. Drift glow immediately marks every
-bubble whose declared edges disagree with actual imports — the falsifiable-claim bar from
-notes/understand.md, rendered instead of asserted. The user's first steering clicks naturally go to
-the glowing bubbles ("resurvey this").
+Reality and drift are recomputed on the same trigger as extraction. Drift glow immediately
+marks every bubble whose declared edges disagree with actual imports, whose `codeRefs` point
+at a file or a named part that is gone, and every package no bubble claims — the
+falsifiable-claim bar from docs/notes/understand.md, rendered instead of asserted. A reader
+looking at a glowing bubble is looking at the part of the map that has gone stale; refreshing
+it is work for a session in the terminal, not a button on the canvas.
 
-## Contract deltas (v1.1)
+## Where the meaning comes from
 
-- shared: `ClientMsg` += `{ type: "onboard", focus?: string }`
-- shared: `SessionInfo` += `targetHasCode: boolean`
-- bridge: run `extractReality` once at startup (reality layer present from minute zero, also
-  powers `targetHasCode` for TS repos; a cheap source-file scan covers the rest)
-- bridge: skeleton synthesis + onboarding prompt composer + onboarding validation mode
-- web: empty-canvas state offers two paths — "Say the idea" (greenfield) and "Map this project"
-  (CTA + optional focus field) when `targetHasCode` and the intent layer is empty. Survey
-  progress streams like any normal turn.
+A skeleton says what the parts ARE, never what they promise or what the product does. That
+half is written by an agent through the `canvas` tool while it works in the repo, and what is
+expected of it is stated in exactly two places, both of them read by the session and neither of
+them sent by Shape:
 
-Deltas from the product layer (v1.2, 2026-09-03):
+- `CANVAS_TOOL_DESCRIPTION` (`packages/shared/src/index.ts`), the text every channel hands the
+  agent: the four layers, the three cross-layer links (`realizes`, `hosts`, `verifies`), one
+  product root with its 3–5 capabilities beneath it, plain English, `codeRefs` on anything that
+  owns files, `status` for what is happening right now.
+- the per-project directive, `~/.shape/server/projects/<key>/shape-directive.md`
+  (`packages/bridge/src/agent/directive.ts`), which a session started by hand — or a builder
+  brief the manager writes — can be pointed at.
 
-- shared: `IntentNode` += `layer?: Layer` (absent = build) and `realizes?: string[]`
-- bridge: survey prompt rule 9 (product pass) + gate code `onboarding/unrealized-product`
-- bridge: the preamble opens greenfield work in the product layer (idea → 3–5 capabilities)
-- bridge: steering composer adds `Realized by:` for a capability referent, `Serves:` for a part
-
-Deltas from the product root (v1.3, 2026-09-03):
-
-- shared: `productRootOf(doc)` (the single top-level product node, else `null`) + validation
-  code `op/second-root`
-- bridge: survey prompt rule 9 creates the root first, capabilities as its children; the gate
-  applies `onboarding/unrealized-product` only to product nodes with a non-null `parentId`
-- bridge: the preamble opens greenfield work by creating the product bubble, then its 3–5
-  capabilities underneath it
-- bridge: steering composer renders the root as `Referent: the product "<label>"`, listing its
-  capabilities as neighbors instead of a `Realized by:` line
-- web: the product view opens focused on the root (first breadcrumb crumb = the product name)
+The rules that must hold whatever the agent believes are enforced by `applyOps` for every
+caller, not by an onboarding mode: layer walls, one top-level product bubble
+(`op/second-root`), `realizes`/`hosts`/`verifies` only on their own layer and only onto build
+nodes, `codeRefs` shape. See CONTRACTS.md §`canvas` tool. The altitude rule (3–5 bubbles per
+layer, named parent groups beyond that, never a flat sprawl) is advice in the tool description
+and a rendering cap in the client (CONTRACTS.md §Canvas navigation), not a validation error.
 
 ## Degradation and non-goals
 
-- Non-pnpm/TS repos: empty skeleton → pure agent survey, still anchored by codeRefs-must-exist
-  validation; no drift verification until a per-language extractor exists. Accepted v1 scope.
-- No subagent fan-out per package in v1 (candidate for large monorepos later).
-- Post-onboarding re-summarization on commit delta stays user-steered in v1 (click drifted
-  bubble → speak); automatic re-summarization of affected nodes is the documented later step
-  (notes/understand.md §update-trigger).
+- Non-pnpm/TS repos: the skeleton is empty, so the canvas starts blank and stays blank until an
+  agent draws it; no drift verification until a per-language extractor exists. Accepted scope.
+- No subagent fan-out per package (candidate for large monorepos later).
+- Re-summarization after a commit delta: reality re-extraction keeps drift honest by itself, so
+  a stale bubble is always visible. Rewording it is an ordinary piece of work for a session,
+  asked for where sessions are asked for things — the terminal, or the manager beside it.

@@ -1,8 +1,8 @@
-import { layerOf, type Referent } from "../../../shared/src/index.ts";
+import { layerOf } from "../../../shared/src/index.ts";
 import type { DeltaMarks, DeltaStatus } from "../deltaView.ts";
 import type { GhostColumn, Layer, LayerNode, WhereMark } from "../layer.ts";
 import { STRIP_ID, type Box, type BoxMap } from "../layout.ts";
-import type { HoverTarget } from "../store.ts";
+import type { HoverTarget, Selection } from "../store.ts";
 import { computeEdgeGeometry } from "./geometry.ts";
 import type { BranchPip, CanvasEdge, CanvasNode } from "./types.ts";
 
@@ -32,7 +32,7 @@ export interface BuildInput {
   /** the code-derived cards beside the layer: packages, infrastructure or symbols */
   ghosts: GhostColumn;
   boxes: BoxMap;
-  selection: Referent | null;
+  selection: Selection | null;
   /** what the pointer is over, which is what reveals a stroke's words */
   hover: HoverTarget | null;
   showReality: boolean;

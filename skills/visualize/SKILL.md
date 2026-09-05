@@ -1,13 +1,15 @@
 ---
 name: visualize
-description: Onboard any existing repo onto the Shape canvas — bridge + web started (or reused), bridge targeted at the repo, canvas open, onboarding survey triggered. Use when the user says "onboard this repo to Shape", "open the Shape canvas for this project", "map this project visually", or otherwise wants this project shown on the Shape bubble canvas.
+description: Put any existing repo on the Shape canvas — bridge + web started (or reused), bridge targeted at the repo, canvas open and mapping itself. Use when the user says "onboard this repo to Shape", "open the Shape canvas for this project", "map this project visually", or otherwise wants this project shown on the Shape bubble canvas.
 ---
 
-# Shape — onboard this repo
+# Shape — put this repo on the canvas
 
-Gets the current repo onto the Shape canvas: ensure the bridge and web
-dev server are running, point the bridge at this repo, trigger the onboarding
-survey, and hand the user the canvas URL.
+Gets the current repo onto the Shape canvas: ensure the bridge and web dev server are running,
+point the bridge at this repo, and hand the user the canvas URL. The map then seeds itself —
+Shape reads the checkout and, on a canvas with no bubbles, draws one bubble per workspace
+package with the imports between them. There is nothing to trigger and nothing to type at:
+Shape shows the project, and agents are directed in the terminal.
 
 ```bash
 # This skill ships inside the Shape repo (at skills/visualize/), so the
@@ -55,26 +57,21 @@ ln -s "$PWD/skills/visualize" ~/.claude/skills/
        cwd:"$HARNESS" ready:{log: "Local:.*5173"}
    ```
 
-4. **Onboarding survey.** Skip this step if the repo is already mapped — after the
-   retarget in step 2, ask the bridge rather than the filesystem (canvas state lives
-   in `~/.shape/shape.db`, never in the repo):
-   `node "$HARNESS/packages/bridge/scripts/ctl.mjs" status | jq -e '.nodes > 0'`;
-   then retargeting (step 2) is enough. Otherwise trigger the survey:
-   ```bash
-   node "$HARNESS/packages/bridge/scripts/ctl.mjs" onboard
-   ```
-   If the user named what they care about ("map the auth flow"), pass it along:
-   `... onboard --focus "the auth flow"`.
-
-5. **Tell the user** the canvas is live at **http://localhost:5173** and that
-   the survey will stream in — the canvas fills with a mechanical package
-   skeleton first, then the agent survey enriches the bubbles.
+4. **Tell the user** the canvas is live at **http://localhost:5173**, and what they will see:
+   the mechanical package skeleton appears by itself within a second or two of the retarget,
+   and the bubbles gain their promises as an agent works in the repo and keeps the picture
+   current through the `canvas` tool. To check what the bridge thinks is on the canvas:
+   `node "$HARNESS/packages/bridge/scripts/ctl.mjs" status` (its `nodes` count is 0 on a canvas
+   nothing has drawn yet).
 
 ## Notes
 
-- **Non-TS / non-pnpm repos:** the mechanical skeleton is empty, so onboarding
-  degrades to a pure agent survey (still anchored by codeRefs validation).
-  Expected behavior, not a failure.
+- **Nothing on the canvas reaches an agent.** Shape is a picture: it starts no session, and the
+  browser can neither instruct nor interrupt one. If the user wants work done on this repo,
+  that happens in their terminal — or through the manager skill, whose builders report in to
+  Shape on their own.
+- **Non-TS / non-pnpm repos:** the mechanical skeleton is empty, so the canvas starts blank and
+  stays blank until an agent working in the repo draws it. Expected behavior, not a failure.
 - Bridge and web are shared singletons — one bridge serves one target at a
   time; switching projects for repo B moves the canvas off repo A.
 - Do not run the bridge or web in the foreground with bash; they are

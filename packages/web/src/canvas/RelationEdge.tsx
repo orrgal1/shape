@@ -60,19 +60,19 @@ export function RelationEdge({ id, data }: EdgeProps<RelEdge>) {
    */
   const labelShown = data?.labelShown === true;
 
-  // A line in a comparison is not a steering target and cannot be drilled, so it
-  // spends its tooltip saying what happened to it instead of how to act on it.
+  // A line in a comparison cannot be selected or drilled, so it spends its
+  // tooltip saying what happened to it rather than what it is.
   let tip: string;
   if (deltaStatus !== null) {
     tip = [DELTA_LINE[deltaStatus] ?? "", ...(data?.deltaNotes ?? [])].join("\n");
   } else if (bundle) {
     tip = `${count} relations below this level — click to drill in:\n${(data?.parts ?? []).join("\n")}`;
   } else if (lifted) {
-    tip = `drawn one level up — click to steer the real relation:\n${(data?.parts ?? []).join("\n")}`;
+    tip = `drawn one level up — click to select the real relation:\n${(data?.parts ?? []).join("\n")}`;
   } else {
     // the pill may have been narrowed to fit, so the words live here too
     const label = data?.label ?? "";
-    tip = label.length > 0 ? `${label}\n${kind} relation — click to steer it` : `${kind} relation — click to steer it`;
+    tip = label.length > 0 ? `${label}\n${kind} relation` : `${kind} relation`;
   }
 
   return (

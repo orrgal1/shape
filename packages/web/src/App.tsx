@@ -6,14 +6,10 @@ import {
   type Harness,
   type ManagerHandle,
   type ProjectTools,
-  type ToolInfo,
   type WorktreeInfo,
 } from "../../shared/src/index.ts";
 import { Compare } from "./Compare.tsx";
-import { NextCard } from "./NextCard.tsx";
 import { SidePanel } from "./SidePanel.tsx";
-import { SteeringBar } from "./SteeringBar.tsx";
-import { TerminalPane } from "./Terminal.tsx";
 import { Canvas } from "./canvas/Canvas.tsx";
 import { useDismissable } from "./dismiss.ts";
 import {
@@ -96,33 +92,6 @@ function basename(path: string): string {
   return cut === -1 ? trimmed : trimmed.slice(cut + 1);
 }
 
-/** everything above the last segment: where a sibling project would go */
-function dirname(path: string): string {
-  const trimmed = path.replace(/\/+$/, "");
-  const cut = trimmed.lastIndexOf("/");
-  if (cut === -1) return "";
-  return cut === 0 ? "/" : trimmed.slice(0, cut);
-}
-
-/** a folder and a name, without inventing a double slash */
-function joinPath(folder: string, name: string): string {
-  return `${folder.trim().replace(/\/+$/, "")}/${name}`;
-}
-
-/**
- * A project name becomes one folder name (and, when published, the GitHub
- * repo name): lowercased, every run of characters outside [a-z0-9] collapses
- * to one `-`, leading/trailing dashes go; non-Latin letters are not kept. What
- * the person typed stays in the box; the preview shows what will be created.
- */
-function projectSlug(name: string): string {
-  return name
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
 /** how a person names the harness, not how its binary is spelled */
 const HARNESS_LABEL: Record<Harness, string> = {
   omp: "omp",
@@ -192,11 +161,6 @@ function ProjectSelector() {
   const pickedFolder = useApp((state) => state.pickedFolder);
   const [open, setOpen] = useState(false);
   const [path, setPath] = useState("");
-  const [folder, setFolder] = useState("");
-  const [newName, setNewName] = useState("");
-  const [publish, setPublish] = useState(false);
-  const [visibility, setVisibility] = useState<"private" | "public">("private");
-  const [creating, setCreating] = useState(false);
   const [picking, setPicking] = useState(false);
   // the fold outlives the menu: it lives here, not in the menu body, so a
   // person who opened it once finds it open the next time the menu drops
@@ -223,22 +187,13 @@ function ProjectSelector() {
   useEffect(() => {
     setOpen(false);
     setPath("");
-    setCreating(false);
-    // a new project usually goes next to the current one, so the folder it
-    // lives in is worth prefilling — the name is not: an empty required field
-    // is what stops one click from starting a repo in the whole code directory
-    setFolder(cwd === null ? "" : dirname(cwd));
-    setNewName("");
   }, [cwd]);
 
   const latestError = errors.length === 0 ? null : errors[errors.length - 1];
 
-  // a refused or failed create never produces a hello: the button has to stop
-  // saying "creating…" on the error instead
+  // A chooser the room refused, or one the agent could not open, produces no
+  // hello: the error is what releases Open.
   useEffect(() => {
-    if (latestError?.message.startsWith("create_project") === true) setCreating(false);
-    // a chooser the room refused, or one the agent could not open, is the same
-    // shape of answer: no hello follows, so the error is what releases Open
     if (latestError?.message.startsWith("pick_folder") === true) setPicking(false);
   }, [latestError]);
 
@@ -272,20 +227,6 @@ function ProjectSelector() {
     setPath(pickedFolder.path);
     switchTo(pickedFolder.path);
   }, [pickedFolder]);
-
-  const slug = projectSlug(newName);
-  const createPath = joinPath(folder, slug);
-  const canCreate = folder.trim().length > 0 && slug.length > 0;
-
-  const create = (): void => {
-    if (!canCreate) return;
-    setCreating(true);
-    send({
-      type: "create_project",
-      path: createPath,
-      github: publish && session?.canPublish === true ? { visibility } : null,
-    });
-  };
 
   return (
     <div className="project" ref={menuRef}>
@@ -327,7 +268,7 @@ function ProjectSelector() {
           ) : null}
 
           {agentless ? (
-            <p className="tl-empty">Open, create and connect need this project&apos;s agent</p>
+            <p className="tl-empty">Open and connect need this project&apos;s agent</p>
           ) : (
             <>
               <p className="project-menu-title">recent projects</p>
@@ -381,75 +322,10 @@ function ProjectSelector() {
               {path.trim().length === 0 ? (
                 // the empty box is now the interesting case, and a tooltip is
                 // invisible until someone hovers the thing they have not tried
-                <p className="project-create-preview project-open-hint">
+                <p className="project-open-hint">
                   Open with nothing typed asks this machine for a folder
                 </p>
               ) : null}
-
-              <p className="project-menu-title">start a new project</p>
-              <div className="project-create">
-                <div className="project-create-where">
-                  <input
-                    className="project-path mono"
-                    value={folder}
-                    spellCheck={false}
-                    placeholder="folder"
-                    aria-label="folder for the new project"
-                    onChange={(event) => setFolder(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key !== "Enter") return;
-                      event.preventDefault();
-                      create();
-                    }}
-                  />
-                  <input
-                    className="project-path project-new-name"
-                    value={newName}
-                    spellCheck={false}
-                    placeholder="project name"
-                    aria-label="new project name"
-                    onChange={(event) => setNewName(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key !== "Enter") return;
-                      event.preventDefault();
-                      create();
-                    }}
-                  />
-                  <button type="button" className="btn" onClick={create} disabled={creating || !canCreate}>
-                    {creating ? "creating…" : "Create"}
-                  </button>
-                </div>
-                <p className="project-create-preview mono">
-                  {slug.length === 0 ? "…/name" : createPath}
-                </p>
-                {session?.canPublish === true ? (
-                  <>
-                    <label className="project-create-opt">
-                      <input
-                        type="checkbox"
-                        checked={publish}
-                        onChange={(event) => setPublish(event.target.checked)}
-                      />
-                      also create it on GitHub
-                    </label>
-                    {publish ? (
-                      <div className="project-create-vis">
-                        {(["private", "public"] as const).map((choice) => (
-                          <label key={choice} className="project-create-opt">
-                            <input
-                              type="radio"
-                              name="new-project-visibility"
-                              checked={visibility === choice}
-                              onChange={() => setVisibility(choice)}
-                            />
-                            {choice}
-                          </label>
-                        ))}
-                      </div>
-                    ) : null}
-                  </>
-                ) : null}
-              </div>
 
               <button
                 type="button"
@@ -492,9 +368,9 @@ function ProjectSelector() {
  * Which variations of the project are on the canvas.
  *
  * Every variation of a repo is on one canvas, merged: this is what narrows it,
- * and what starts and stops the work in each one. The word "worktree" never
- * appears — the register rule applies to what a person steering by voice reads,
- * and a variation is its branch to them.
+ * and the way over to the terminal of whichever session is working in one. The
+ * word "worktree" never appears — the register rule applies to everything a
+ * reader sees, and a variation is its branch to them.
  */
 function VariationFilter() {
   const worktrees = useApp((state) => state.session?.worktrees ?? NO_WORKTREES);
@@ -513,17 +389,17 @@ function VariationFilter() {
   const shown = worktrees.filter((entry) => filter === null || filter.has(entry.id));
   const isRunning = (id: string): boolean => running.some((entry) => entry.worktree === id);
   /** where that variation's session runs, or null when nothing runs there */
-  const terminalOf = (id: string): "external" | "pane" | "none" | null =>
+  const terminalOf = (id: string): "external" | "none" | null =>
     running.find((entry) => entry.worktree === id)?.backend.capabilities.terminal ?? null;
   /**
-   * The drawer shows the variation being steered, so going to another one's
-   * terminal moves the steering target with it: reading one branch's shell
-   * while typing at another is how a sentence lands in the wrong checkout.
+   * Going to a variation's terminal makes it the one the header and the
+   * revision picker are about: reading one branch's shell while the pills name
+   * another is how a reader ends up attributing work to the wrong checkout.
    */
   const goTerminal = (id: string): void => {
     setTarget(id);
     send({ type: "focus_terminal", worktree: id });
-    if (terminalOf(id) === "external") notify("opened in your terminal");
+    notify("opened in your terminal");
     setOpen(false);
   };
   const nameOf = (entry: WorktreeInfo): string => branchOf(worktrees, entry.id);
@@ -590,35 +466,14 @@ function VariationFilter() {
                       {live ? "working here" : "no session"}
                     </span>
                   </label>
-                  {offline ? null : live ? (
-                    <>
-                      {terminalOf(entry.id) === "none" ? null : (
-                        <button
-                          type="button"
-                          className="variation-act"
-                          title={`go to the terminal the session on ${nameOf(entry)} is running in`}
-                          onClick={() => goTerminal(entry.id)}
-                        >
-                          terminal
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="variation-act"
-                        title={`stop the session running on ${nameOf(entry)} — its canvas stays on screen`}
-                        onClick={() => send({ type: "close_worktree", worktree: entry.id })}
-                      >
-                        stop
-                      </button>
-                    </>
-                  ) : (
+                  {offline || !live || terminalOf(entry.id) !== "external" ? null : (
                     <button
                       type="button"
-                      className="variation-act variation-open"
-                      title={`start a session on ${nameOf(entry)} — ${entry.path}`}
-                      onClick={() => send({ type: "open_worktree", path: entry.path })}
+                      className="variation-act"
+                      title={`go to the terminal the session on ${nameOf(entry)} is running in`}
+                      onClick={() => goTerminal(entry.id)}
                     >
-                      open {nameOf(entry)}
+                      terminal
                     </button>
                   )}
                 </li>
@@ -818,14 +673,12 @@ function LayerSwitch() {
 
 /**
  * Where the harness actually is. Shape does not pretend to be the terminal the
- * session runs in: it runs a real one, and this is the way over to it. What the
- * click does depends on where that terminal lives — a session in the user's own
- * terminal is brought forward there (nothing changes on this screen, so the
- * click says so out loud), and one Shape started itself is shown in a drawer
- * over the canvas.
+ * session runs in: the session runs in a real one — a herdr tab in the user's
+ * own terminal — and this is the way over to it. Nothing changes on this screen
+ * when it is clicked, so the click says so out loud.
  *
- * It names the variation being steered, because that is the session a person
- * means by "the terminal" while looking at this canvas.
+ * It names the variation the header is about, because that is the session a
+ * person means by "the terminal" while looking at this canvas.
  */
 function TerminalButton() {
   const target = useApp(selectTarget);
@@ -834,31 +687,23 @@ function TerminalButton() {
   const notify = useApp((state) => state.notify);
   const terminal = running?.backend.capabilities.terminal ?? null;
 
-  // a harness with no terminal to go to (a remote agent that was not allowed
-  // one) has nothing this button could do
-  if (target === null || terminal === "none") return null;
+  // A session Shape cannot reach the terminal of — no herdr on that machine, or
+  // a remote agent — has nothing this button could do, and neither has a
+  // variation with no session reporting in at all.
+  if (target === null || terminal !== "external") return null;
 
   const branch = worktrees.length < 2 ? null : branchOf(worktrees, target);
-  const asleep = terminal === null;
 
   return (
     <button
       type="button"
       className="go-terminal"
-      disabled={asleep}
-      title={
-        asleep
-          ? `nothing is running on ${branch ?? "this project"} yet — start a session first`
-          : terminal === "external"
-            ? "bring the session's own terminal window forward"
-            : "show the session's terminal over the canvas"
-      }
+      title="bring the session's own terminal window forward"
       onClick={() => {
         send({ type: "focus_terminal", worktree: target });
-        // The drawer is the server's answer, so a click that opens one proves
-        // itself. Focusing a window somewhere else proves nothing here, and a
-        // button that looks like it did nothing gets clicked again.
-        if (terminal === "external") notify("opened in your terminal");
+        // Focusing a window somewhere else proves nothing here, and a button
+        // that looks like it did nothing gets clicked again.
+        notify("opened in your terminal");
       }}
     >
       Go to terminal
@@ -869,12 +714,12 @@ function TerminalButton() {
 
 /**
  * What the header says about this project's manager. "none" is worth a title of
- * its own: a project on Shape's own terminal has nowhere to put a manager,
+ * its own: a project on a machine with no herdr has nowhere to put a manager,
  * which is a different fact from a herdr workspace that simply has none.
  */
 function managerState(
   manager: ManagerHandle | null,
-  launcher: ProjectTools["launcher"] | null,
+  launcher: ProjectTools["launcher"],
 ): { label: string; title: string; muted: boolean } {
   if (manager === null) {
     return {
@@ -883,8 +728,8 @@ function managerState(
       // offline pill is: an absent manager is a fact, not a failure
       muted: true,
       title:
-        launcher !== null && launcher !== "herdr"
-          ? "Managers need herdr; this project runs on Shape's own terminal"
+        launcher === null
+          ? "Managers need herdr, and this machine has none"
           : "No manager tab in this project's herdr workspace",
     };
   }
@@ -906,8 +751,9 @@ function Header() {
   // loud once the canvas is showing something other than that
   const comparing = useApp((state) => state.delta !== null);
 
-  // The harness pill is about the variation being steered: it is that
-  // variation's own harness, and with none running there is nothing to name.
+  // The harness pill is about the variation the header is speaking for: it is
+  // that variation's own harness, and with none reporting in there is nothing
+  // to name.
   const running = useApp(selectRunningSession);
   const target = useApp(selectTarget);
   const branch = session === null || target === null ? null : branchOf(session.worktrees, target);
@@ -948,7 +794,7 @@ function Header() {
       {backend === undefined ? null : (
         <span
           className="pill pill-harness"
-          title={`Shape is driving ${backend.label} (${backend.id})${branch === null ? "" : ` on ${branch}`} — steer mid-turn: ${backend.capabilities.steerMidTurn ? "yes" : "queued"}, events: ${backend.capabilities.events}, terminal: ${backend.capabilities.terminal}${model ? ` — model ${model.provider}/${model.id}` : ""}`}
+          title={`Shape is watching ${backend.label} (${backend.id})${branch === null ? "" : ` on ${branch}`} — events: ${backend.capabilities.events}, terminal: ${backend.capabilities.terminal}${model ? ` — model ${model.provider}/${model.id}` : ""}`}
         >
           <span className="pill-key">harness</span>
           <span className="pill-harness-name">{backend.label}</span>
@@ -961,10 +807,10 @@ function Header() {
           <span className={`pill-manager-state${manager.muted ? " pill-manager-none" : ""}`}>{manager.label}</span>
         </span>
       )}
-      {/* the canvas is readable without an agent, but nothing on it can be
-          steered — said next to the harness it would be steering */}
+      {/* the canvas still reads without an agent, but nothing on it will move
+          again — said next to the harness that would have moved it */}
       {session === null || session.agentConnected ? null : (
-        <span className="pill pill-offline" title="No agent is attached to this project — the canvas is read-only">
+        <span className="pill pill-offline" title="No agent is attached to this project — the picture is frozen">
           <span className="dot" />
           agent offline
         </span>
@@ -999,16 +845,6 @@ function StageTools() {
   // extracted code is evidence about the parts and where they run; the product
   // layer's bubbles point at capabilities, so there is nothing to compare there
   const coded = useApp((state) => state.view !== "product");
-  // A catch-up is a survey of what moved, so it needs the same things a survey
-  // needs — a harness in the variation being steered — plus something to catch
-  // up on: notes the drift pass wrote, or parts of the code no bubble claims.
-  const target = useApp(selectTarget);
-  const running = useApp((state) => runsIn(state.session, selectTarget(state)));
-  const busy = useApp(selectAgent) !== "idle";
-  const driftNotes = useApp((state) =>
-    Object.values(state.doc.drift).reduce((total, notes) => total + notes.length, 0),
-  );
-  const behind = driftNotes > 0 || ghostCount > 0;
 
   return (
     <div className="stage-tools">
@@ -1028,29 +864,6 @@ function StageTools() {
             >
               <span className="toggle-box" />
               reality {ghostCount === 0 ? "—" : ghostCount}
-            </button>
-          ) : null}
-
-          {/* the map fell behind the code: one click asks the harness to walk the
-              difference and bring the bubbles back to it */}
-          {coded && running && behind ? (
-            <button
-              type="button"
-              className="toggle toggle-act"
-              onClick={() => {
-                if (target === null) return;
-                send({ type: "onboard", worktree: target });
-              }}
-              disabled={busy}
-              title={
-                busy
-                  ? "working…"
-                  : `bring the map back to the code: ${driftNotes} drift ${
-                      driftNotes === 1 ? "note" : "notes"
-                    }, ${ghostCount} unmapped ${ghostCount === 1 ? "part" : "parts"}`
-              }
-            >
-              catch up
             </button>
           ) : null}
 
@@ -1093,105 +906,6 @@ function StageTools() {
   );
 }
 
-/** with no agent attached, nothing can be started: the same words the bar uses */
-const OFFLINE_START_HINT = "No agent attached — start `shape agent` in this project";
-
-/** a stable empty list, so the card's selector never mints a fresh array */
-const NO_TOOLS: readonly ToolInfo[] = [];
-
-/**
- * Nothing is running in this variation, so there is nothing to steer: this is
- * how a person starts something. Shape does not decide which coding agent a
- * project uses — it offers what is actually installed on the machine the agent
- * runs on, starts a real session in a real terminal, and can be told to
- * remember the answer so the question is asked once per project.
- *
- * It appears in two places, never both at once: on an empty canvas it IS the
- * empty state, and on a canvas with bubbles it takes the end-of-turn card's
- * place under the steering bar — where the thing that cannot be done (steering)
- * is, so the thing that can be is beside it.
- */
-function StartCard() {
-  const target = useApp(selectTarget);
-  const worktrees = useApp((state) => state.session?.worktrees ?? NO_WORKTREES);
-  const tools = useApp((state) => state.tools);
-  // starting a session is work only the agent can do
-  const offline = useApp((state) => state.session !== null && !state.session.agentConnected);
-  /** null until the reader picks; the first detected harness is the standing offer */
-  const [picked, setPicked] = useState<string | null>(null);
-  const [autonomous, setAutonomous] = useState(false);
-  const [remember, setRemember] = useState(true);
-
-  const where = worktrees.find((entry) => entry.id === target);
-  if (target === null || where === undefined) return null;
-
-  const harnesses = tools?.harnesses ?? NO_TOOLS;
-  const backend = picked ?? harnesses[0]?.id ?? null;
-  const branch = branchOf(worktrees, target);
-  const launcher =
-    tools === null ? null : tools.launcher === "herdr" ? "runs in herdr" : "runs in Shape's own terminal";
-
-  return (
-    <div className="start-card" role="group" aria-label="start a session">
-      <p className="start-title">Start a session on {branch}</p>
-      {harnesses.length === 0 ? (
-        <p className="start-none">no coding agent found on this machine — install omp or Claude Code</p>
-      ) : (
-        <div className="start-picks" role="radiogroup" aria-label="which coding agent">
-          {harnesses.map((tool) => (
-            <label
-              key={tool.id}
-              className="start-pick"
-              title={tool.version === null ? tool.path : `${tool.path} · ${tool.version}`}
-            >
-              <input
-                type="radio"
-                name={`start-harness-${target}`}
-                checked={tool.id === backend}
-                onChange={() => setPicked(tool.id)}
-              />
-              <span className="start-pick-name">{tool.label}</span>
-            </label>
-          ))}
-        </div>
-      )}
-
-      <label className="start-opt">
-        <input type="checkbox" checked={autonomous} onChange={(event) => setAutonomous(event.target.checked)} />
-        <span className="start-opt-label">Autonomous</span>
-        <span className="start-help">It decides for itself and keeps going without stopping to ask.</span>
-      </label>
-      <label className="start-opt">
-        <input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />
-        <span className="start-opt-label">Remember for this project</span>
-        <span className="start-help">Next time this project starts the same one without asking.</span>
-      </label>
-
-      <div className="start-row">
-        <button
-          type="button"
-          className="btn btn-onboard"
-          disabled={backend === null || offline}
-          title={
-            offline
-              ? OFFLINE_START_HINT
-              : backend === null
-                ? "there is no coding agent on this machine to start"
-                : `start ${backend} in ${where.path}`
-          }
-          onClick={() => {
-            if (backend === null) return;
-            send({ type: "open_worktree", path: where.path, backend, autonomous, remember });
-          }}
-        >
-          Start
-        </button>
-        {launcher === null ? null : <span className="start-where">{launcher}</span>}
-      </div>
-    </div>
-  );
-}
-
 /**
  * An empty canvas is three different situations, and only one of them is the
  * blank page the big card was written for.
@@ -1202,41 +916,26 @@ function StartCard() {
  *
  * The code already drew itself: the reality strip is on the canvas, which is
  * the answer to "is anything here", so a full-height splash across it is
- * covering its own evidence. One line, one button, off to the side.
+ * covering its own evidence. One line, off to the side.
  *
- * Nothing at all: no code, no strip, nothing running — the case where the card
- * IS the screen, and says what a sentence in the bar will do.
+ * Nothing at all: no code, no strip, nothing reporting in — the case where the
+ * card IS the screen, and says what will fill it.
  */
 function EmptyState() {
   const conn = useApp((state) => state.conn);
   const targetHasCode = useApp((state) => state.session?.targetHasCode === true);
-  // onboarding is work only an agent can do; offering it with none attached
-  // would send a frame the server refuses
-  const offline = useApp((state) => state.session !== null && !state.session.agentConnected);
-  const productFirst = useApp((state) => state.productFirst);
-  const setProductFirst = useApp((state) => state.setProductFirst);
-  // a survey reads one checkout of the repo: the variation being steered
-  const target = useApp(selectTarget);
-  // nothing running on this variation yet — which changes what the copy
-  // promises, not whether the bar can be spoken to: the sentence opens the
-  // session on its way in
+  // nothing is reporting in from this variation yet, which is what the copy
+  // promises will change once something does
   const asleep = useApp((state) => !runsIn(state.session, selectTarget(state)));
-  const [focus, setFocus] = useState("");
   // What the code already showed of itself: with no bubbles on the canvas the
   // reality strip IS the canvas, and a full-height splash across the middle of
   // it reads as a screen that never went away.
   const ghostCount = useApp(selectGhostCount);
   // A coded checkout maps itself the moment a session starts in it, so a
   // working harness over an empty canvas is that survey landing — the one thing
-  // worth saying while it runs, and nothing to click.
+  // worth saying while it runs.
   const agent = useApp(selectAgent);
   const mapping = targetHasCode && agent !== "idle";
-
-  const onboard = (): void => {
-    if (target === null) return;
-    const scope = focus.trim();
-    send(scope.length === 0 ? { type: "onboard", worktree: target } : { type: "onboard", worktree: target, focus: scope });
-  };
 
   if (mapping) {
     return (
@@ -1252,30 +951,9 @@ function EmptyState() {
       <div className="empty empty-compact">
         <p className="empty-kicker">not mapped yet</p>
         <p className="empty-body">
-          These are the packages the code declares. Say the idea below, or map the project first.
+          These are the packages the code declares. A session starting in this checkout maps them into bubbles by
+          itself.
         </p>
-        {targetHasCode && !offline ? (
-          <div className="empty-compact-row">
-            <button type="button" className="btn btn-onboard" onClick={onboard}>
-              Map this project
-            </button>
-            {/* the same choice the full card spells out, folded to one line: the
-                help sentence is the title and the label is the choice itself,
-                because at this width the row has to stay a row */}
-            <label
-              className="empty-pick"
-              title="The agent names the product and its promises first and waits for you before building."
-            >
-              <input
-                type="checkbox"
-                checked={productFirst}
-                onChange={(event) => setProductFirst(event.target.checked)}
-              />
-              Product picture first
-            </label>
-          </div>
-        ) : null}
-        {asleep ? <StartCard /> : null}
       </div>
     );
   }
@@ -1289,83 +967,22 @@ function EmptyState() {
             ? "no session here yet"
             : "session attached · canvas empty"}
       </p>
-      <h1 className="empty-title">Say the idea. The canvas draws itself.</h1>
+      <h1 className="empty-title">Nothing has drawn itself here yet.</h1>
       <p className="empty-body">
         {asleep ? (
           <>
-            Type or dictate into the bar below and that sentence starts a coding agent on this checkout — a tab in
-            your own terminal — and goes straight to it. Everything it does from there draws itself here, one bubble
-            per promise it can state in a sentence.
+            Shape draws what the coding agents are doing, and nothing is reporting in from this checkout yet. Start
+            a session in it the way you always do — a tab in your own terminal — and everything it does draws itself
+            here, one bubble per promise it can state in a sentence.
           </>
         ) : (
           <>
-            Type or dictate into the bar below and the agent starts a decomposition here — one bubble per promise it
-            can state in a sentence. Once bubbles exist, click one and speak to steer just that part; click a relation
-            to change how two parts meet. <kbd>Esc</kbd> drops back to the whole project.
+            A session is reporting in and has drawn nothing yet. Bubbles appear as it works, one per promise it can
+            state in a sentence. Click one to read what it claims; click a relation to read how two parts meet.{" "}
+            <kbd>Esc</kbd> drops back to the whole project.
           </>
         )}
       </p>
-
-      {/* the choice the first utterance carries: a picture to correct, or straight to work */}
-      <label className="empty-choice">
-        <input
-          type="checkbox"
-          checked={productFirst}
-          onChange={(event) => setProductFirst(event.target.checked)}
-        />
-        <span className="empty-choice-label">Start with the product picture</span>
-        <span className="empty-choice-help">
-          The agent names the product and its promises first and waits for you before building.
-        </span>
-      </label>
-
-      {/* second path: the target already has code, so it can be surveyed instead of imagined */}
-      {targetHasCode && !offline ? (
-        <div className="onboard">
-          <div className="onboard-or">
-            <span />
-            or
-            <span />
-          </div>
-          <p className="empty-body">
-            There is already code here. Map it first: packages become bubbles from the imports themselves, then the
-            agent surveys them into one-sentence promises. Anything it claims that the code contradicts will glow.
-          </p>
-          <div className="onboard-row">
-            <button type="button" className="btn btn-onboard" onClick={onboard}>
-              Map this project
-            </button>
-            <input
-              className="onboard-focus"
-              value={focus}
-              spellCheck={false}
-              placeholder="optional focus — e.g. focus on the server, skip vendored code"
-              aria-label="optional survey focus"
-              onChange={(event) => setFocus(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter") return;
-                event.preventDefault();
-                onboard();
-              }}
-            />
-          </div>
-        </div>
-      ) : null}
-
-      {/* the explicit way to the same session: the switches set before turn one */}
-      {asleep ? (
-        <div className="onboard">
-          <div className="onboard-or">
-            <span />
-            or
-            <span />
-          </div>
-          <p className="empty-body">
-            Start it before saying anything, with the switches decided up front.
-          </p>
-          <StartCard />
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -1542,31 +1159,7 @@ function NowPill() {
 export function App() {
   const hasNodes = useApp((state) => state.doc.nodes.length > 0);
   const comparing = useApp((state) => state.delta !== null);
-  /**
-   * With nothing running in the variation being steered there is no turn to end
-   * and nothing to steer, so the dock offers the one thing that can be done —
-   * unless the empty state is already offering it, which happens on a canvas
-   * with no bubbles on it. One card, never two.
-   */
-  const asleep = useApp((state) => !runsIn(state.session, selectTarget(state)));
   const empty = !hasNodes && !comparing;
-  /**
-   * How tall the bottom dock is right now, published as `--dock-h` so anything
-   * that floats over the canvas can sit clear of it. It is not a constant: the
-   * end-of-turn card comes and goes, and a dictated sentence grows the bar.
-   */
-  const dock = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const box = dock.current;
-    if (box === null) return;
-    const publish = (): void => {
-      document.documentElement.style.setProperty("--dock-h", `${Math.round(box.offsetHeight)}px`);
-    };
-    publish();
-    const observer = new ResizeObserver(publish);
-    observer.observe(box);
-    return () => observer.disconnect();
-  }, []);
 
   useEffect(() => {
     if (isMockMode()) return startMock();
@@ -1575,7 +1168,8 @@ export function App() {
   }, []);
 
   // Backspace walks up a level — but never while there is text to delete: the
-  // steering input is auto-focused, so stealing the key would break dictation.
+  // project path box and the revision pickers are real inputs, and taking the
+  // key from one of them would eat what somebody is typing.
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key !== "Backspace" || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -1632,16 +1226,7 @@ export function App() {
           </ReactFlowProvider>
           <NowPill />
         </div>
-        {/* stays mounted once shown: hiding it must not cost the scrollback */}
-        <TerminalPane />
         {empty ? <EmptyState /> : null}
-        {/* the card and the bar are one dock: the card sits on top of the bar
-            and moves with it, rather than guessing how tall a dictated
-            sentence has made it */}
-        <div className="steer-dock" ref={dock}>
-          {asleep ? (empty ? null : <StartCard />) : <NextCard />}
-          <SteeringBar />
-        </div>
       </div>
       <SidePanel />
     </div>

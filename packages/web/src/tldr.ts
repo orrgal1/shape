@@ -143,7 +143,7 @@ export interface EdgeTldr {
   edge: GraphEdge;
   source: NeighbourLink | null;
   target: NeighbourLink | null;
-  /** drift notes on either endpoint — the pair is what the user is steering */
+  /** drift notes on either endpoint — what the code says about the pair */
   drift: { nodeId: string; note: string }[];
   lines: TranscriptEntry[];
 }

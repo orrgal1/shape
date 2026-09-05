@@ -9,17 +9,14 @@ import {
   type GraphDelta,
   type GraphDoc,
   type Layer,
-  type Next,
   type ProjectSummary,
   type ProjectTools,
-  type Referent,
   type RevisionInfo,
   type ServerMsg,
   type SessionInfo,
   type WorktreeInfo,
   type WorktreeSession,
 } from "../../shared/src/index.ts";
-import type { PtyServerMsg } from "../../shared/src/pty.ts";
 import {
   coveredByIdOf,
   coveredByPartOf,
@@ -44,30 +41,13 @@ import {
 } from "./layer.ts";
 
 /**
- * What the bridge's shell is doing, for ONE variation. Terminal *output* is
- * deliberately absent: a shell printing a thousand lines must not re-render the
- * app, so bytes go straight to the xterm instance through `setPtySink` instead
- * of state.
+ * What the reader has picked out of the document: one bubble, or one relation,
+ * by the id it carries in the graph. The side panel, the drills and the
+ * comparisons all read it; nothing types anything at it.
  */
-export interface PtyView {
-  /** the bridge has a live shell right now */
-  open: boolean;
-  shell: string;
-  cwd: string;
-  /** set when the shell exited on its own; cleared when one starts again */
-  exited: { code: number | null } | null;
-}
-
-/** a variation with no terminal at all; a stable object, so selectors may return it */
-export const NO_PTY: PtyView = { open: false, shell: "", cwd: "", exited: null };
-
-type PtySink = (data: string) => void;
-
-/** one terminal per page, so one sink; null while nothing is drawing */
-let ptySink: PtySink | null = null;
-
-export function setPtySink(sink: PtySink | null): void {
-  ptySink = sink;
+export interface Selection {
+  kind: "node" | "edge";
+  id: string;
 }
 
 export type ConnStatus = "connecting" | "live" | "lost" | "mock";
@@ -98,9 +78,9 @@ let keySeq = 0;
 
 /**
  * Monotonic tick stamped on each variation whenever it lights bubbles. Which
- * variation is the steering target falls back to "the one that worked on this
- * bubble last", and that needs an order across variations, not a timestamp per
- * frame.
+ * variation the header, the terminal button and the revision picker are about
+ * falls back to "the one that worked on this bubble last", and that needs an
+ * order across variations, not a timestamp per frame.
  */
 let activityTick = 0;
 
@@ -201,7 +181,7 @@ export function toneOf(worktreeIds: readonly string[], id: string): number {
   return at === -1 ? 0 : at % VARIATION_TONES;
 }
 
-/** a harness is running in this variation right now, so it can be steered */
+/** a harness is reporting in from this variation right now */
 export function runsIn(session: SessionInfo | null, worktree: string | null): boolean {
   if (session === null || worktree === null) return false;
   return session.sessions.some((entry) => entry.worktree === worktree);
@@ -233,9 +213,9 @@ export interface AppState {
   where: Record<string, readonly WhereMark[]>;
   session: SessionInfo | null;
   /**
-   * What is installed where this project's agent runs: which launcher it will
-   * use, and every coding agent it found. The start-a-session card is built
-   * from it, so a machine with nothing installed can say so plainly.
+   * What is installed where this project's agent runs: whether the machine has
+   * herdr, and every coding agent it found. The header's manager pill reads the
+   * launcher from it — with no herdr there is no tab to reach.
    */
   tools: ProjectTools | null;
   /** every variation's id in colour order (id order), so a colour is stable */
@@ -255,7 +235,7 @@ export interface AppState {
    * record, and the transcript keeps the finished text.
    */
   now: Record<string, string | null>;
-  selection: Referent | null;
+  selection: Selection | null;
   /**
    * The bubble or drawn line the pointer is over. Edge labels are hidden until
    * something asks for them, so this is what un-hides them; it is deliberately
@@ -265,14 +245,6 @@ export interface AppState {
   conn: ConnStatus;
   errors: ErrorToast[];
   showReality: boolean;
-  /**
-   * Where each variation's last turn left things: the card under the canvas,
-   * per worktree. Ephemeral like the transcript — it belongs to the turn that
-   * produced it, and the bridge takes it back the moment anything is said.
-   */
-  nexts: Record<string, Next | null>;
-  /** which variations are deciding for themselves and carrying on unattended */
-  autonomous: Record<string, boolean>;
   /**
    * Which layer of the project is on the canvas: the capabilities it promises a
    * person, the parts that build them, or where those parts run. One canvas,
@@ -327,10 +299,10 @@ export interface AppState {
    */
   filter: ReadonlySet<string> | null;
   /**
-   * The variation the reader pinned as the steering target, or null to let the
-   * default rule pick one (`selectTarget`). Pinning is explicit: a target that
-   * moved on its own while somebody was dictating would send their sentence to
-   * a branch they were not looking at.
+   * The variation the reader pinned as the one the header, the terminal button
+   * and the revision picker are about, or null to let the default rule pick one
+   * (`selectTarget`). Pinning is explicit: a target that moved on its own would
+   * change what those read while nobody asked it to.
    */
   target: string | null;
   /** the pair a comparison was asked about, and which variation's history it is in */
@@ -345,8 +317,6 @@ export interface AppState {
    */
   deltaContext: GraphDoc | null;
 
-  /** the terminal drawer is on screen, over the bottom of the canvas */
-  terminalOpen: boolean;
   /**
    * A passing line at the top of the stage — "opened in your terminal" when a
    * harness in the user's own terminal was brought forward, and nothing else
@@ -354,34 +324,20 @@ export interface AppState {
    * louder card; this one goes away on its own.
    */
   notice: { seq: number; text: string } | null;
-  /** one terminal per variation; the pane shows the target's */
-  ptys: Record<string, PtyView>;
-
-  /**
-   * Whether the next first utterance on an empty canvas buys a product picture
-   * before any building. Local until it is sent: it rides on the utterance, so
-   * the bridge never has to remember a preference.
-   */
-  productFirst: boolean;
 
   /** single funnel for everything arriving from the bridge */
   ingest: (msg: ServerMsg) => void;
-  /** terminal frames have their own wire; they never touch the graph */
-  applyPty: (msg: PtyServerMsg) => void;
-  /** show or hide the terminal drawer; the server asks for the showing */
-  setTerminal: (open: boolean) => void;
   /** say one passing line at the top of the stage; it clears itself */
   notify: (text: string) => void;
   setConn: (conn: ConnStatus) => void;
-  select: (referent: Referent | null) => void;
+  select: (selection: Selection | null) => void;
   /** what the pointer is over, which is what reveals a stroke's words */
   setHover: (target: HoverTarget | null) => void;
   toggleReality: () => void;
-  setProductFirst: (on: boolean) => void;
   setFocus: (nodeId: string | null) => void;
   /** which variations the canvas merges; null is all of them */
   setFilter: (ids: ReadonlySet<string> | null) => void;
-  /** pin the variation utterances go to, or null to let the default rule pick */
+  /** pin the variation the header and the terminal button are about, or null for the default rule */
   setTarget: (worktree: string | null) => void;
   /** switch layers, restoring where that layer was last left */
   setView: (view: Layer) => void;
@@ -409,7 +365,7 @@ export interface AppState {
 }
 
 /**
- * What the pointer is over. Not a `Referent`: an `edge` here is a *drawn* line,
+ * What the pointer is over. Not a `Selection`: an `edge` here is a *drawn* line,
  * whose id is a render id and may stand for several relations, so it addresses
  * the canvas rather than the document.
  */
@@ -421,7 +377,7 @@ export interface HoverTarget {
 /** where a view was left: the layer it was drilled into, and what was selected there */
 export interface ViewPlace {
   focus: string | null;
-  selection: Referent | null;
+  selection: Selection | null;
 }
 
 const NOWHERE: ViewPlace = { focus: null, selection: null };
@@ -454,9 +410,9 @@ function keepFocus(focus: string | null, doc: GraphDoc): string | null {
 }
 
 /** a selection only survives while its target still exists in the graph */
-function keepSelection(selection: Referent | null, doc: GraphDoc): Referent | null {
+function keepSelection(selection: Selection | null, doc: GraphDoc): Selection | null {
   if (selection === null) return null;
-  // the fold carries no referent, but it is still the highlighted bubble
+  // the fold is not in the document, but it is still the highlighted bubble
   if (selection.kind === "node" && isMoreId(selection.id)) {
     return keepFocus(selection.id, doc) === null ? null : selection;
   }
@@ -619,8 +575,6 @@ export const useApp = create<AppState>((set, get) => ({
   conn: "connecting",
   errors: [],
   showReality: true,
-  nexts: {},
-  autonomous: {},
   view: "build",
   viewPinnedAt: 0,
   focus: null,
@@ -636,10 +590,7 @@ export const useApp = create<AppState>((set, get) => ({
   compare: null,
   delta: null,
   deltaContext: null,
-  terminalOpen: false,
   notice: null,
-  ptys: {},
-  productFirst: true,
 
   ingest: (msg) => {
     switch (msg.type) {
@@ -679,8 +630,6 @@ export const useApp = create<AppState>((set, get) => ({
           sessions: msg.sessions,
           revisions: msg.revisions,
           agents: msg.agents,
-          nexts: msg.nexts,
-          autonomous: msg.autonomous,
           filter,
           target: null,
           conn: "live",
@@ -697,10 +646,6 @@ export const useApp = create<AppState>((set, get) => ({
           activity: {},
           activeNodes: NO_ACTIVE,
           activeAt: {},
-          ptys: {},
-          // another project's shell is not this one's: whatever the drawer was
-          // showing belongs to the project that just went away
-          terminalOpen: false,
           compare: null,
           delta: null,
           deltaContext: null,
@@ -743,12 +688,6 @@ export const useApp = create<AppState>((set, get) => ({
       }
       case "agent":
         set((s) => ({ agents: { ...s.agents, [msg.worktree]: msg.state } }));
-        return;
-      case "next":
-        set((s) => ({ nexts: { ...s.nexts, [msg.worktree]: msg.next } }));
-        return;
-      case "autonomous":
-        set((s) => ({ autonomous: { ...s.autonomous, [msg.worktree]: msg.on } }));
         return;
       case "activity": {
         set((s) => {
@@ -813,10 +752,6 @@ export const useApp = create<AppState>((set, get) => ({
           // a variation with no harness is not working on anything
           activity: { ...s.activity, [msg.worktree]: NO_ACTIVE },
           activeNodes: activeUnion({ ...s.activity, [msg.worktree]: NO_ACTIVE }, s.filter),
-          // and it has no turn to end: the card's choices could not be sent
-          // anywhere, and nothing is left to run on its own
-          nexts: { ...s.nexts, [msg.worktree]: null },
-          autonomous: { ...s.autonomous, [msg.worktree]: false },
           // nothing is being written here any more
           now: { ...s.now, [msg.worktree]: null },
         }));
@@ -827,13 +762,6 @@ export const useApp = create<AppState>((set, get) => ({
         );
         return;
       }
-      case "terminal":
-        // The drawer shows ONE variation's shell — the one being steered — so a
-        // frame about any other variation is about a terminal this screen is
-        // not showing. It is broadcast to every attached tab, and a tab reading
-        // another branch must not have the drawer thrown over its canvas.
-        if (msg.worktree === selectTarget(get())) set({ terminalOpen: msg.open });
-        return;
       case "now":
         set((s) => ({ now: { ...s.now, [msg.worktree]: msg.text } }));
         return;
@@ -857,7 +785,7 @@ export const useApp = create<AppState>((set, get) => ({
         set({
           delta: msg.delta,
           deltaContext: live !== undefined && live.rev === msg.delta.revB ? live : null,
-          // nothing on a past version is a legitimate steering target
+          // nothing on a past version is a bubble in the project as it stands
           selection: null,
         });
         return;
@@ -871,40 +799,6 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
-  applyPty: (msg) => {
-    switch (msg.type) {
-      case "pty_data":
-        // One pane, one shell: bytes from a variation nobody is looking at
-        // would interleave into the target's scrollback. The bridge broadcasts
-        // every variation's terminal, so the drop happens here.
-        if (msg.worktree === selectTarget(get())) ptySink?.(msg.data);
-        return;
-      case "pty_state":
-        set((s) => ({
-          ptys: {
-            ...s.ptys,
-            [msg.worktree]: {
-              open: msg.open,
-              shell: msg.shell,
-              cwd: msg.cwd,
-              exited: msg.open ? null : (s.ptys[msg.worktree]?.exited ?? null),
-            },
-          },
-        }));
-        return;
-      case "pty_exit":
-        set((s) => ({
-          ptys: {
-            ...s.ptys,
-            [msg.worktree]: { ...(s.ptys[msg.worktree] ?? NO_PTY), open: false, exited: { code: msg.code } },
-          },
-        }));
-        return;
-    }
-  },
-
-  setTerminal: (open) => set({ terminalOpen: open }),
-
   notify: (text) => {
     const id = ++keySeq;
     set({ notice: { seq: id, text } });
@@ -917,13 +811,11 @@ export const useApp = create<AppState>((set, get) => ({
 
   setConn: (conn) => set({ conn }),
 
-  select: (referent) => set({ selection: referent }),
+  select: (selection) => set({ selection }),
 
   setHover: (target) => set({ hover: target }),
 
   toggleReality: () => set((s) => ({ showReality: !s.showReality })),
-
-  setProductFirst: (on) => set({ productFirst: on }),
 
   // the layer under the pointer is about to be replaced, so what it was over is
   // no longer under it
@@ -1065,16 +957,17 @@ export const useApp = create<AppState>((set, get) => ({
 }));
 
 /**
- * Which variation an utterance goes to.
+ * Which variation the screen is speaking about: the harness pill in the header,
+ * the "Go to terminal" button and the revision picker all read one variation,
+ * and this is it.
  *
  * A pinned target wins while it is still on screen. Otherwise: the only
- * filtered variation with a harness in it, because with one running there is
- * nothing to choose; else the filtered variation that lit the selected bubble
- * most recently, because that is the one working on what the reader is looking
- * at; else the main worktree, which is the project itself. The last case can
- * name a variation with no harness — the steering bar then refuses the
- * utterance and says which variation to open, rather than sending it somewhere
- * else than the chip promised.
+ * filtered variation with a harness in it, because with one reporting in there
+ * is nothing to choose; else the filtered variation that lit the selected
+ * bubble most recently, because that is the one working on what the reader is
+ * looking at; else the main worktree, which is the project itself. The last
+ * case can name a variation with no harness at all — the pills then have
+ * nothing to say about it, which is the honest reading.
  */
 export function selectTarget(state: AppState): string | null {
   const { session, filter, target } = state;
@@ -1104,7 +997,7 @@ export function selectTarget(state: AppState): string | null {
   return shown[0]?.id ?? null;
 }
 
-/** what the target variation's harness is doing — the state every control reads */
+/** what the target variation's harness is doing — the state the header reads */
 export function selectAgent(state: AppState): AgentState {
   const target = selectTarget(state);
   return target === null ? "idle" : (state.agents[target] ?? "idle");
@@ -1112,10 +1005,9 @@ export function selectAgent(state: AppState): AgentState {
 
 /**
  * How many code-derived cards the canvas is drawing right now, for the reading
- * the reader is standing in. Three places ask the same question — the reality
- * toggle's count, the empty state's evidence that this checkout has code
- * nothing has mapped, and the catch-up button's count of parts no bubble
- * claims — so the question is asked once, here.
+ * the reader is standing in. Two places ask the same question — the reality
+ * toggle's count and the empty state's evidence that this checkout has code
+ * nothing has mapped — so the question is asked once, here.
  */
 export function selectGhostCount(state: AppState): number {
   return selectGhosts({ doc: state.doc, view: state.view, focus: state.focus }).nodes.length;
@@ -1137,28 +1029,6 @@ export function selectRunningSession(state: AppState): WorktreeSession | null {
 export function selectRevisions(state: AppState): RevisionInfo[] {
   const target = selectTarget(state);
   return target === null ? NO_REVISIONS : (state.revisions[target] ?? NO_REVISIONS);
-}
-
-/** the terminal the pane is showing: the target variation's */
-export function selectPty(state: AppState): PtyView {
-  const target = selectTarget(state);
-  return target === null ? NO_PTY : (state.ptys[target] ?? NO_PTY);
-}
-
-/**
- * The card the steering bar sits under: the TARGET variation's, because that is
- * where a click on one of its choices would land. One card at a time on purpose
- * — two variations offering four buttons each is a menu, not a call to action.
- */
-export function selectNext(state: AppState): Next | null {
-  const target = selectTarget(state);
-  return target === null ? null : (state.nexts[target] ?? null);
-}
-
-/** whether the target variation is deciding for itself right now */
-export function selectAutonomous(state: AppState): boolean {
-  const target = selectTarget(state);
-  return target === null ? false : (state.autonomous[target] ?? false);
 }
 
 /** which variations hold one merged bubble; empty when only one is on screen */

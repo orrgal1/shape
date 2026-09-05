@@ -26,7 +26,6 @@ const AGENT_LABEL: Record<AgentState, string> = {
 /** where this harness's terminal is, said the way "Go to terminal" behaves */
 const TERMINAL_CAP: Record<string, string> = {
   external: "runs in your own terminal",
-  pane: "runs in Shape's terminal drawer",
   none: "no terminal to go to",
 };
 
@@ -38,8 +37,8 @@ const KIND_ARROW: Record<string, string> = {
 /**
  * Each cross-layer silence in two halves: a short name and what would close it
  * (user decision 2026-09-04 — connection is the default, so the panel says how
- * to connect rather than only that nothing is connected). Said for the person
- * steering by voice, so no field names: "ask the agent" is how they close it.
+ * to connect rather than only that nothing is connected). Said in the reader's
+ * register, so no field names: "ask the agent" is how they close it.
  * `unrealized` is absent: it is loud enough to keep the block of its own.
  */
 const GAP_NOTE: Partial<Record<LinkGap, { name: string; say: string }>> = {
@@ -104,8 +103,8 @@ function Lines({ lines, empty }: { lines: { seq: number; role: string; text: str
 
 function ProjectView({ tldr, agent }: { tldr: ProjectTldr; agent: AgentState }) {
   const setFocus = useApp((state) => state.setFocus);
-  // the harness of the variation being steered: what drives one variation is
-  // that variation's own fact now
+  // the harness of the variation the panel is speaking for: what drives one
+  // variation is that variation's own fact now
   const running = useApp(selectRunningSession);
   const backend = running?.backend;
   const model = running?.session.model ?? null;
@@ -119,8 +118,7 @@ function ProjectView({ tldr, agent }: { tldr: ProjectTldr; agent: AgentState }) 
             <strong>{backend.label}</strong>
             {model === null ? null : <> · {model.id}</>}
             <span className="tl-harness-caps">
-              {backend.capabilities.steerMidTurn ? "steers mid-turn" : "steering queues for the next turn"} ·{" "}
-              {TERMINAL_CAP[backend.capabilities.terminal]}
+              {`how Shape hears it: ${backend.capabilities.events}`} · {TERMINAL_CAP[backend.capabilities.terminal]}
             </span>
           </p>
         </section>
@@ -130,7 +128,7 @@ function ProjectView({ tldr, agent }: { tldr: ProjectTldr; agent: AgentState }) 
         {tldr.working.length === 0 ? (
           <p className="tl-empty">
             {agent === "idle"
-              ? "Nothing in flight. Click a bubble and speak to set the next move."
+              ? "Nothing in flight."
               : "Working, but not inside a bubble it has mapped to code yet."}
           </p>
         ) : (
@@ -462,7 +460,7 @@ function NodeView({ tldr, places }: { tldr: NodeTldr; places: readonly WherePlac
       <section className="tl-block">
         <h2 className="tl-title">relations</h2>
         {tldr.relations.length === 0 ? (
-          <p className="tl-empty">No declared relations. Draw one by selecting an edge and speaking.</p>
+          <p className="tl-empty">No declared relations — nothing says how this part meets another one.</p>
         ) : (
           <ul className="tl-relations">
             {tldr.relations.map((relation) => (

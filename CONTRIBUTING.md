@@ -22,12 +22,13 @@ pnpm install --frozen-lockfile   # the lockfile is the source of truth; a diff i
 Two processes, two terminals:
 
 ```sh
-pnpm bridge   # the bridge: harness adapters, canvas host tool, graph store, WebSocket on 127.0.0.1:4400
+pnpm bridge   # the bridge: canvas host tool, session observation, graph store, WebSocket on 127.0.0.1:4400
 pnpm web      # the canvas: Vite dev server on http://127.0.0.1:5173
 ```
 
-The bridge starts a real harness session in a real terminal, so `pnpm bridge` needs `omp` or
-`claude` installed. For work on the canvas itself you usually do not want either: open
+The bridge starts nothing: it watches. `pnpm bridge` runs with no harness installed, and the
+canvas fills in as sessions in that repo report in over the link. For work on the canvas itself
+you do not need a session at all: open
 <http://127.0.0.1:5173/?mock=1> and the web app runs with no bridge at all, on a hand-built graph
 that exercises every visual state (`packages/web/src/mock.ts`). `?mock=1&empty=1` is the
 brownfield entry state (code present, intent layer empty), and `?mock=playground` is a frozen
@@ -74,10 +75,10 @@ covers; each says what it asserts and why.
 | `pnpm smoke:shared` | `applyOps`, the layer walls, verification rules and symbol refs, in-process | ~2s |
 | `pnpm smoke:wire` | every wire frame in both directions, the SQLite store and its migrations, and the fakes themselves | ~3s |
 | `pnpm --filter @shape/bridge smoke:drift` | `computeDrift` against a frozen real graph — pure, no sockets | ~2s |
-| `pnpm --filter @shape/bridge smoke:claude` | the Claude Code adapter: argv, terminal attach, and a real bridge driving `fake-claude.mjs`. No network, no model | ~3s |
+| `pnpm --filter @shape/bridge smoke:claude` | the Claude Code path: hook events and canvas calls reaching the canvas over the link, with a real bridge driving `fake-claude.mjs`. No network, no model | ~3s |
 | `pnpm --filter @shape/link selftest:omp` | the real omp extension against a real WebSocket server and a stub `pi` (runs under Bun when Bun is installed, Node otherwise) | ~5s |
 | `pnpm smoke:link-cli` | the link CLI and the omp extension produce indistinguishable canvas calls, each through its own real bridge | ~3s |
-| `pnpm --filter @shape/bridge smoke` | the real bridge against `fake-omp-tui.mjs` under the pty launcher, driven over WebSocket | ~60s |
+| `pnpm --filter @shape/bridge smoke` | the real bridge against `fake-omp-tui.mjs` — a fake omp that dials the link on its own and shows up as an observed session — driven over WebSocket | ~60s |
 
 The first seven are what CI runs on every push and pull request. The bridge smoke is hermetic
 too, but one of its assertions fails on Linux ([#13](https://github.com/orrgal1/shape/issues/13)),
@@ -88,11 +89,11 @@ are local-only by nature:
 | --- | --- |
 | `pnpm smoke:remote` | runs `server-cli` and `agent-cli` as separate processes on real TCP ports |
 | `pnpm smoke:auth` | same, plus `login-cli`, two tenants and real token files |
-| `pnpm smoke:herdr` | models a herdr terminal tab over a unix socket (`fake-herdr.mjs`) |
+| `pnpm smoke:herdr` | models a herdr terminal tab over a unix socket (`fake-herdr.mjs`): the manager tab and `focus_terminal` |
 | `pnpm --filter @shape/bridge smoke:adopt` | scans the *real* agent sessions running on your machine, so its result depends on what you happen to have open |
 
 Run `smoke:remote` and `smoke:auth` locally before a PR that touches split mode or auth;
-`smoke:herdr` before one that touches the launchers; `smoke:adopt` before one that touches
+`smoke:herdr` before one that touches the herdr client; `smoke:adopt` before one that touches
 discovery or adopt. The full local set, on a laptop, is under two minutes.
 
 ## Code conventions

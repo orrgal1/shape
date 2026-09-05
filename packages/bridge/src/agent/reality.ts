@@ -14,7 +14,7 @@
  */
 
 import { readdir, readFile, stat } from "node:fs/promises";
-import { execFile, spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import path from "node:path";
 
 import { buildFileIndex, normalizeIndexPath, type FileIndex } from "../../../shared/src/fileindex.ts";
@@ -130,7 +130,7 @@ async function gitHead(cwd: string): Promise<string | null> {
  */
 const LS_FILES_ARGS = ["ls-files", "-z", "--cached", "--others", "--exclude-standard"];
 
-/** null = not a git repo (or git unavailable) -> callers fall back to the fs walk. */
+/** null = not a git repo (or git unavailable): the caller has no index to work from. */
 export async function gitFileIndex(cwd: string): Promise<FileIndex | null> {
   const { promise, resolve } = Promise.withResolvers<FileIndex | null>();
   const opts = { cwd, timeout: GIT_TIMEOUT_MS, windowsHide: true } as const;
@@ -149,27 +149,6 @@ export async function gitFileIndex(cwd: string): Promise<FileIndex | null> {
     );
   });
   return promise;
-}
-
-/**
- * Blocking twin of {@link gitFileIndex}, for the synchronous op gate. Two short
- * git reads on the survey turn's first op; the gate has no async seam to use.
- */
-export function gitFileIndexSync(cwd: string): FileIndex | null {
-  const opts = {
-    cwd,
-    timeout: GIT_TIMEOUT_MS,
-    windowsHide: true,
-    encoding: "utf8" as const,
-    maxBuffer: MAX_GIT_OUTPUT_BYTES,
-  };
-  const top = spawnSync("git", ["rev-parse", "--show-toplevel"], opts);
-  if (top.error !== undefined || top.status !== 0) return null;
-  const listed = spawnSync("git", LS_FILES_ARGS, opts);
-  if (listed.error !== undefined || listed.status !== 0 || typeof listed.stdout !== "string") {
-    return null;
-  }
-  return buildFileIndex(listed.stdout.split("\0"));
 }
 
 // ---------------------------------------------------------------------------

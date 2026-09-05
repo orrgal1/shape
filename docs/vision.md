@@ -4,11 +4,22 @@
 `notes/understand.md` — this is the greenfield, primary-interface version of the same idea. Not re-gated;
 recorded as vision.*
 
+**Half of this was cut on 2026-09-05, and the record is kept as written.** Shape shipped the
+artifact and dropped the input: one agent-maintained picture carried from ideation through
+build, intent against mechanically-derived reality with drift rendered where they disagree,
+semantic zoom and drill-down — all of that is what Shape is. The canvas as the way you DIRECT
+agents — click a bubble and speak, deictic steering, an utterance addressed at a referent,
+autonomy switches, spatial model orchestration — was tried and removed: agents are directed
+where they run, in a terminal or through the manager beside it, and the browser has no path to
+one. Read every "click and speak" sentence below as the design that was, not as the product;
+the sections that describe it are marked. What Shape ships today is README.md, and the wire is
+CONTRACTS.md.
+
 ## The vision, distilled
 
 A new kind of agent development interface that is absolutely visual and voice-driven.
 
-- **Blank canvas start.** You speak your initial idea (Wispr Flow, deeply integrated; other voice
+- **(cut 2026-09-05) Blank canvas start.** You speak your initial idea (Wispr Flow, deeply integrated; other voice
   modes as fallback). A harness runs behind the scenes — model architecture configurable like any
   harness, with subscription presets (e.g. Anthropic: Fable 5 for exploration/planning, Opus 5 for
   workhorse coding, Sonnet for simple tasks), combinable across providers like omp.
@@ -16,7 +27,7 @@ A new kind of agent development interface that is absolutely visual and voice-dr
   drillable sub-bubbles as the agent fleshes it out. The *same* visualization then carries
   implementation: the main bubble splits into high-level components, each into the layer beneath,
   edges describing the interactions between them.
-- **Click anything, steer it.** Click a bubble or an edge and speak: "this component should do X,"
+- **(cut 2026-09-05) Click anything, steer it.** Click a bubble or an edge and speak: "this component should do X,"
   "split this," "merge these," "this relationship is wrong." The agent is always responsible for
   keeping the visualization current as it works.
 - Bubble view is one view type; alternative/custom views later.
@@ -66,7 +77,7 @@ while a sibling is still being fleshed out. This is the differentiator over ever
 gets discarded when coding starts: the plan never becomes stale documentation because the plan IS
 the interface you keep using.
 
-### 2. The steering utterance = selection + speech
+### 2. (cut 2026-09-05) The steering utterance = selection + speech
 
 A click alone is a referent with no requirement. A sentence alone is a requirement with no referent
 (the agent guesses "which component"). Together they form a complete steering utterance — this

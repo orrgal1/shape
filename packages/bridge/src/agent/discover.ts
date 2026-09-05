@@ -36,14 +36,13 @@ const IS_DARWIN = platform() === "darwin";
 
 interface ProcRow {
   pid: number;
-  ppid: number;
   startedAt: string | null;
   command: string;
   argv: string[];
 }
 
 /** `Wed Sep  2 16:17:54 2026` — the fixed 5-token `lstart` form. */
-const PS_ROW = /^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/;
+const PS_ROW = /^\s*(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/;
 
 /** Run a command, resolving to null on any failure (missing binary, timeout, non-zero). */
 function run(file: string, args: string[]): Promise<string | null> {
@@ -62,11 +61,10 @@ function parsePs(stdout: string): ProcRow[] {
   for (const line of stdout.split("\n")) {
     const m = PS_ROW.exec(line);
     if (m === null) continue;
-    const command = m[4]!.trim();
-    const startedMs = Date.parse(m[3]!.replace(/\s+/g, " "));
+    const command = m[3]!.trim();
+    const startedMs = Date.parse(m[2]!.replace(/\s+/g, " "));
     rows.push({
       pid: Number(m[1]),
-      ppid: Number(m[2]),
       startedAt: Number.isNaN(startedMs) ? null : new Date(startedMs).toISOString(),
       command,
       argv: command.split(/\s+/),
@@ -134,13 +132,6 @@ function classify(argv: string[]): Harness | null {
   if (nodeLike && rest.some((a) => /\/\.cursor\/bin\/(cursor-)?agent$/.test(a))) return "cursor";
 
   return null;
-}
-
-/** A Shape bridge: node running the bridge entrypoint out of `packages/bridge`. */
-function looksLikeShapeBridge(row: ProcRow | undefined, cwd: string | null): boolean {
-  if (row === undefined) return false;
-  if (row.command.includes("packages/bridge") || row.command.includes("@shape/bridge")) return true;
-  return (cwd ?? "").endsWith("/packages/bridge") && row.command.includes("index.ts");
 }
 
 /* ----------------------------------------------------------------- cwd probe */
@@ -482,11 +473,10 @@ function sessionRefFor(harness: Harness, cwd: string | null, argv: string[], not
  * costs you `cwd`/`sessionId`, not the row.
  */
 export async function discoverSessions(): Promise<DiscoveredSession[]> {
-  const stdout = await run("ps", ["-axo", "pid=,ppid=,lstart=,command="]);
+  const stdout = await run("ps", ["-axo", "pid=,lstart=,command="]);
   if (stdout === null) return [];
 
   const rows = parsePs(stdout);
-  const byPid = new Map<number, ProcRow>(rows.map((row) => [row.pid, row]));
 
   const hits: { row: ProcRow; harness: Harness }[] = [];
   for (const row of rows) {
@@ -495,23 +485,13 @@ export async function discoverSessions(): Promise<DiscoveredSession[]> {
   }
   if (hits.length === 0) return [];
 
-  // Parents too: a session is only Shape's own if its parent is a bridge.
-  const probe = new Set<number>();
-  for (const { row } of hits) {
-    probe.add(row.pid);
-    if (byPid.has(row.ppid)) probe.add(row.ppid);
-  }
-  const cwds = await resolveCwds([...probe]);
+  const cwds = await resolveCwds(hits.map(({ row }) => row.pid));
 
   const sessions = hits.map(({ row, harness }) => {
     const cwd = cwds.get(row.pid) ?? null;
     // A session file older than the process cannot be that process's own.
     const notBefore = row.startedAt === null ? 0 : Date.parse(row.startedAt) - START_SLACK_MS;
     const { sessionId, sessionFile } = sessionRefFor(harness, cwd, row.argv, notBefore);
-    // A harness Shape launched itself is not worth offering to adopt: it is
-    // already driving this canvas. Shape starts them as real terminal
-    // sessions now, so the only thing that tells them apart is the parent.
-    const spawnedByShape = looksLikeShapeBridge(byPid.get(row.ppid), cwds.get(row.ppid) ?? null);
     return {
       harness,
       pid: row.pid,
@@ -522,7 +502,6 @@ export async function discoverSessions(): Promise<DiscoveredSession[]> {
       startedAt: row.startedAt,
       resumeCommand: resumeCommandFor(harness, sessionId),
       attach: attachFor(harness, row.pid, row.argv),
-      spawnedByShape,
     } satisfies DiscoveredSession;
   });
 

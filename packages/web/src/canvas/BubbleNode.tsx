@@ -413,7 +413,7 @@ export function BubbleNode({ data }: NodeProps<BubbleNodeType>) {
       ) : null}
 
       {/* Drill affordance: the only way in, alongside double-click. Single click
-          stays selection so steering never changes what you are looking at.
+          stays selection so reading a bubble never changes what you are looking at.
           A real bubble counts what is inside it; the fold IS what is inside it,
           so counting again would only repeat its own label.
           A leaf offers the same door onto its own code: nobody wrote those

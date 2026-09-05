@@ -24,7 +24,7 @@ import { useMotion } from "./motion.ts";
 const NODE_TYPES: NodeTypes = { bubble: BubbleNode, ghost: GhostNode, strip: StripNode };
 const EDGE_TYPES: EdgeTypes = { rel: RelationEdge };
 
-/** leaves room for the header, the steering bar and the corner overlays */
+/** leaves room for the header, the corner overlays and the empty-state card */
 const FIT_PADDING = { top: "76px", right: "44px", bottom: "124px", left: "44px" } as const;
 
 /** zoom bounds shared by the pane and the framing maths */
@@ -34,13 +34,11 @@ const MAX_ZOOM = 1.1;
 const SOLO_MAX_ZOOM = 1.8;
 
 /**
- * The dock at the bottom of the stage owns that band, and it changes height
- * with the turn — the card carrying the next step appears and disappears, and
- * the bar grows with a dictated sentence. The shell measures the dock and
- * publishes its height as `--dock-h`, so the corner overlays are lifted by that
- * plus the dock's own bottom inset rather than by a number that was true once.
+ * How far the corner overlays sit above the stage floor: the stage's own bottom
+ * inset plus one step, so the zoom controls and the "now" pill clear the edge
+ * of the canvas rather than sitting on it.
  */
-const OVERLAY_LIFT = "calc(var(--dock-h, 96px) + var(--s5) + var(--s3))";
+const OVERLAY_LIFT = "calc(var(--s5) + var(--s3))";
 const MINIMAP_W = 176;
 const MINIMAP_H = 116;
 
@@ -268,7 +266,7 @@ export function Canvas() {
       maxZoom={2.4}
       proOptions={{ hideAttribution: true }}
       onNodeClick={(_event, node) => {
-        // a bubble in a past version is not a steering target
+        // a bubble in a past version is not a place in the project as it stands
         if (comparing || node.type !== "bubble") return;
         select({ kind: "node", id: node.id });
       }}

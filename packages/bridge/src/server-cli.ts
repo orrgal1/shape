@@ -30,7 +30,8 @@ interface Cli {
   port: number;
   /**
    * `--host`: anything but loopback needs `--token-file`; an unauthenticated
-   * server on a routable address is an open canvas and an open steer channel.
+   * server on a routable address hands every project's canvas, and the paths
+   * and sessions on it, to whoever asks.
    */
   host: string;
   /** `--data-dir`: holds `shape.db`, every project's graph, revisions and registry row */
@@ -77,7 +78,7 @@ function parseArgv(argv: string[]): Cli {
 try {
   const cli = parseArgv(process.argv.slice(2));
   // before anything binds or is read: an unauthenticated server on a routable
-  // address would hand every graph and every steer channel to the network
+  // address would hand every graph, and every path in it, to the network
   if (!isLoopbackHost(cli.host) && cli.tokenFile === null) {
     throw new Error(`refusing to listen on ${cli.host} without --token-file`);
   }
