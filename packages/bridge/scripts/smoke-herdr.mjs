@@ -1,46 +1,39 @@
 #!/usr/bin/env node
 /**
- * Herdr-launcher smoke test. The same bridge as every other smoke, but the
- * harness does not run in a pty Shape owns: it runs in a terminal tab that
- * belongs to the user, opened over herdr's socket API. `scripts/fake-herdr.mjs`
- * stands in for that server, and the harness inside the tab is the usual
- * `scripts/fake-omp-tui.mjs` — so the loopback link, the canvas and the
- * steering are real, and only the terminal is somebody else's.
+ * Herdr smoke test. herdr is not how Shape starts sessions — Shape starts
+ * none — it is how Shape can SEE the user's own terminal: a session running in
+ * a herdr tab has a terminal that can be brought forward, and one running
+ * anywhere else does not. This drives that, with `scripts/fake-herdr.mjs` in
+ * place of the user's herdr server and `scripts/fake-omp-tui.mjs` as the
+ * session inside the tab:
  *
- * What it asserts, end to end:
- *   workspace.create — a project gets ONE workspace of its own, named after
- *                     it: the workspace the user already had open ("scratch",
- *                     which the fake starts with) is left alone
- *   the root tab    — the first session takes the tab that CAME WITH that
- *                     workspace, relabelled for the variation, and asks for
- *                     no tab of its own; it carries the harness's link and
- *                     worktree in its environment
- *   tab.create      — the second variation is a second TAB in the SAME
- *                     workspace (`workspace_id`), in its own directory
- *   agent.start     — the harness started in that tab's root pane, by kind
- *   hello           — a session in that variation, terminal "external": there
- *                     is nothing for the browser to draw a drawer over
- *   utterance       — reaches the harness over the loopback link as `deliver`
- *   focus_terminal  — becomes an `agent.focus` call and NO `terminal` frame:
- *                     the terminal is the user's, and it is brought forward
- *                     where it lives — the tab inside herdr, and the
- *                     application hosting it (`SHAPE_TERMINAL_APP` names it
- *                     and `SHAPE_OPEN` raises nothing real, so the probe of
- *                     this machine's process table is checked separately)
- *   one call, one    — herdr answers a request and HANGS UP, so the launcher
- *   connection         opens a connection per call and keeps working after
- *                      the first answer closed the first one
- *   status           — subscribed for the launched PANE (herdr has no global
- *                      form of it) and delivered on that pane's connection
- *   pane.exited     — a harness that dies in its tab becomes `session_stopped`
- *   close_worktree  — becomes `tab.close`, and the session is gone
+ *   probe           — the bridge finds herdr on HERDR_SOCKET_PATH and says so
+ *   a builder tab   — a tab created in a worktree with a harness started in it
+ *                     (what a manager-launched builder looks like) reports in
+ *                     over the loopback link as a session with terminal
+ *                     "external": its terminal is the user's, not a drawer
+ *   focus_terminal  — becomes `agent.list` then `agent.focus` for THAT pane,
+ *                     each on a connection of its own (herdr hangs up per
+ *                     answer), and raises the hosting application
+ *                     (`SHAPE_TERMINAL_APP` names it, `SHAPE_OPEN` raises
+ *                     nothing real, and the probe of this machine's process
+ *                     table is checked separately)
+ *   no session      — focus_terminal for a variation nothing reports in from is
+ *                     refused with the reason
+ *   tab.close       — the harness dies with its tab and the session is gone
  *
- * Usage (from packages/bridge): node scripts/smoke-herdr.mjs
+ * The project's manager tab is the one thing Shape still OPENS in herdr; that
+ * pass has its own smoke (`smoke-manager.mjs`) and is switched off here with
+ * SHAPE_MANAGER=0, so what this file drives is only the observing side.
+ *
+ * Not in CI (it models a terminal): run it locally, against the fake by
+ * default. Usage (from packages/bridge): node scripts/smoke-herdr.mjs
  */
 
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import WebSocket from "ws";
@@ -49,7 +42,7 @@ import { parsePsRows, terminalAppOf } from "../src/agent/launcher/herdr.ts";
 
 const PORT = Number(process.env.SMOKE_HERDR_PORT ?? 4415);
 
-// herdr is the launcher under test, and the one harness on this machine is the
+// herdr is the terminal under test, and the one harness on this machine is the
 // fake omp. An explicit socket is also what tells the launcher not to go
 // autospawning a herdr server: someone else already owns this one.
 process.env.SHAPE_LAUNCHER = "herdr";
@@ -84,9 +77,35 @@ function jsonl(path) {
     .map((line) => JSON.parse(line));
 }
 
+/** the calls herdr was asked for, in order, with the connection each came on */
 const calls = (method) => jsonl(herdrLog).filter((f) => f.type === "__call" && f.method === method);
-/** what herdr answered, for the ids it invented: workspaces, tabs, panes */
-const answers = (method) => jsonl(herdrLog).filter((f) => f.type === "__answer" && f.method === method);
+
+let callSeq = 0;
+
+/**
+ * One call to the fake herdr, the way the real protocol works: a connection
+ * carrying a single request, whose first response line is that request's
+ * answer. This smoke is a herdr CLIENT here — it plays the manager launching a
+ * builder into a tab, which is what Shape then observes.
+ */
+function herdrCall(method, params = {}) {
+  const { promise, resolve, reject } = Promise.withResolvers();
+  const socket = connect(socketPath);
+  let buf = "";
+  socket.setEncoding("utf8");
+  socket.on("connect", () => socket.write(`${JSON.stringify({ id: `smoke-${String(++callSeq)}`, method, params })}\n`));
+  socket.on("data", (chunk) => {
+    buf += chunk;
+    const nl = buf.indexOf("\n");
+    if (nl === -1) return;
+    const answer = JSON.parse(buf.slice(0, nl));
+    socket.end();
+    if (answer.error !== undefined) reject(new Error(`${answer.error.code}: ${answer.error.message}`));
+    else resolve(answer.result ?? {});
+  });
+  socket.on("error", reject);
+  return promise;
+}
 
 /** a committed one-package workspace: enough for reality extraction to succeed */
 async function seedTarget(dir) {
@@ -96,7 +115,9 @@ async function seedTarget(dir) {
   await writeFile(join(dir, "packages", "solo", "package.json"), JSON.stringify({ name: "@herdr/solo", version: "0.0.1" }, null, 2));
   await writeFile(join(dir, "packages", "solo", "src", "index.ts"), "export const solo = 1;\n");
   const git = (...args) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
-  git("init", "-q");
+  // not `main`: this machine's global pre-commit hook refuses commits there,
+  // and a throwaway repo in /tmp is nobody's trunk
+  git("init", "-q", "-b", "smoke");
   git("add", "-A");
   git("-c", "user.email=smoke@example.com", "-c", "user.name=smoke", "commit", "-q", "-m", "init");
 }
@@ -106,14 +127,12 @@ const fakeHome = await mkdtemp(join(tmpdir(), "vh-herdr-home-"));
 const socketPath = join(fakeHome, "herdr.sock");
 const herdrLog = join(fakeHome, "fake-herdr.log");
 await seedTarget(target);
-/** a second variation of the same repo: a second tab, which is what dies below */
+/** the variation a builder works in: its own worktree, as the manager makes one */
 const worktree = join(tmpdir(), `vh-herdr-wt-${process.pid}`);
-execFileSync("git", ["worktree", "add", "-b", "variation", worktree], { cwd: target, stdio: "ignore" });
+execFileSync("git", ["worktree", "add", "-q", "-b", "variation", worktree], { cwd: target, stdio: "ignore" });
 
 const wtMain = realpathSync(target);
 const wtVariation = realpathSync(worktree);
-/** each variation's harness logs into its own directory, as everywhere else */
-const ompLogIn = (dir) => join(dir, "fake-omp.log");
 
 const frames = [];
 let herdr = null;
@@ -121,7 +140,7 @@ let bridge = null;
 let socket = null;
 
 try {
-  // --- the herdr server the launcher talks to -------------------------------
+  // --- the herdr server the bridge talks to ---------------------------------
   herdr = spawn(process.execPath, ["scripts/fake-herdr.mjs"], {
     cwd: process.cwd(),
     env: { ...process.env, HERDR_SOCKET_PATH: socketPath, FAKE_HERDR_LOG: herdrLog },
@@ -136,32 +155,27 @@ try {
   herdr.stderr.on("data", (d) => process.stderr.write(`[herdr] ${d}`));
   await waitFor("the fake herdr server listening", () => herdrOut.includes('"ready"'));
 
-  // --- the bridge, launching through it -------------------------------------
-  bridge = spawn(
-    process.execPath,
-    ["src/index.ts", "--cwd", target, "--port", String(PORT), "--omp", "node scripts/fake-omp-tui.mjs"],
-    {
-      cwd: process.cwd(),
-      // SHAPE_TERMINAL_APP names the app whose window "go to terminal" raises,
-      // so this bridge advertises an external terminal without probing the
-      // machine it runs on; SHAPE_OPEN replaces `open` with `true`, so nothing
-      // real is ever brought forward under a smoke. SHAPE_AUTO_MAP=0 keeps the
-      // room from mapping this seeded project by itself: the launcher is what
-      // this file is about, and a survey turn would talk over it.
-      env: {
-        ...process.env,
-        SHAPE_AUTO_MAP: "0",
-        // the fake herdr has no manager to find, and this smoke is the launcher's
-        SHAPE_MANAGER: "0",
-        HERDR_SOCKET_PATH: socketPath,
-        SHAPE_HOME: fakeHome,
-        HOME: fakeHome,
-        SHAPE_TERMINAL_APP: "/tmp/FakeTerminal.app",
-        SHAPE_OPEN: "true",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
+  // --- the bridge, with that herdr as the machine's terminal ----------------
+  bridge = spawn(process.execPath, ["src/index.ts", "--cwd", target, "--port", String(PORT)], {
+    cwd: process.cwd(),
+    // SHAPE_TERMINAL_APP names the app whose window "go to terminal" raises, so
+    // this bridge advertises an external terminal without probing the machine
+    // it runs on; SHAPE_OPEN replaces `open` with `true`, so nothing real is
+    // ever brought forward under a smoke. SHAPE_AUTO_MAP=0 keeps the room from
+    // mapping this seeded project by itself — the terminal is what this file is
+    // about. SHAPE_MANAGER=0: the manager pass has its own smoke.
+    env: {
+      ...process.env,
+      SHAPE_AUTO_MAP: "0",
+      SHAPE_MANAGER: "0",
+      HERDR_SOCKET_PATH: socketPath,
+      SHAPE_HOME: fakeHome,
+      HOME: fakeHome,
+      SHAPE_TERMINAL_APP: "/tmp/FakeTerminal.app",
+      SHAPE_OPEN: "true",
     },
-  );
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   let stderr = "";
   bridge.stderr.setEncoding("utf8");
   bridge.stderr.on("data", (d) => {
@@ -170,63 +184,12 @@ try {
   });
   bridge.stdout.setEncoding("utf8");
   bridge.stdout.on("data", (d) => process.stderr.write(`[bridge:out] ${d}`));
-
   await waitFor("bridge listening", () => stderr.includes("canvas at ws://"));
 
-  // --- the project's workspace and the harness in its root tab -------------
-  // One workspace per project, one tab per variation. A brand-new workspace
-  // arrives WITH its first tab and root pane, so the project's first session
-  // takes that tab and no `tab.create` happens for it at all.
-  const created = await waitFor("a workspace created for the project", () => calls("workspace.create")[0]);
-  const answer = await waitFor("the workspace herdr handed back", () => answers("workspace.create")[0]);
-  const workspaceId = String(answer.result.workspace.workspace_id);
-  const rootTab = String(answer.result.tab.tab_id);
-  const rootPane = String(answer.result.root_pane.pane_id);
-  const listed = await waitFor("the workspaces the launcher looked at first", () => answers("workspace.list")[0]);
-  const scratchId = String((listed.result.workspaces ?? []).find((w) => w.label === "scratch")?.workspace_id ?? "");
   check(
-    "a project gets a herdr workspace of its own, named after it and rooted in its worktree",
-    created.params.label === basename(wtMain) && created.params.cwd === wtMain && workspaceId.length > 0,
-    JSON.stringify(created.params),
-  );
-  check(
-    "and it is Shape's own: the workspace the user already had open is not taken over",
-    scratchId.length > 0 && scratchId !== workspaceId,
-    `scratch ${scratchId}, project ${workspaceId}`,
-  );
-  check(
-    "the tab it runs in carries the harness's loopback link and the variation it is for",
-    String(created.params.env?.SHAPE_LINK ?? "").startsWith("ws://") &&
-      String(created.params.env?.SHAPE_LINK ?? "").endsWith("/link") &&
-      created.params.env?.SHAPE_WORKTREE === wtMain,
-    JSON.stringify(created.params.env ?? null),
-  );
-  const renamed = await waitFor("the root tab relabelled for the variation", () =>
-    calls("tab.rename").find((f) => f.params.tab_id === rootTab),
-  );
-  check(
-    "the first session takes the tab that came with the workspace, relabelled, and asks for none of its own",
-    typeof renamed.params.label === "string" &&
-      renamed.params.label.length > 0 &&
-      !calls("tab.create").some((f) => f.params.cwd === wtMain),
-    `${JSON.stringify(renamed.params)}; ${String(calls("tab.create").length)} tab.create calls so far`,
-  );
-
-  const startCall = await waitFor("the agent started in that tab", () => calls("agent.start")[0]);
-  check(
-    "the harness is started in the tab's root pane, by kind",
-    startCall.params.kind === "omp" && typeof startCall.params.pane_id === "string" && startCall.params.pane_id.length > 0,
-    JSON.stringify(startCall.params),
-  );
-  check(
-    "and it is started with the canvas extension, not driven over a pipe",
-    Array.isArray(startCall.params.args) && startCall.params.args.includes("--extension"),
-    JSON.stringify(startCall.params.args ?? null),
-  );
-  check(
-    "and that pane is the root pane of the project's own workspace",
-    startCall.params.pane_id === rootPane && rootPane.startsWith(`${workspaceId}:`),
-    `${String(startCall.params.pane_id)} vs ${rootPane}`,
+    "the bridge finds the herdr on HERDR_SOCKET_PATH and reports an external terminal",
+    stderr.includes("hosts this machine's sessions") && stderr.includes("terminal: herdr"),
+    stderr.split("\n").find((line) => line.includes("herdr")) ?? "(herdr never mentioned)",
   );
 
   socket = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
@@ -237,73 +200,101 @@ try {
     socket.once("error", opened.reject);
     await opened.promise;
   }
-
   const hello = await waitFor("hello", () => frames.find((f) => f.type === "hello"));
-  check("hello says the project is launched through herdr", hello.tools?.launcher === "herdr", JSON.stringify(hello.tools ?? null));
-  const running = hello.session.sessions.find((s) => s.worktree === wtMain);
+  check("hello names herdr as the project's launcher", hello.tools?.launcher === "herdr", JSON.stringify(hello.tools ?? null));
   check(
-    "the session that came up in the tab is reported against that variation",
-    running !== undefined && running.backend.id === "omp",
+    "a project nobody is working in yet is attached with no session in it",
+    hello.session.sessions.length === 0,
     JSON.stringify(hello.session.sessions),
   );
+
+  // --- a builder in a tab of its own, the way the manager launches one -------
+  // The workspace, the tab and the harness inside it are all somebody else's
+  // doing: Shape only ever learns about this session because it dials the
+  // loopback link from a directory Shape knows.
+  const startedAt = frames.length;
+  const workspace = await herdrCall("workspace.create", { label: basename(wtMain), cwd: wtMain, focus: false });
+  const workspaceId = String(workspace.workspace.workspace_id);
+  const created = await herdrCall("tab.create", {
+    workspace_id: workspaceId,
+    cwd: wtVariation,
+    label: "variation",
+    env: {
+      SHAPE_LINK: `ws://127.0.0.1:${String(PORT)}/link`,
+      SHAPE_WORKTREE: wtVariation,
+      FAKE_OMP_LOG: join(fakeHome, "fake-omp.log"),
+    },
+  });
+  const paneId = String(created.root_pane.pane_id);
+  const tabId = String(created.tab.tab_id);
+  await herdrCall("agent.start", { name: "builder", kind: "omp", pane_id: paneId, args: [], timeout_ms: 30_000 });
+
+  // A session appears twice over: first because something spoke from a
+  // directory Shape knows — all it can say then is that work is happening
+  // there — and again the moment the harness greets, which is what names it.
+  const appeared = await waitFor(
+    "session_started for the builder's variation",
+    () => frames.slice(startedAt).find((f) => f.type === "session_started" && f.worktree === wtVariation),
+  );
   check(
-    "a harness in the user's own terminal advertises an external terminal: there is no drawer to open",
-    running?.backend.capabilities.terminal === "external",
-    JSON.stringify(running?.backend.capabilities ?? null),
+    "a directory of this repo speaking on the link IS a session appearing, before anything is known about it",
+    appeared.backend.id === "unknown" && appeared.backend.capabilities.events === "hooks",
+    JSON.stringify({ backend: appeared.backend.id, capabilities: appeared.backend.capabilities }),
+  );
+  const named = await waitFor(
+    "the greeted session in the builder's variation",
+    () =>
+      frames
+        .slice(startedAt)
+        .find((f) => f.type === "session_started" && f.worktree === wtVariation && f.backend.id === "omp"),
+  );
+  check(
+    "and the harness's own hello names it: its session, its model and the canvas tool it registered",
+    named.session.sessionId !== null &&
+      named.backend.capabilities.events === "native" &&
+      named.backend.capabilities.hostTool === true,
+    JSON.stringify({ session: named.session, capabilities: named.backend.capabilities }),
+  );
+  check(
+    "either way its terminal is the user's own, which Shape can reach but does not host",
+    appeared.backend.capabilities.terminal === "external" && named.backend.capabilities.terminal === "external",
+    JSON.stringify(named.backend.capabilities),
   );
 
-  // --- steering goes over the link, not through the terminal ----------------
-  // productFirst off: the first turn on an empty canvas would otherwise be
-  // spent on the product picture, and what this asserts is the wire into the
-  // harness, not that gate (§Product-first turn covers it)
-  socket.send(
-    JSON.stringify({
-      type: "utterance",
-      worktree: wtMain,
-      referent: null,
-      text: "build me an auth service",
-      productFirst: false,
-    }),
-  );
-  const delivered = await waitFor("the utterance in the harness's own log", () =>
-    jsonl(ompLogIn(target)).find((f) => f.type === "deliver" && f.body.includes("build me an auth service")),
-  );
-  check(
-    "an utterance reaches a herdr-launched harness over the loopback link",
-    delivered.mode === "prompt" || delivered.mode === "steer",
-    `${delivered.mode}: ${delivered.body.slice(-40)}`,
-  );
-  await waitFor("the canvas the harness drew", () =>
-    frames.find((f) => f.type === "graph" && f.worktree === wtMain && f.graph.nodes.some((n) => n.id === "auth-service")),
-  );
-  check("the canvas is written from inside the user's terminal like anywhere else", true);
-
-  // --- going to the terminal ------------------------------------------------
+  // --- going to that session's terminal -------------------------------------
   const focusAt = frames.length;
-  socket.send(JSON.stringify({ type: "focus_terminal", worktree: wtMain }));
-  const focused = await waitFor("an agent.focus call", () => calls("agent.focus")[0] ?? calls("tab.focus")[0]);
+  const listedBefore = calls("agent.list").length;
+  socket.send(JSON.stringify({ type: "focus_terminal", worktree: wtVariation }));
+  const focused = await waitFor("an agent.focus call", () => calls("agent.focus")[0]);
   check(
-    "going to the terminal of a herdr-launched harness brings its own tab forward",
-    typeof (focused.params.target ?? focused.params.tab_id) === "string",
-    JSON.stringify(focused.params),
-  );
-  await sleep(400);
-  check(
-    "and it asks the browser for nothing: there is no drawer to open over the canvas",
-    !frames.slice(focusAt).some((f) => f.type === "terminal"),
-    JSON.stringify(frames.slice(focusAt).filter((f) => f.type === "terminal")),
+    "focus_terminal brings that session's own pane forward, found by the directory it runs in",
+    focused.params.target === paneId,
+    `${String(focused.params.target)} vs ${paneId}`,
   );
   check(
-    "the focus was not refused",
+    "and it is found by asking herdr what is live, not from a pane id Shape kept",
+    calls("agent.list").length > listedBefore,
+    `${String(calls("agent.list").length - listedBefore)} agent.list call(s)`,
+  );
+  // the real server answers ONE request per connection and then hangs up, so a
+  // launcher holding one socket open would work exactly once
+  const rounds = jsonl(herdrLog).filter((f) => f.type === "__call" && f.conn !== undefined);
+  check(
+    "every call went out on a connection of its own, the way the protocol demands",
+    new Set(rounds.map((f) => f.conn)).size === rounds.length,
+    `${rounds.length} call(s) on ${new Set(rounds.map((f) => f.conn)).size} connection(s)`,
+  );
+  await sleep(300);
+  check(
+    "and the browser is asked for nothing: there is no terminal for Shape to draw",
     !frames.slice(focusAt).some((f) => f.type === "error"),
     JSON.stringify(frames.slice(focusAt).filter((f) => f.type === "error").map((f) => f.message)),
   );
 
-  // --- and the same, without being told which app to raise ------------------
-  // The bridge above was handed SHAPE_TERMINAL_APP, so it never looked at this
-  // machine. Unset, the launcher walks the REAL process table, which is the one
-  // input a smoke cannot synthesize: it must come back with an app bundle or
-  // nothing, and never throw on whatever this machine happens to be running.
+  // Unset, the launcher walks the REAL process table to decide which
+  // application to raise: the one input a smoke cannot synthesize. It must come
+  // back with an app bundle or nothing, and never throw on whatever this
+  // machine happens to be running.
   let probed = "threw";
   try {
     probed = terminalAppOf(parsePsRows(execFileSync("ps", ["-axo", "pid,ppid,command"], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 })));
@@ -316,158 +307,33 @@ try {
     String(probed),
   );
 
-  // --- herdr hangs up after every answer ------------------------------------
-  // The real server answers ONE request per connection and then closes it, so
-  // a launcher that keeps one socket for its calls works exactly once. Four
-  // more round trips in a row are what that regression would fail.
-  const roundTripsAt = calls("agent.focus").length + calls("tab.focus").length;
-  const errorsAt = frames.filter((f) => f.type === "error").length;
-  for (let i = 0; i < 4; i++) {
-    socket.send(JSON.stringify({ type: "focus_terminal", worktree: wtMain }));
-    await sleep(100);
-  }
-  await waitFor(
-    "four more calls answered after herdr hung up on the first",
-    () => calls("agent.focus").length + calls("tab.focus").length >= roundTripsAt + 4,
+  // --- a variation nothing is running in ------------------------------------
+  const refusedAt = frames.length;
+  socket.send(JSON.stringify({ type: "focus_terminal", worktree: wtMain }));
+  const refused = await waitFor("the refusal for a variation with no session", () =>
+    frames.slice(refusedAt).find((f) => f.type === "error"),
   );
   check(
-    "the launcher keeps calling a herdr that closes the connection on every answer",
-    frames.filter((f) => f.type === "error").length === errorsAt,
-    JSON.stringify(frames.filter((f) => f.type === "error").map((f) => f.message)),
-  );
-  const plainCalls = jsonl(herdrLog).filter((f) => f.type === "__call" && f.method !== "events.subscribe");
-  const usedConnections = new Set(plainCalls.map((f) => f.conn));
-  check(
-    "and every call went out on a connection of its own, the way the protocol demands",
-    plainCalls.length >= 6 && usedConnections.size === plainCalls.length,
-    `${plainCalls.length} calls on ${usedConnections.size} connections`,
+    "focus_terminal for a variation nothing reports in from is refused with the reason",
+    refused.message.includes("reporting in"),
+    refused.message,
   );
 
-  // --- status comes off the pane's own subscription --------------------------
-  const mainPane = String(startCall.params.pane_id);
-  const subscribes = calls("events.subscribe");
-  const paneSub = subscribes.find((f) =>
-    (f.params.subscriptions ?? []).some((s) => s.type === "pane.agent_status_changed" && s.pane_id === mainPane),
-  );
-  check(
-    "the launched pane's status is subscribed for THAT pane: herdr has no global form of it",
-    paneSub !== undefined,
-    JSON.stringify(subscribes.map((f) => f.params.subscriptions)),
-  );
-  check(
-    "and the lifecycle events are subscribed once, globally",
-    subscribes.some((f) => {
-      const asked = f.params.subscriptions ?? [];
-      return asked.every((s) => s.pane_id === undefined) && asked.some((s) => s.type === "pane.exited");
-    }),
-    JSON.stringify(subscribes.map((f) => f.params.subscriptions)),
-  );
-  const statusEvent = await waitFor("a status event delivered to that pane's subscription", () =>
-    jsonl(herdrLog).find(
-      (f) =>
-        f.type === "__event" &&
-        f.event === "pane.agent_status_changed" &&
-        f.data.pane_id === mainPane &&
-        (f.to ?? []).includes(paneSub?.conn ?? -1),
-    ),
-  );
-  check(
-    "status for the launched pane reaches the launcher on that pane's connection",
-    typeof statusEvent.data.agent_status === "string",
-    `${statusEvent.data.agent_status} on connection ${String(paneSub?.conn)}`,
-  );
-
-  // --- a harness that dies in its tab ---------------------------------------
-  const openAt = frames.length;
-  socket.send(JSON.stringify({ type: "open_worktree", path: worktree }));
-  await waitFor(
-    "a session in the second variation",
-    () => frames.slice(openAt).find((f) => f.type === "session_started" && f.worktree === wtVariation),
-    30_000,
-  );
-  const secondTab = await waitFor("a second tab, in the second variation", () =>
-    calls("tab.create").find((f) => f.params.cwd === wtVariation),
-  );
-  check(
-    "each variation gets its own tab, in its own directory",
-    secondTab.params.env?.SHAPE_WORKTREE === wtVariation,
-    JSON.stringify(secondTab.params.cwd),
-  );
-  check(
-    "and that tab is asked for IN the project's workspace: one workspace, one tab per variation",
-    secondTab.params.workspace_id === workspaceId,
-    `${JSON.stringify(secondTab.params.workspace_id ?? null)} vs ${workspaceId}`,
-  );
-
-  const child = await waitFor("the second variation's harness process", () =>
-    jsonl(ompLogIn(worktree)).find((f) => f.type === "__start"),
-  );
-  const diedAt = frames.length;
-  // SIGKILL: no goodbye on the link, no `tab.close` from Shape — the harness
-  // simply is not there any more, which is what a user quitting a TUI in their
-  // own terminal looks like
-  process.kill(child.pid, "SIGKILL");
-  const exited = await waitFor("the pane exit event", () =>
-    jsonl(herdrLog).find((f) => f.type === "__event" && f.event === "pane.exited"),
-  );
-  const stoppedByExit = await waitFor("session_stopped for the pane that exited", () =>
-    frames.slice(diedAt).find((f) => f.type === "session_stopped" && f.worktree === wtVariation),
-  );
-  check(
-    "a harness that dies in its own tab ends that variation's session, and the pane exit says so too",
-    typeof stoppedByExit.reason === "string" &&
-      stoppedByExit.reason.length > 0 &&
-      typeof exited.data?.pane_id === "string",
-    `${JSON.stringify(exited.data?.pane_id ?? null)} -> ${stoppedByExit.reason}`,
-  );
-  check(
-    "and that variation is offered again rather than left running",
-    frames.slice(diedAt).some((f) => f.type === "session" && f.session.sessions.every((s) => s.worktree !== wtVariation)),
-    JSON.stringify(frames.slice(diedAt).filter((f) => f.type === "session").map((f) => f.session.sessions.map((s) => s.worktree))),
-  );
-
-  // --- one workspace for the project, whatever it opened --------------------
-  check(
-    "every session Shape started is in the project's workspace, none in the user's own",
-    calls("agent.start").length >= 2 &&
-      calls("agent.start").every((f) => String(f.params.pane_id).startsWith(`${workspaceId}:`)) &&
-      calls("tab.create").every((f) => f.params.workspace_id === workspaceId),
-    calls("agent.start")
-      .map((f) => String(f.params.pane_id))
-      .join(", "),
-  );
-  check(
-    "and it asked for exactly one workspace, however many variations it opened",
-    calls("workspace.create").length === 1,
-    `${String(calls("workspace.create").length)} workspace.create calls`,
-  );
-
-  // --- closing a variation closes its tab -----------------------------------
+  // --- the user closes the tab ----------------------------------------------
   const closeAt = frames.length;
-  socket.send(JSON.stringify({ type: "close_worktree", worktree: wtMain }));
-  const stopped = await waitFor("session_stopped for the closed variation", () =>
-    frames.slice(closeAt).find((f) => f.type === "session_stopped" && f.worktree === wtMain),
+  await herdrCall("tab.close", { tab_id: tabId });
+  const stopped = await waitFor("session_stopped for the closed tab", () =>
+    frames.slice(closeAt).find((f) => f.type === "session_stopped" && f.worktree === wtVariation),
   );
-  check("closing a variation stops its harness and says why", stopped.reason.length > 0, stopped.reason);
-  // the tab the main session runs in: the root tab that came with the
-  // project's workspace, named by herdr rather than guessed at
-  const tabOfMain = rootTab;
-  const closedTab = await waitFor("the tab.close call for that variation's tab", () =>
-    calls("tab.close").find((f) => f.params.tab_id === tabOfMain),
+  check("a harness that dies with its tab ends that variation's session, and says why", stopped.reason.length > 0, stopped.reason);
+  const after = await waitFor("a session frame with nothing running", () =>
+    frames.slice(closeAt).find((f) => f.type === "session" && f.session.sessions.every((s) => s.worktree !== wtVariation)),
   );
   check(
-    "closing a variation closes the terminal tab its harness was opened in",
-    closedTab !== undefined,
-    `${JSON.stringify(closedTab.params)} for tab ${tabOfMain}`,
+    "and the variation stays on the picture, with no session in it",
+    after.session.worktrees.some((w) => w.id === wtVariation),
+    JSON.stringify(after.session.worktrees.map((w) => w.id)),
   );
-  await waitFor("the closed variation's harness process exited", () =>
-    jsonl(ompLogIn(target)).some((f) => f.type === "__exit"),
-  );
-  check("and the harness inside that tab is gone", true);
-  const afterClose = await waitFor("a session frame with nothing running", () =>
-    frames.slice(closeAt).find((f) => f.type === "session" && f.session.sessions.every((s) => s.worktree !== wtMain)),
-  );
-  check("and the variation is on the view with no session in it", afterClose.session.worktrees.some((w) => w.id === wtMain));
 } catch (err) {
   check("the herdr smoke ran to completion", false, err instanceof Error ? err.message : String(err));
 } finally {

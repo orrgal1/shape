@@ -6,17 +6,21 @@
  *
  *   browser before any agent  — joins ungreeted, no hello until an agent attaches
  *   attach                    — hello with agentConnected, one project, the agent's cwd
- *   utterance                 — reaches the remote harness, canvas call comes back
- *   agent SIGTERM             — session/projects flip to disconnected, utterance refused
+ *   a session reports in      — a harness dialing the agent's loopback link from
+ *                               inside a worktree IS the session appearing
+ *   a turn in that session    — its canvas call comes back to the browser as a graph
+ *   agent SIGTERM             — session_stopped, session/projects flip to
+ *                               disconnected, and nothing else is drawn
  *   agent restart             — the room outlives the agent and re-greets it
  *   a second agent            — two projects, select_project joins the other one
  *   remote storage            — a graph row per variation and a registry in <data-dir>/shape.db
  *   server restart            — the rooms come back; live agents re-bind them
  *   agentless restore         — restored rooms are read-only, and still diffable
  *
- * The harness on both agents is scripts/fake-omp-tui.mjs, so nothing real is
- * spawned; each target project gets its own log, which is what proves which
- * process served a turn.
+ * The sessions are scripts/fake-omp-tui.mjs processes this smoke starts itself,
+ * pointed at each agent's own link: Shape launches nothing, so a session only
+ * exists because something reported in from a worktree. Each target keeps its
+ * own harness log, which is what proves which process served a turn.
  *
  * Usage (from packages/bridge): node scripts/smoke-remote.mjs
  */
@@ -25,9 +29,13 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import WebSocket from "ws";
+
+/** the harness stub, by absolute path: a session runs with its worktree as cwd */
+const FAKE_OMP_TUI = join(dirname(fileURLToPath(import.meta.url)), "fake-omp-tui.mjs");
 
 const PORT = Number(process.env.SMOKE_REMOTE_PORT ?? 4412);
 /** each agent owns a loopback link port of its own: the agents share nothing but the server */
@@ -38,10 +46,10 @@ const SERVER_URL = `ws://127.0.0.1:${PORT}`;
 const RECONNECT_MS = 10_000;
 
 // Every bridge/agent below inherits this environment: a smoke must not depend
-// on what is installed on the machine running it. The launcher is Shape's own
-// pty (never a herdr tab in the developer's terminal), and detection reports
-// exactly one harness — `omp`, which `--omp` points at the fake.
-process.env.SHAPE_LAUNCHER = "pty";
+// on what is installed on the machine running it. `none` keeps the agents away
+// from the developer's own herdr — no session here runs in a terminal Shape can
+// reach — and detection reports exactly one harness, `omp`.
+process.env.SHAPE_LAUNCHER = "none";
 process.env.SHAPE_FORCE_HARNESSES = "omp";
 
 const results = [];
@@ -64,7 +72,7 @@ async function waitFor(label, predicate, timeoutMs = 30_000) {
   }
 }
 
-/** frames the fake omp received, in order */
+/** frames the fake omp sent and received, in order */
 function ompFrames(path) {
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8")
@@ -113,7 +121,9 @@ async function seedWorkspace(dir, scope) {
   await writeFile(join(dir, "packages", "auth", "src", "index.ts"), `import { users } from "@${scope}/db";\nexport const login = () => users;\n`);
   await writeFile(join(dir, "packages", "db", "src", "index.ts"), "export const users = [];\n");
   const git = (...args) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
-  git("init", "-q");
+  // not `main`: this machine's global pre-commit hook refuses commits there,
+  // and a throwaway repo in /tmp is nobody's trunk
+  git("init", "-q", "-b", "smoke");
   git("add", "-A");
   git("-c", "user.email=smoke@example.com", "-c", "user.name=smoke", "commit", "-q", "-m", "init");
 }
@@ -143,14 +153,14 @@ let socket = null;
 
 /**
  * Starts one of the binaries with SHAPE_HOME pointed at a throwaway dir (recents
- * must not touch the real home) and the fake harness log pinned to its target.
- * Returns a handle whose `log` accumulates the child's stderr — the banners the
- * steps wait on. cwd stays packages/bridge: relative `--omp` tokens are resolved
- * against the agent process's cwd, not the target's.
+ * must not touch the real home). Returns a handle whose `log` accumulates the
+ * child's stderr — the banners the steps wait on, including the loopback link
+ * URL a session dials. cwd stays packages/bridge: the binaries are named
+ * relative to it.
  *
  * SHAPE_AUTO_MAP=0 goes to every child: the server is the one that reads it, and
  * the targets below are seeded WITH code and an empty canvas — a room that maps
- * them by itself would deliver turns none of these steps asked for.
+ * them by itself would write bubbles none of these steps asked for.
  */
 function launch(label, args, extraEnv = {}) {
   const child = spawn(process.execPath, args, {
@@ -189,8 +199,6 @@ const agentArgs = (target, linkPort) => [
   target,
   "--link-port",
   String(linkPort),
-  "--omp",
-  "node scripts/fake-omp-tui.mjs",
 ];
 
 /**
@@ -207,6 +215,51 @@ async function startServer(label, restoredProjects = 0) {
   }
   await waitFor(`${label} listening`, () => handle.log.includes("server at ws://"));
   return handle;
+}
+
+/** the agent announces its loopback link in the line that says it attached */
+function linkUrlOf(agent) {
+  const found = /link at (ws:\/\/[^\s)]+)/.exec(agent.log);
+  if (found === null) throw new Error(`${agent.label} never announced its loopback link`);
+  return found[1];
+}
+
+/**
+ * A session in one of the repo's worktrees. Shape starts no sessions any more:
+ * a harness process that dials the agent's loopback link from inside a worktree
+ * IS the session appearing, so a smoke that wants one starts it itself —
+ * exactly the way a session the user opened in their own terminal reports in.
+ * The harness log lives in the worktree, so two sessions in the same directory
+ * append to one file and their `__start` pids say which process served a turn.
+ */
+async function startSession(label, agent, worktree) {
+  const child = spawn(process.execPath, [FAKE_OMP_TUI], {
+    cwd: worktree,
+    env: {
+      ...process.env,
+      SHAPE_LINK: linkUrlOf(agent),
+      SHAPE_WORKTREE: worktree,
+      FAKE_OMP_LOG: ompLogIn(worktree),
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const handle = { label, child, log: "" };
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (d) => process.stderr.write(`[${label}] ${d}`));
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (d) => {
+    handle.log += d;
+    process.stderr.write(`[${label}:out] ${d}`);
+  });
+  spawned.push(handle);
+  // the fake says `ready` on stdout once its link is open and it has greeted
+  await waitFor(`${label} on the link`, () => handle.log.includes('"ready"'));
+  return handle;
+}
+
+/** a sentence typed into that session's pane: one turn, exactly like a TUI */
+function type(session, text) {
+  session.child.stdin.write(`${JSON.stringify({ type: "typed", text })}\n`);
 }
 
 const send = (msg) => socket.send(JSON.stringify(msg));
@@ -247,7 +300,7 @@ try {
   // --- 2. the first agent attaches over /agent -------------------------------
 
   const helloAt = mark();
-  let agentA = launch("agent-a", agentArgs(targetA, LINK_PORT_A), { FAKE_OMP_LOG: ompLogIn(targetA) });
+  let agentA = launch("agent-a", agentArgs(targetA, LINK_PORT_A));
   await waitFor("agent A attached", () => agentA.log.includes("agent attached to"));
 
   const hello = await frameAfter(helloAt, (f) => f.type === "hello", "hello after the first attach");
@@ -273,49 +326,61 @@ try {
     `${hello.session.cwd} / ${JSON.stringify(hello.session.worktrees)}`,
   );
   check(
+    "an agent that started nothing attaches a project with no session in it",
+    Array.isArray(hello.session.sessions) && hello.session.sessions.length === 0,
+    JSON.stringify(hello.session.sessions),
+  );
+  check(
     "hello carries the reality layer extracted from the target workspace",
     hello.graphs[mainA].reality.nodes.map((n) => n.id).sort().join(",") === "r:@ra/auth,r:@ra/db",
     JSON.stringify(hello.graphs[mainA].reality.nodes.map((n) => n.id)),
   );
 
-  // --- 3. an utterance travels browser -> server -> agent -> harness ---------
+  // --- 3. a session reports in from the target, over the agent's own link ----
 
-  const utteranceAt = mark();
-  // the fake harness answers with a build-layer canvas call; this smoke is
-  // about the wire, not the product-first turn, so that turn is opted out
-  send({ type: "utterance", worktree: mainA, referent: null, text: "build me an auth service", productFirst: false });
-  const prompt = await waitFor("prompt in the remote harness log", () =>
-    ompFrames(ompLogIn(targetA)).find((f) => f.type === "deliver" && f.mode === "prompt" && f.body.includes("build me an auth service")),
+  const sessionAt = mark();
+  let sessionA = await startSession("omp-a", agentA, mainA);
+  const started = await frameAfter(
+    sessionAt,
+    (f) => f.type === "session_started" && f.worktree === mainA && f.backend.id === "omp",
+    "session_started for the harness that reported in",
   );
-  check("an utterance crosses the server-agent socket into the harness as a prompt", prompt.mode === "prompt");
   check(
-    "the first delivery to a fresh harness process carries the canvas preamble",
-    prompt.body.includes("<canvas-harness>"),
-    prompt.body.slice(0, 60),
+    "a harness dialing the remote agent's link appears as a session in its variation",
+    started.session.sessionId !== null && started.backend.capabilities.hostTool === true,
+    JSON.stringify({ session: started.session, capabilities: started.backend.capabilities }),
   );
-  const userLine = await frameAfter(
-    utteranceAt,
-    (f) => f.type === "transcript" && f.worktree === mainA && f.role === "user" && f.text === "build me an auth service",
-    "user transcript line",
+  check(
+    "a session Shape neither started nor hosts is steerless, resumeless and has no terminal here",
+    started.backend.capabilities.steerMidTurn === false &&
+      started.backend.capabilities.resume === false &&
+      started.backend.capabilities.terminal === "none",
+    JSON.stringify(started.backend.capabilities),
   );
-  check("the utterance is echoed back to the browser as a user transcript line", userLine !== undefined);
 
-  // --- 4. the harness's canvas host tool, all the way back to the browser ----
+  // --- 4. a turn in that session, all the way back to the browser -----------
+
+  const turnAt = mark();
+  type(sessionA, "build me an auth service");
+  const said = await frameAfter(
+    turnAt,
+    (f) => f.type === "transcript" && f.worktree === mainA && f.role === "assistant" && f.text.includes("auth service"),
+    "assistant transcript line from the remote session",
+  );
+  check("what the remote session says reaches the browser as a transcript line", said.text.length > 0, said.text);
 
   const graph = await frameAfter(
-    utteranceAt,
+    turnAt,
     (f) => f.type === "graph" && f.worktree === mainA && f.graph.nodes.some((n) => n.id === "auth-service"),
     "graph frame carrying the canvas call",
   );
   check(
-    "the harness's canvas call reaches the browser as a graph frame",
+    "the session's canvas call crosses the loopback link, the agent socket and the room to the browser",
     graph.graph.nodes.some((n) => n.id === "user-db") && graph.graph.edges.some((e) => e.id === "auth-service--user-db"),
     JSON.stringify(graph.graph.nodes.map((n) => n.id)),
   );
   const toolResult = await waitFor("canvas result in the harness log", () =>
-    ompFrames(ompLogIn(targetA)).find(
-      (f) => f.type === "canvas_result" && f.text.startsWith("applied 3 op(s);"),
-    ),
+    ompFrames(ompLogIn(mainA)).find((f) => f.type === "canvas_result" && f.text.startsWith("applied 3 op(s);")),
   );
   check(
     "the canvas result is returned across the link to the harness",
@@ -327,6 +392,16 @@ try {
 
   const goneAt = mark();
   await stopChild(agentA);
+  const sessionLost = await frameAfter(
+    goneAt,
+    (f) => f.type === "session_stopped" && f.worktree === mainA,
+    "session_stopped after the agent left",
+  );
+  check(
+    "an agent that leaves takes the sessions it was watching with it, and says why",
+    sessionLost.reason.length > 0,
+    sessionLost.reason,
+  );
   const disconnected = await frameAfter(
     goneAt,
     (f) => f.type === "session" && f.session.agentConnected === false,
@@ -334,8 +409,8 @@ try {
   );
   check(
     "killing the agent tells the browser the session lost its agent",
-    disconnected.session.cwd === mainA,
-    disconnected.session.cwd,
+    disconnected.session.cwd === mainA && disconnected.session.sessions.length === 0,
+    `${disconnected.session.cwd}: ${JSON.stringify(disconnected.session.sessions)}`,
   );
   const offline = await frameAfter(
     goneAt,
@@ -348,19 +423,20 @@ try {
     JSON.stringify(offline.projects),
   );
 
-  const refusedAt = mark();
-  send({ type: "utterance", worktree: mainA, referent: null, text: "anyone home?" });
-  const refused = await frameAfter(refusedAt, (f) => f.type === "error", "error for the agentless utterance");
+  // the harness died with the link it was dialing, so nothing can be drawn on
+  // that canvas any more: a room with no agent is a picture, not a session
+  const quietAt = mark();
+  await sleep(500);
   check(
-    "an utterance with no agent attached is refused by name",
-    refused.message.includes("no agent is attached"),
-    refused.message,
+    "nothing is drawn on a canvas whose agent is gone",
+    !frames.slice(quietAt).some((f) => f.type === "graph" || f.type === "transcript"),
+    JSON.stringify(frames.slice(quietAt).map((f) => f.type)),
   );
 
-  // --- 6. the agent comes back: same room, new harness process ---------------
+  // --- 6. the agent comes back: same room, a new session in it ---------------
 
   const rejoinAt = mark();
-  agentA = launch("agent-a2", agentArgs(targetA, LINK_PORT_A), { FAKE_OMP_LOG: ompLogIn(targetA) });
+  agentA = launch("agent-a2", agentArgs(targetA, LINK_PORT_A));
   await waitFor("agent A re-attached", () => agentA.log.includes("agent attached to"));
   const rehello = await frameAfter(
     rejoinAt,
@@ -369,17 +445,18 @@ try {
   );
   check("restarting the agent re-attaches to the room it left behind", rehello.session.cwd === mainA, rehello.session.cwd);
 
-  send({ type: "utterance", worktree: mainA, referent: null, text: "second life auth service" });
-  const rePrompt = await waitFor("prompt in the restarted harness log", () => {
-    const log = ompFrames(ompLogIn(targetA));
-    const lastStart = log.map((f) => f.type).lastIndexOf("__start");
-    const at = log.findIndex((f, i) => i > lastStart && f.type === "deliver" && f.body.includes("second life"));
-    return at === -1 ? null : { log, lastStart, prompt: log[at] };
-  });
-  const starts = rePrompt.log.filter((f) => f.type === "__start");
+  const secondTurnAt = mark();
+  sessionA = await startSession("omp-a2", agentA, mainA);
+  type(sessionA, "second life auth service");
+  await frameAfter(
+    secondTurnAt,
+    (f) => f.type === "graph" && f.worktree === mainA && f.graph.nodes.some((n) => n.id === "auth-service"),
+    "graph frame from the second session",
+  );
+  const starts = ompFrames(ompLogIn(mainA)).filter((f) => f.type === "__start");
   check(
-    "an utterance after re-attach is served by the new harness process",
-    starts.length >= 2 && starts.at(-1).pid !== starts[0].pid && rePrompt.lastStart > 0,
+    "a turn after the re-attach is served by a second harness process, in the room the first one left",
+    starts.length >= 2 && starts.at(-1).pid !== starts[0].pid,
     `${starts.length} start(s): ${JSON.stringify(starts.map((s) => s.pid))}`,
   );
 
@@ -399,7 +476,7 @@ try {
   );
 
   const thirdAt = mark();
-  agentA = launch("agent-a3", agentArgs(targetA, LINK_PORT_A), { FAKE_OMP_LOG: ompLogIn(targetA) });
+  agentA = launch("agent-a3", agentArgs(targetA, LINK_PORT_A));
   await waitFor("agent A attached a third time", () => agentA.log.includes("agent attached to"));
   const thirdHello = await frameAfter(
     thirdAt,
@@ -413,7 +490,7 @@ try {
   );
 
   const twoAt = mark();
-  const agentB = launch("agent-b", agentArgs(targetB, LINK_PORT_B), { FAKE_OMP_LOG: ompLogIn(targetB) });
+  const agentB = launch("agent-b", agentArgs(targetB, LINK_PORT_B));
   await waitFor("agent B attached", () => agentB.log.includes("agent attached to"));
   const both = await frameAfter(
     twoAt,
@@ -445,7 +522,7 @@ try {
     unknown.message,
   );
 
-  // --- 9. what a remote server keeps in its database ------------------------
+  // --- 8. what a remote server keeps in its database ------------------------
 
   const projectAId = hello.projectId;
   // an unauthenticated server files everything under the implicit `local` tenant
@@ -491,7 +568,7 @@ try {
     JSON.stringify(registry.map((row) => Object.keys(row.project))),
   );
 
-  // --- 10. the server restarts while both agents are still up ---------------
+  // --- 9. the server restarts while both agents are still up ----------------
 
   await stopChild(server);
   const restartAt = mark();
@@ -536,7 +613,7 @@ try {
     `${restoredA.projectId} vs ${projectAId}; ${JSON.stringify(helloRestored.graphs[mainA]?.nodes.map((n) => n.id))}`,
   );
 
-  // --- 11. the same rooms with no agent anywhere ----------------------------
+  // --- 10. the same rooms with no agent anywhere ----------------------------
 
   await stopChild(agentA);
   await stopChild(agentB);
@@ -566,16 +643,23 @@ try {
     (f) => f.type === "hello" && f.projectId === agentlessIdA,
     "hello for the restored first project",
   );
+  check(
+    "a restored room comes back with no session in it: the harnesses died with the server",
+    agentlessA.session.sessions.length === 0,
+    JSON.stringify(agentlessA.session.sessions),
+  );
 
+  // everything that needs the machine — a re-scan for sessions to adopt — is
+  // refused by name in a room nothing is attached to
   const refusedAloneAt = mark();
-  send({ type: "utterance", worktree: mainA, referent: null, text: "anyone survived the restart?" });
+  send({ type: "discover" });
   const refusedAlone = await frameAfter(
     refusedAloneAt,
     (f) => f.type === "error",
-    "error for the utterance in a restored room",
+    "error for the discover in a restored room",
   );
   check(
-    "an utterance in a restored room with no agent is refused by name",
+    "a request that needs the machine is refused by name in a restored room with no agent",
     refusedAlone.message.includes("no agent is attached"),
     refusedAlone.message,
   );
@@ -601,7 +685,7 @@ try {
 } catch (err) {
   check("the remote smoke ran to completion", false, err instanceof Error ? err.message : String(err));
 } finally {
-  // --- 12. teardown: every child dies, even when a step above threw ----------
+  // --- 11. teardown: every child dies, even when a step above threw ----------
   socket?.close();
   for (const handle of spawned.slice().reverse()) {
     try {

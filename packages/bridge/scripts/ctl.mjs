@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * Bridge control CLI — drives a *running* Shape bridge over its
- * WebSocket, for scripts/skills that need to retarget the bridge or trigger
- * onboarding without the web UI.
+ * Bridge control CLI — drives a *running* Shape bridge over its WebSocket, for
+ * scripts and skills that need to read what the bridge sees, or point it at
+ * another project, without the web UI. Shape is a read-only picture: nothing
+ * here starts a session, prompts one or stops one.
  *
  *   node packages/bridge/scripts/ctl.mjs status
  *   node packages/bridge/scripts/ctl.mjs switch-project <abs-path>
- *   node packages/bridge/scripts/ctl.mjs create-project <abs-path> [--public|--private]
- *   node packages/bridge/scripts/ctl.mjs onboard [--focus "<text>"] [--worktree <id>]
- *   node packages/bridge/scripts/ctl.mjs open-worktree <abs-path> [--backend <id>] [--autonomous] [--remember]
  *   node packages/bridge/scripts/ctl.mjs focus-terminal [--worktree <id>]
+ *   node packages/bridge/scripts/ctl.mjs discover
+ *   node packages/bridge/scripts/ctl.mjs adopt <pid>
  *
  * A repo's variations each have their own canvas, so a command that acts on one
  * takes `--worktree <id>` (an id `status` lists); without it the main worktree —
@@ -18,6 +18,9 @@
  * Global: --port <n> (default 4400). One JSON line on stdout.
  * Exit codes: 0 ok; 1 bridge rejected the request; 2 no bridge listening.
  */
+
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 
 import WebSocket from "ws";
 
@@ -35,44 +38,25 @@ function out(code, obj) {
 const argv = process.argv.slice(2);
 let command = null;
 let port = DEFAULT_PORT;
-let focus;
 let worktree;
 let targetPath;
-let visibility = null;
-/** `--backend <id>`: which harness `open-worktree` starts, beating every configured default */
-let backend;
-/** `--autonomous`: start it deciding for itself (launch-time only, like the card) */
-let autonomous = false;
-/** `--remember`: write the chosen harness to the worktree's `.shape/config.json` */
-let remember = false;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--port") port = Number(argv[++i]);
-  else if (a === "--focus") focus = argv[++i];
   else if (a === "--worktree") worktree = argv[++i];
-  else if (a === "--public" || a === "--private") visibility = a.slice(2);
-  else if (a === "--backend") backend = argv[++i];
-  else if (a === "--autonomous") autonomous = true;
-  else if (a === "--remember") remember = true;
   else if (command === null) command = a;
   else if (targetPath === undefined) targetPath = a;
   else out(1, { ok: false, error: `unexpected argument: ${a}` });
 }
-if (
-  !["status", "switch-project", "create-project", "onboard", "open-worktree", "focus-terminal", "discover", "adopt"].includes(
-    command ?? "",
-  )
-) {
+if (!["status", "switch-project", "focus-terminal", "discover", "adopt"].includes(command ?? "")) {
   out(1, {
     ok: false,
     error:
-      "usage: ctl.mjs [--port <n>] status | switch-project <abs-path> | create-project <abs-path> [--public|--private] | onboard [--focus <text>] [--worktree <id>] | open-worktree <abs-path> [--backend <id>] [--autonomous] [--remember] | focus-terminal [--worktree <id>] | discover | adopt <pid>",
+      "usage: ctl.mjs [--port <n>] status | switch-project <abs-path> | focus-terminal [--worktree <id>] | discover | adopt <pid>",
   });
 }
 if (!Number.isInteger(port) || port <= 0) out(1, { ok: false, error: "invalid --port" });
 if (command === "switch-project" && !targetPath) out(1, { ok: false, error: "switch-project needs a path" });
-if (command === "create-project" && !targetPath) out(1, { ok: false, error: "create-project needs a path" });
-if (command === "open-worktree" && !targetPath) out(1, { ok: false, error: "open-worktree needs a path" });
 if (command === "adopt" && !/^\d+$/.test(targetPath ?? "")) out(1, { ok: false, error: "adopt needs a pid" });
 
 // --- connection ------------------------------------------------------------
@@ -115,7 +99,14 @@ clearTimeout(connectDeadline);
 const hello = frames.find((f) => f.type === "hello") ?? (await nextFrame((f) => f.type === "hello", CONNECT_TIMEOUT_MS));
 if (!hello) out(2, { ok: false, error: "no bridge" });
 
-const isRejection = (prefix) => (f) => f.type === "error" && f.message.startsWith(prefix);
+/** the bridge lists worktrees by realpath; a path only compares to them resolved the same way */
+const realpath = (path) => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+};
 
 /**
  * The variation a scoped command acts on: `--worktree` (an id, a path or a
@@ -140,9 +131,9 @@ if (command === "status") {
     ok: true,
     cwd,
     agentConnected,
-    // how this project starts a harness, and what it has to start: a script
-    // that means to open a variation needs to know what it may ask for
-    launcher: hello.tools?.launcher ?? null,
+    // whether Shape can take the user to a session's own terminal here, and
+    // which harnesses are installed where the agent runs
+    launcher: hello.tools?.launcher ?? "none",
     harnesses: (hello.tools?.harnesses ?? []).map((t) => t.id),
     // what "is this repo mapped yet" means: the main variation's canvas
     nodes: main === null ? 0 : (hello.graphs[main.id]?.nodes.length ?? 0),
@@ -165,111 +156,43 @@ if (command === "status") {
   });
 }
 
-/**
- * A retarget re-hellos. But a path that turns out to be a variation of the
- * project the bridge is already on is no retarget at all: the agent opens a
- * harness there and announces it. Both settle the command.
- */
-const retargeted = (rejects) => (f) =>
-  f.type === "hello" || f.type === "session_started" || (f.type === "error" && rejects.test(f.message));
-
-/** what a settled retarget is reported as; a variation names itself too */
-const landedOn = (result) =>
-  result.type === "hello"
-    ? { ok: true, cwd: result.session.cwd }
-    : { ok: true, cwd: hello.session.cwd, worktree: result.worktree };
-
 if (command === "switch-project") {
+  // A path inside the project the bridge is already on is a VARIATION, not a
+  // retarget: nothing is dropped and nothing is opened, the agent only
+  // refreshes its worktree list, and the room reports that as a fresh
+  // `session`. Another repo is the real switch, and it re-hellos — so which
+  // frame settles this command depends on which of the two was asked for.
+  const asked = realpath(resolve(targetPath));
+  const variation = hello.session.worktrees.some((w) => asked === w.path || asked.startsWith(`${w.path}/`));
   socket.send(JSON.stringify({ type: "switch_project", path: targetPath }));
-  // retarget = dispose every harness, re-extract reality, fresh harness, then
-  // re-hello — allow time
-  const result = await nextFrame(retargeted(/^(switch_project rejected|open_worktree)/), 60_000);
-  if (!result) out(1, { ok: false, error: "timed out waiting for the bridge" });
-  if (result.type === "error") out(1, { ok: false, error: result.message });
-  out(0, landedOn(result));
-}
-
-if (command === "create-project") {
-  socket.send(
-    JSON.stringify({
-      type: "create_project",
-      path: targetPath,
-      github: visibility === null ? null : { visibility },
-    }),
-  );
-  // create = mkdir + git + (optionally) gh, then the same retarget as a switch
-  const result = await nextFrame(retargeted(/^(create_project|open_worktree)/), 90_000);
-  if (!result) out(1, { ok: false, error: "timed out waiting for the bridge" });
-  if (result.type === "error") out(1, { ok: false, error: result.message });
-  out(0, landedOn(result));
-}
-
-if (command === "onboard") {
-  socket.send(
-    JSON.stringify({ type: "onboard", worktree: targetWorktree(hello.session), ...(focus !== undefined ? { focus } : {}) }),
-  );
-  // accepted = no rejection; don't wait for the survey turn itself. A variation
-  // with no harness in it refuses in its own words, not with an "onboard
-  // rejected" prefix — both are this command failing.
-  const rejection = await nextFrame(
-    (f) => f.type === "error" && (f.message.startsWith("onboard rejected") || f.message.startsWith("no session is running on")),
-    1500,
-  );
-  if (rejection) out(1, { ok: false, error: rejection.message });
-  out(0, { ok: true });
-}
-
-if (command === "open-worktree") {
-  socket.send(
-    JSON.stringify({
-      type: "open_worktree",
-      path: targetPath,
-      // absent means "let the agent resolve it" — the config files, its flag,
-      // or the single harness it detected; naming one here beats all of them
-      ...(backend !== undefined ? { backend } : {}),
-      ...(autonomous ? { autonomous: true } : {}),
-      ...(remember ? { remember: true } : {}),
-    }),
-  );
-  // starting a harness is a real launch (a terminal, a TUI, a first prompt):
-  // the same budget the room gives an open before it stops serializing them
+  // a retarget forgets every observed session, opens the new project and
+  // re-extracts its reality before it re-attaches — allow time
   const result = await nextFrame(
-    (f) => f.type === "session_started" || (f.type === "error" && /^(open_worktree|no harness|there is nothing)/.test(f.message)),
+    (f) => f.type === "hello" || (variation && f.type === "session") || (f.type === "error" && /^switch_project/.test(f.message)),
     60_000,
   );
   if (!result) out(1, { ok: false, error: "timed out waiting for the bridge" });
   if (result.type === "error") out(1, { ok: false, error: result.message });
-  out(0, {
-    ok: true,
-    worktree: result.worktree,
-    backend: result.backend.id,
-    terminal: result.backend.capabilities.terminal,
-    sessionId: result.session.sessionId,
-  });
+  out(0, { ok: true, cwd: result.session.cwd });
 }
 
 if (command === "focus-terminal") {
   const target = targetWorktree(hello.session);
   socket.send(JSON.stringify({ type: "focus_terminal", worktree: target }));
-  // Two honest outcomes: Shape owns the pty and answers with the frame that
-  // opens the drawer, or the harness lives in the user's own terminal and was
-  // focused there, which is silence on this wire. A refusal is neither.
-  const result = await nextFrame(
+  // Shape owns no terminal to answer with: under herdr the session's own tab
+  // is switched to and the terminal app raised, which is silence on this
+  // wire. The only thing worth waiting for is a refusal.
+  const rejection = await nextFrame(
     (f) =>
-      (f.type === "terminal" && f.worktree === target) ||
-      (f.type === "error" &&
-        /^(no session is running on|there is no terminal to go to|could not bring the terminal forward)/.test(f.message)),
-    3000,
+      f.type === "error" &&
+      /^(nothing is reporting in from|there is no terminal to go to|could not bring the terminal forward|.* is not a variation of this project)/.test(
+        f.message,
+      ),
+    2000,
   );
-  if (result?.type === "error") out(1, { ok: false, error: result.message });
+  if (rejection) out(1, { ok: false, error: rejection.message });
   const running = hello.session.sessions.find((s) => s.worktree === target) ?? null;
-  out(0, {
-    ok: true,
-    worktree: target,
-    terminal: running?.backend.capabilities.terminal ?? null,
-    // the drawer was asked for; a harness in its own terminal never asks
-    opened: result !== null && result.open === true,
-  });
+  out(0, { ok: true, worktree: target, terminal: running?.backend.capabilities.terminal ?? null });
 }
 
 if (command === "discover") {
@@ -293,9 +216,14 @@ if (command === "discover") {
 
 if (command === "adopt") {
   socket.send(JSON.stringify({ type: "adopt", pid: Number(targetPath) }));
-  // adopt = a project switch with a backend override: same budget as switch-project
+  // adopt is a project switch onto the directory that session runs in, and
+  // nothing else: the same budget as switch-project. A session already inside
+  // this repo ends in a refreshed `session` frame rather than a new hello.
   const result = await nextFrame(
-    (f) => f.type === "hello" || (f.type === "error" && /^(adopt rejected|no Shape adapter|switch_project)/.test(f.message)),
+    (f) =>
+      f.type === "hello" ||
+      f.type === "session" ||
+      (f.type === "error" && /^(adopt rejected|switch_project)/.test(f.message)),
     60_000,
   );
   if (!result) out(1, { ok: false, error: "timed out waiting for the bridge to re-hello" });

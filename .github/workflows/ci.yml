@@ -30,7 +30,7 @@ jobs:
       - run: pnpm typecheck
 
       # Hermetic smokes only: no network, no model, no real agent session, fakes
-      # for omp/claude/herdr/gh. These are left out on purpose:
+      # for omp and herdr. These are left out on purpose:
       #   smoke:herdr  — models a herdr tab; run it locally.
       #   smoke:auth, smoke:remote — bind real TCP ports across several
       #     processes; run them locally before a PR that touches split mode.
@@ -44,9 +44,6 @@ jobs:
 
       - name: drift extractor smoke
         run: pnpm --filter @shape/bridge smoke:drift
-
-      - name: Claude Code adapter smoke
-        run: pnpm --filter @shape/bridge smoke:claude
 
       - name: bridge end-to-end smoke
         run: pnpm --filter @shape/bridge smoke

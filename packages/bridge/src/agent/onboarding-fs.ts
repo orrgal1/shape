@@ -129,7 +129,7 @@ export async function synthesizeSkeleton(cwd: string, reality: RealityLayer): Pr
         id,
         parentId: null,
         label: shortName.length > 60 ? shortName.slice(0, 60) : shortName,
-        summary: description ?? `Workspace package at ${pkg.dir} — survey pending.`,
+        summary: description ?? `Workspace package at ${pkg.dir} — nothing has described it yet.`,
         phase: "built",
         codeRefs: [pkg.dir],
       },

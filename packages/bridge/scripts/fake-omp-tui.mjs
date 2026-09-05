@@ -6,17 +6,19 @@
  * `WebSocket` is enough.
  *
  * From the agent's point of view this is a real session: it connects to
- * `$SHAPE_LINK`, announces itself with `hello`, and then answers `deliver` with
- * the frames a turn produces (`delivered`, state, text deltas, a whole text, a
- * tool pair, a `canvas_call`, `turn_end`). `abort` ends the running turn early;
- * `autonomous` is recorded; `bye` goes out on SIGTERM or when the link says so.
+ * `$SHAPE_LINK`, announces itself with `hello`, and then runs one turn for
+ * every prompt TYPED into its pane. Shape reads sessions, it never sends them
+ * work, so nothing on the link starts a turn here; a turn produces the frames
+ * a real one does (state, text deltas, a whole text, a tool pair, a
+ * `canvas_call`, `turn_end`), and `bye` goes out on SIGTERM or when the link
+ * closes.
  *
  * Environment:
  *   SHAPE_LINK              ws url of the agent's loopback link (required)
  *   SHAPE_WORKTREE          the `cwd` every frame carries; defaults to process.cwd()
  *   FAKE_OMP_LOG            JSONL log path; defaults to <cwd>/fake-omp.log
  *   FAKE_OMP_TURN_HOLD_MS   ms to hold a turn open before `turn_end` (default 0),
- *                           so a test can steer or abort mid-turn
+ *                           so a test can watch a session while it is working
  *   FAKE_OMP_SESSION_DIR    where the fake session file is claimed to live
  *                           (default /tmp/fake-omp-tui)
  * Arguments:
@@ -123,7 +125,7 @@ const BAD_OPS = [
   { op: "explode" },
 ];
 
-/** one legal enrich, one unpointable claim — the onboarding survey turn */
+/** one legal enrich, one claim no file backs: the pair a drift check has to tell apart */
 const SURVEY_OPS = [
   {
     op: "upsert_node",
@@ -237,17 +239,16 @@ function planTurn(text) {
       tool: false,
     };
   }
-  // the sentence autonomous mode sends on the user's behalf: answered with a
-  // card that still has a way on, so a stretch of them runs to the cap
-  const card = /autonomous mode is on/i.test(text)
-    ? { say: "carrying on by myself.", next: NEXT_CARD }
-    : /bad-next probe/i.test(text)
-      ? { say: "a card that will not do.", next: BAD_NEXT_CARD }
-      : /finished probe/i.test(text)
-        ? { say: "nothing left to do here.", next: DONE_CARD }
-        : /next probe/i.test(text)
-          ? { say: "the login part is done.", next: NEXT_CARD }
-          : null;
+  // `next` is still accepted on the wire and still validated, so a turn can
+  // end on a card: one that is fine, one the validator must refuse, one that
+  // says the work is finished.
+  const card = /bad-next probe/i.test(text)
+    ? { say: "a card that will not do.", next: BAD_NEXT_CARD }
+    : /finished probe/i.test(text)
+      ? { say: "nothing left to do here.", next: DONE_CARD }
+      : /next probe/i.test(text)
+        ? { say: "the login part is done.", next: NEXT_CARD }
+        : null;
   if (card !== null) {
     return { says: [card.say], calls: [{ ops: CANVAS_OPS, note: "where things stand", next: card.next }], tool: false };
   }
@@ -269,10 +270,6 @@ let callSeq = 0;
 const pendingCanvas = new Map();
 /** one turn at a time, exactly like a TUI: a prompt that arrives mid-turn waits */
 let turns = Promise.resolve();
-let streaming = false;
-/** set by `abort`; a running turn drops the rest of its work and closes out */
-let aborted = false;
-let abortWake = null;
 
 function send(frame) {
   record({ ...frame, __dir: "out" });
@@ -284,7 +281,6 @@ function event(ev) {
 }
 
 function setStreaming(on) {
-  streaming = on;
   event({ kind: "state", state: on ? "streaming" : "idle" });
   tell({ type: "status", status: on ? "working" : "idle" });
 }
@@ -297,50 +293,28 @@ async function callCanvas(args) {
   return promise;
 }
 
-/** the hold that lets a test land a steer or an abort inside a live turn */
+/** the hold that keeps a turn open long enough for a test to watch it work */
 async function hold() {
-  if (TURN_HOLD_MS <= 0) return;
-  const { promise, resolve } = Promise.withResolvers();
-  abortWake = resolve;
-  const timer = setTimeout(resolve, TURN_HOLD_MS);
-  await promise;
-  clearTimeout(timer);
-  abortWake = null;
+  if (TURN_HOLD_MS > 0) await sleep(TURN_HOLD_MS);
 }
 
 async function runTurn(text) {
-  aborted = false;
   setStreaming(true);
   const plan = planTurn(text);
   for (const say of plan.says) event({ kind: "text_delta", delta: say });
   event({ kind: "text", text: plan.says.join("") });
-  if (plan.tool && !aborted) {
+  if (plan.tool) {
     const path = "packages/auth/src/index.ts";
     event({ kind: "tool_start", name: "write", paths: [path], summary: path });
     event({ kind: "tool_end", name: "write", isError: false });
   }
   for (const call of plan.calls) {
-    if (aborted) break;
     const args = call.next === undefined ? { ops: call.ops, note: call.note } : { ops: call.ops, note: call.note, next: call.next };
     await callCanvas(args);
   }
-  if (!aborted) await hold();
+  await hold();
   event({ kind: "turn_end" });
   setStreaming(false);
-}
-
-/** a prompt goes on the queue; a steer lands inside the turn that is running */
-function deliverIn(frame) {
-  const body = String(frame.body ?? "");
-  const mode = frame.mode === "steer" ? "steer" : "prompt";
-  const queued = mode === "prompt" && streaming;
-  send({ type: "delivered", cwd: CWD, id: frame.id, mode, queued });
-  if (mode === "steer" && streaming) {
-    event({ kind: "text_delta", delta: `steered: ${body}` });
-    event({ kind: "text", text: `steered: ${body}` });
-    return;
-  }
-  turns = turns.then(() => runTurn(body));
 }
 
 function bye(reason) {
@@ -373,18 +347,9 @@ socket.addEventListener("message", (message) => {
     return;
   }
   record({ ...frame, __dir: "in" });
+  // every frame the link can send is an answer or a notice; nothing here
+  // starts, steers or stops a turn, because Shape does not send work
   switch (frame.type) {
-    case "deliver":
-      deliverIn(frame);
-      return;
-    case "abort":
-      aborted = true;
-      abortWake?.();
-      return;
-    case "autonomous":
-      // recorded only: what the real extension does with it is approve its own
-      // tool calls, and this fake has none to approve
-      return;
     case "canvas_result": {
       const resolve = pendingCanvas.get(frame.id);
       if (resolve !== undefined) {
@@ -427,8 +392,8 @@ process.stdin.on("data", (chunk) => {
       continue;
     }
     record({ ...typed, __dir: "stdin" });
-    // a prompt typed into the pane: the same turn, with no `delivered` receipt
-    // to send — nobody asked for one
+    // a prompt typed into the pane is the only thing that starts a turn: the
+    // user is at the terminal, and Shape only watches what comes of it
     if (typed.type === "typed") turns = turns.then(() => runTurn(String(typed.text ?? "")));
   }
 });

@@ -11,14 +11,14 @@
  *   agent upgrade        — a tokenless agent exits 1 with the 401 message, no retry
  *   tenancy             — each browser sees only its own tenant's rooms, and
  *                         select_project across tenants is an unknown project
- *   terminal gating     — no --allow-terminal ⇒ terminal "none" and pty_* dropped
  *   shape login         — servers.json (0600) alone authenticates an agent
- *   audit               — deliver/delivered entries under the caller's tenant
+ *   audit               — the mechanical skeleton the room draws by itself is
+ *                         the ONE thing it files, under the caller's tenant
  *   storage             — one graph row per (tenant, project, variation) in <data-dir>/shape.db
  *
- * The harness on every agent is scripts/fake-omp-tui.mjs, so nothing real is
- * spawned; each target gets its own log, which is what proves which process
- * served a turn.
+ * The sessions are scripts/fake-omp-tui.mjs processes this smoke starts itself,
+ * dialing each agent's loopback link from inside its target: Shape starts no
+ * sessions, so a project has one only because something reported in from it.
  *
  * Usage (from packages/bridge): node scripts/smoke-auth.mjs
  */
@@ -27,9 +27,13 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import WebSocket from "ws";
+
+/** the harness stub, by absolute path: a session runs with its worktree as cwd */
+const FAKE_OMP_TUI = join(dirname(fileURLToPath(import.meta.url)), "fake-omp-tui.mjs");
 
 const PORT = Number(process.env.SMOKE_AUTH_PORT ?? 4422);
 /** each agent owns a loopback link port of its own: the agents share nothing but the server */
@@ -47,10 +51,9 @@ const TENANT_A = "acme";
 const TENANT_B = "globex";
 
 // Every bridge/agent below inherits this environment: a smoke must not depend
-// on what is installed on the machine running it. The launcher is Shape's own
-// pty (never a herdr tab in the developer's terminal), and detection reports
-// exactly one harness — `omp`, which `--omp` points at the fake.
-process.env.SHAPE_LAUNCHER = "pty";
+// on what is installed on the machine running it. `none` keeps the agents away
+// from the developer's own herdr, and detection reports exactly one harness.
+process.env.SHAPE_LAUNCHER = "none";
 process.env.SHAPE_FORCE_HARNESSES = "omp";
 
 const results = [];
@@ -71,15 +74,6 @@ async function waitFor(label, predicate, timeoutMs = 30_000) {
     if (Date.now() > deadline) throw new Error(`timeout waiting for ${label}`);
     await sleep(25);
   }
-}
-
-/** frames the fake omp received, in order */
-function ompFrames(path) {
-  if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8")
-    .split("\n")
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line));
 }
 
 /** parse a file the server writes under us; a half-written read is just "not yet" */
@@ -143,7 +137,9 @@ async function seedWorkspace(dir, scope) {
   await writeFile(join(dir, "packages", "auth", "src", "index.ts"), `import { users } from "@${scope}/db";\nexport const login = () => users;\n`);
   await writeFile(join(dir, "packages", "db", "src", "index.ts"), "export const users = [];\n");
   const git = (...args) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
-  git("init", "-q");
+  // not `main`: this machine's global pre-commit hook refuses commits there,
+  // and a throwaway repo in /tmp is nobody's trunk
+  git("init", "-q", "-b", "smoke");
   git("add", "-A");
   git("-c", "user.email=smoke@example.com", "-c", "user.name=smoke", "commit", "-q", "-m", "init");
 }
@@ -197,15 +193,17 @@ const browsers = [];
  * Starts one of the binaries with SHAPE_HOME pointed at a throwaway dir (recents
  * and saved tokens must not touch the real home). `SHAPE_TOKEN` is stripped
  * unless a step passes one: the operator's own env must not authenticate the
- * child this smoke expects to be refused. cwd stays packages/bridge, so a
- * relative `--omp` token resolves against the agent process, not its target.
- * `log` accumulates both streams — the banners and refusals the steps wait on
- * are on stderr, but `shape login` reports where it saved on stdout.
+ * child this smoke expects to be refused. cwd stays packages/bridge, so the
+ * binaries resolve against this package. `log` accumulates both streams — the
+ * banners and refusals the steps wait on are on stderr, but `shape login`
+ * reports where it saved on stdout.
+ *
+ * The automatic map is deliberately LEFT ON: the skeleton the room draws for a
+ * project whose canvas nobody has drawn is the only write the server makes by
+ * itself, and it is the audit line the sections below are about.
  */
 function launch(label, args, extraEnv = {}) {
-  // SHAPE_AUTO_MAP=0 reaches the server through here: its targets have code and
-  // empty canvases, and an automatic map would deliver turns no step asked for
-  const env = { ...process.env, SHAPE_AUTO_MAP: "0", SHAPE_HOME: fakeHome };
+  const env = { ...process.env, SHAPE_HOME: fakeHome };
   delete env.SHAPE_TOKEN;
   const child = spawn(process.execPath, args, {
     cwd: process.cwd(),
@@ -252,10 +250,51 @@ const agentArgs = (target, linkPort, extra = []) => [
   target,
   "--link-port",
   String(linkPort),
-  "--omp",
-  "node scripts/fake-omp-tui.mjs",
   ...extra,
 ];
+
+/** the agent announces its loopback link in the line that says it attached */
+function linkUrlOf(agent) {
+  const found = /link at (ws:\/\/[^\s)]+)/.exec(agent.log);
+  if (found === null) throw new Error(`${agent.label} never announced its loopback link`);
+  return found[1];
+}
+
+/**
+ * A session in one of a tenant's worktrees: the harness stub dialing that
+ * agent's loopback link from inside the directory. It is how a session appears
+ * at all — nothing is launched — and here it is also what makes the room draw
+ * the project's skeleton, which is the record the audit sections read.
+ */
+async function startSession(label, agent, worktree) {
+  const child = spawn(process.execPath, [FAKE_OMP_TUI], {
+    cwd: worktree,
+    env: {
+      ...process.env,
+      SHAPE_LINK: linkUrlOf(agent),
+      SHAPE_WORKTREE: worktree,
+      FAKE_OMP_LOG: ompLogIn(worktree),
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const handle = { label, child, log: "" };
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (d) => process.stderr.write(`[${label}] ${d}`));
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (d) => {
+    handle.log += d;
+    process.stderr.write(`[${label}:out] ${d}`);
+  });
+  spawned.push(handle);
+  // the fake says `ready` on stdout once its link is open and it has greeted
+  await waitFor(`${label} on the link`, () => handle.log.includes('"ready"'));
+  return handle;
+}
+
+/** a sentence typed into that session's pane: one turn, exactly like a TUI */
+function type(session, text) {
+  session.child.stdin.write(`${JSON.stringify({ type: "typed", text })}\n`);
+}
 
 /**
  * One browser socket, tagged with the token it presents and keeping its own
@@ -361,9 +400,9 @@ try {
     `${wireA.frames.length} frame(s): ${JSON.stringify(wireA.frames.map((f) => f.type))}`,
   );
 
-  // --- 3. the first tenant's agent: 401 without a token, terminal off with one
+  // --- 3. the first tenant's agent: 401 without a token, its project with one
 
-  const tokenless = launch("agent-no-token", agentArgs(targetA, LINK_PORT_A), { FAKE_OMP_LOG: ompLogIn(targetA) });
+  const tokenless = launch("agent-no-token", agentArgs(targetA, LINK_PORT_A));
   const tokenlessCode = await waitForExit(tokenless, 5_000);
   check(
     "an agent with no token is refused by name and does not retry",
@@ -372,9 +411,7 @@ try {
   );
 
   const helloAAt = mark(wireA);
-  const agentA = launch("agent-a", agentArgs(targetA, LINK_PORT_A, ["--token", TOKEN_A]), {
-    FAKE_OMP_LOG: ompLogIn(targetA),
-  });
+  const agentA = launch("agent-a", agentArgs(targetA, LINK_PORT_A, ["--token", TOKEN_A]));
   await waitFor("agent A attached", () => agentA.log.includes("agent attached to"));
   const helloA = await frameAfter(wireA, helloAAt, (f) => f.type === "hello", "hello after the first tenant's attach");
   const projectAId = helloA.projectId;
@@ -383,22 +420,10 @@ try {
     helloA.projects.length === 1 && helloA.projects[0].cwd === mainA && helloA.session.cwd === mainA,
     JSON.stringify(helloA.projects.map((p) => p.cwd)),
   );
-  // the harness runs in a variation, so what it can do is reported against that
-  // variation: the browser is told which session it drives and where it runs
-  const runningA = helloA.session.sessions.find((s) => s.worktree === mainA);
   check(
-    "an agent started without --allow-terminal advertises terminal none on the variation it runs in",
-    runningA !== undefined && runningA.backend.capabilities.terminal === "none",
-    `${String(runningA?.worktree)}: ${JSON.stringify(runningA?.backend.capabilities ?? null)}`,
-  );
-
-  const ptyAt = mark(wireA);
-  send(wireA, { type: "pty_open", worktree: mainA, cols: 80, rows: 24 });
-  await sleep(500);
-  check(
-    "a pty_open against a terminal-less agent produces no pty_state",
-    !wireA.frames.slice(ptyAt).some((f) => f.type === "pty_state" || f.type === "pty_data"),
-    JSON.stringify(wireA.frames.slice(ptyAt).map((f) => f.type)),
+    "an agent that starts nothing attaches its project with no session in it",
+    helloA.session.sessions.length === 0,
+    JSON.stringify(helloA.session.sessions),
   );
 
   // --- 4. a second tenant on the same server --------------------------------
@@ -422,10 +447,7 @@ try {
 
   const leakAt = mark(wireA);
   const helloBAt = mark(wireB);
-  const agentB = launch("agent-b", agentArgs(targetB, LINK_PORT_B, ["--allow-terminal"]), {
-    FAKE_OMP_LOG: ompLogIn(targetB),
-    SHAPE_TOKEN: TOKEN_B,
-  });
+  const agentB = launch("agent-b", agentArgs(targetB, LINK_PORT_B), { SHAPE_TOKEN: TOKEN_B });
   await waitFor("agent B attached", () => agentB.log.includes("agent attached to"));
   const helloB = await frameAfter(wireB, helloBAt, (f) => f.type === "hello", "hello after the second tenant's attach");
   const projectBId = helloB.projectId;
@@ -433,12 +455,6 @@ try {
     "an agent authenticated by SHAPE_TOKEN attaches for its own tenant only",
     helloB.projects.length === 1 && helloB.projects[0].cwd === mainB,
     JSON.stringify(helloB.projects.map((p) => p.cwd)),
-  );
-  const runningB = helloB.session.sessions.find((s) => s.worktree === mainB);
-  check(
-    "an agent started with --allow-terminal advertises the backend's real terminal on the variation it runs in",
-    runningB !== undefined && runningB.backend.capabilities.terminal === "pane",
-    `${String(runningB?.worktree)}: ${JSON.stringify(runningB?.backend.capabilities ?? null)}`,
   );
 
   await sleep(300);
@@ -471,10 +487,7 @@ try {
   );
 
   const loginAgentAt = mark(wireA);
-  const agentC = launch("agent-c", agentArgs(targetC, LINK_PORT_C), {
-    FAKE_OMP_LOG: ompLogIn(targetC),
-    SHAPE_HOME: loginHome,
-  });
+  const agentC = launch("agent-c", agentArgs(targetC, LINK_PORT_C), { SHAPE_HOME: loginHome });
   await waitFor("agent C attached", () => agentC.log.includes("agent attached to"));
   const bothA = await frameAfter(
     wireA,
@@ -488,82 +501,117 @@ try {
     JSON.stringify(bothA.projects.map((p) => p.cwd)),
   );
 
-  // --- 6. the audit log of a steering delivery ------------------------------
+  // --- 6. the one thing the room writes by itself, and who it is filed under -
 
-  // what these two sections are about is the database, not the first turn's
-  // shape, so both tenants ask to go straight to building: the harness stub's
-  // build bubbles are what tells the two rows apart below
-  const utterance = "audit this steering: build me an auth service";
-  send(wireA, { type: "utterance", worktree: mainA, referent: null, text: utterance, productFirst: false });
-  await waitFor("the steered prompt in the first tenant's harness log", () =>
-    ompFrames(ompLogIn(targetA)).find((f) => f.type === "deliver" && f.mode === "prompt" && f.body.includes(utterance)),
+  // A session reporting in from a project whose canvas is empty is what makes
+  // the room draw the mechanical skeleton (`server/room.ts` §autoMap). That
+  // write — and nothing else on this server — becomes an audit line
+  // (`server/storage.ts`: `AuditBody` has one kind, `onboard`), stamped with the
+  // tenant, project and variation it happened in and stored as JSON in the
+  // `audit` table (`server/sqlite.ts`).
+  const sessionAAt = mark(wireA);
+  const sessionA = await startSession("omp-a", agentA, mainA);
+  await frameAfter(
+    wireA,
+    sessionAAt,
+    (f) => f.type === "session_started" && f.worktree === mainA,
+    "session_started in the first tenant's project",
   );
-  const delivery = await waitFor(
-    "a deliver entry in the first tenant's audit log",
-    () => auditEntries(TENANT_A, projectAId, mainA).find((e) => e.kind === "deliver" && e.text === utterance) ?? null,
-    10_000,
-  );
-  check(
-    "a steering delivery is audited under the caller's tenant, project and variation",
-    delivery.tenant === TENANT_A &&
-      delivery.projectId === projectAId &&
-      delivery.worktree === mainA &&
-      typeof delivery.at === "string",
-    JSON.stringify(delivery),
-  );
-  const receipt = await waitFor(
-    "the delivered receipt for the audited utterance",
-    () => auditEntries(TENANT_A, projectAId, mainA).find((e) => e.kind === "delivered" && e.id === delivery.id) ?? null,
-    10_000,
+  const onboard = await waitFor(
+    "the onboarding entry in the first tenant's audit log",
+    () => auditEntries(TENANT_A, projectAId, mainA).find((e) => e.kind === "onboard") ?? null,
+    20_000,
   );
   check(
-    "the delivery receipt is audited against the same utterance id",
-    receipt.tenant === TENANT_A && typeof receipt.mode === "string",
-    JSON.stringify(receipt),
+    "the skeleton the room drew by itself is audited under the caller's tenant, project and variation",
+    onboard.tenant === TENANT_A &&
+      onboard.projectId === projectAId &&
+      onboard.worktree === mainA &&
+      typeof onboard.at === "string",
+    JSON.stringify(onboard),
+  );
+  check(
+    "and the line says how much it drew: one bubble per workspace package, plus their dependency",
+    onboard.ops === 3,
+    `ops=${String(onboard.ops)}`,
+  );
+
+  // What a HARNESS draws is not the room's record: the canvas call below lands
+  // on the canvas and in the revisions, and files no audit line of its own —
+  // whatever the room seeded before it, every line in the trail is `onboard`.
+  const drawnAt = mark(wireA);
+  type(sessionA, "build me an auth service");
+  await frameAfter(
+    wireA,
+    drawnAt,
+    (f) => f.type === "graph" && f.worktree === mainA && f.graph.nodes.some((n) => n.id === "auth-service"),
+    "the graph the session drew",
+  );
+  await sleep(300);
+  const entriesAfter = auditEntries(TENANT_A, projectAId, mainA);
+  check(
+    "a canvas call from a session is not audited: the trail is what the SERVER wrote, not the harness",
+    entriesAfter.length > 0 && entriesAfter.every((e) => e.kind === "onboard"),
+    JSON.stringify(entriesAfter.map((e) => e.kind)),
   );
 
   // --- 7. what the tenants keep in the database, side by side ---------------
 
-  const utteranceB = "globex wants its own auth service";
-  send(wireB, { type: "utterance", worktree: mainB, referent: null, text: utteranceB, productFirst: false });
-  await waitFor("the second tenant's prompt in its harness log", () =>
-    ompFrames(ompLogIn(targetB)).find((f) => f.type === "deliver" && f.mode === "prompt" && f.body.includes(utteranceB)),
+  const sessionBAt = mark(wireB);
+  await startSession("omp-b", agentB, mainB);
+  await frameAfter(
+    wireB,
+    sessionBAt,
+    (f) => f.type === "session_started" && f.worktree === mainB,
+    "session_started in the second tenant's project",
   );
 
   const graphRow = (tenant, key, worktree) => {
     const rows = dbRows("SELECT doc FROM graphs WHERE tenant = ? AND key = ? AND worktree = ?", tenant, key, worktree);
     return rows === null || rows.length === 0 ? null : JSON.parse(rows[0].doc);
   };
-  // the row appears as soon as the first words are sketched onto the canvas, so
-  // what is waited for is the turn's own bubbles, not merely a row
-  const builtRow = (tenant, key, worktree) => {
+  // each project's skeleton is drawn from ITS OWN packages, so the rows are
+  // told apart by the bubbles in them rather than by the key they were read on
+  const mappedRow = (tenant, key, worktree, scope) => {
     const row = graphRow(tenant, key, worktree);
-    return row !== null && row.nodes.some((n) => n.id === "auth-service") ? row : null;
+    return row !== null && row.nodes.some((n) => n.id.startsWith(`${scope}-`)) ? row : null;
   };
-  const graphA = await waitFor("the first tenant's graph row", () => builtRow(TENANT_A, projectAId, mainA), 10_000);
-  const graphB = await waitFor("the second tenant's graph row", () => builtRow(TENANT_B, projectBId, mainB), 10_000);
+  const graphA = await waitFor("the first tenant's graph row", () => mappedRow(TENANT_A, projectAId, mainA, "aa"), 20_000);
+  const graphB = await waitFor("the second tenant's graph row", () => mappedRow(TENANT_B, projectBId, mainB, "bb"), 20_000);
   check(
     "each tenant's graph is a row of its own, keyed by tenant, project and variation",
-    graphA.nodes.some((n) => n.id === "auth-service") && graphB.nodes.some((n) => n.id === "auth-service"),
+    graphA.nodes.some((n) => n.id === "aa-auth") && graphB.nodes.some((n) => n.id === "bb-auth"),
     `${JSON.stringify(graphA.nodes.map((n) => n.id))} / ${JSON.stringify(graphB.nodes.map((n) => n.id))}`,
   );
   check(
-    "each row's first sketch holds the words that tenant said, not the other's",
-    graphA.nodes.find((n) => n.id === "product")?.summary === utterance &&
-      graphB.nodes.find((n) => n.id === "product")?.summary === utteranceB,
-    `${graphA.nodes.find((n) => n.id === "product")?.summary} / ${graphB.nodes.find((n) => n.id === "product")?.summary}`,
+    "and holds that project's own packages, never the other tenant's",
+    graphA.nodes.every((n) => !n.id.startsWith("bb-")) && graphB.nodes.every((n) => !n.id.startsWith("aa-")),
+    `${JSON.stringify(graphA.nodes.map((n) => n.id))} / ${JSON.stringify(graphB.nodes.map((n) => n.id))}`,
   );
   check(
     "the tenant is part of a graph's key, not a filter: one tenant's project key finds nothing under the other",
     graphRow(TENANT_B, projectAId, mainA) === null && graphRow(TENANT_A, projectBId, mainB) === null,
   );
-  const audits = dbRows("SELECT tenant, key FROM audit");
+  const audits = await waitFor(
+    "an audit entry for each mapped project",
+    () => {
+      const rows = dbRows("SELECT tenant, key, entry FROM audit");
+      return rows !== null && rows.some((row) => row.key === projectAId) && rows.some((row) => row.key === projectBId)
+        ? rows
+        : null;
+    },
+    20_000,
+  );
   check(
     "every audit entry is filed under the tenant that owns the project it is about",
-    audits !== null &&
-      audits.some((row) => row.key === projectAId) &&
+    audits.some((row) => row.key === projectAId && row.tenant === TENANT_A) &&
       audits.every((row) => (row.key === projectAId ? row.tenant === TENANT_A : row.tenant !== TENANT_A)),
-    JSON.stringify(audits?.map((row) => `${row.tenant}:${row.key.slice(0, 8)}`) ?? null),
+    JSON.stringify(audits.map((row) => `${row.tenant}:${row.key.slice(0, 8)}`)),
+  );
+  check(
+    "and every one of them is the room's own onboarding write: nothing else audits",
+    audits.every((row) => JSON.parse(row.entry).kind === "onboard"),
+    JSON.stringify(audits.map((row) => JSON.parse(row.entry).kind)),
   );
 
   const registry = await waitFor(

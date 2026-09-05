@@ -33,6 +33,10 @@
  *                  session appear on its loopback link.
  *   `agent.prompt` types the text into that child (`{"type":"typed",…}` on its
  *                  stdin), the way herdr submits into a pane.
+ *   `agent.list`   every pane with a live harness in it, with the cwd it runs
+ *                  in: how Shape finds a session it did not start, both to
+ *                  focus its terminal and to find the manager's tab again.
+ *   `tab.list`     one workspace's tabs by the label a human reads.
  *   `agent.focus`, `tab.focus`  recorded, nothing to focus.
  *   `tab.close`    terminates the child (which says `bye` on its way out).
  *   `events.subscribe`  streams `pane.exited` globally and
@@ -197,7 +201,7 @@ function agentRecord(tab) {
 
 /**
  * Push an event to every connection that subscribed it, and log WHICH
- * connections it went to: an event with nobody to deliver it to is exactly
+ * connections it went to: an event with nobody listening for it is exactly
  * the bug a per-pane subscription can have.
  */
 function emit(name, data) {
@@ -390,17 +394,29 @@ async function dispatch(method, params) {
       statusChanged(tab, "working");
       return { submitted: true, agent: agentRecord(tab) };
     }
-    case "agent.send_keys": {
-      // How a turn is interrupted in somebody else's terminal: herdr presses
-      // the keys, the harness decides what they mean. Recorded (every call is)
-      // and never written into the child: this fake's stdin is JSON lines, and
-      // a keystroke is not one of them.
-      const tab = agentTarget(String(params.target ?? ""));
-      if (tab === null || tab.child === null) {
-        throw Object.assign(new Error(`no such agent: ${String(params.target)}`), { code: "agent_not_found" });
-      }
-      const keys = Array.isArray(params.keys) ? params.keys.map((key) => String(key)) : [];
-      return { sent: keys.length, agent: agentRecord(tab) };
+    case "agent.list": {
+      // global by protocol: every pane with a live harness in it, whoever
+      // started it. The cwd is what Shape matches a session on, so it is the
+      // tab's, spelled the way the tab was created.
+      const live = [...tabs.values()].filter((tab) => tab.agent !== null && tab.child !== null);
+      return {
+        type: "agent_list",
+        agents: live.map((tab) => ({
+          pane_id: tab.paneId,
+          tab_id: tab.tabId,
+          workspace_id: tab.workspaceId,
+          name: tab.agent.name,
+          cwd: tab.cwd,
+          status: tab.agent.status,
+        })),
+      };
+    }
+    case "tab.list": {
+      // one workspace's tabs, or all of them when no workspace is named
+      const asked = params.workspace_id;
+      const wanted =
+        typeof asked === "string" && asked.length > 0 ? [...tabs.values()].filter((tab) => tab.workspaceId === asked) : [...tabs.values()];
+      return { type: "tab_list", tabs: wanted.map((tab) => ({ tab_id: tab.tabId, label: tab.label, workspace_id: tab.workspaceId })) };
     }
     case "agent.focus": {
       const tab = agentTarget(String(params.target ?? ""));

@@ -9,19 +9,22 @@
  *   1. every agent-link frame, both directions, round-tripped through
  *      `parseAgentToServerMsg` / `parseServerToAgentMsg` — accepted whole, and
  *      rejected when the worktree it is about is missing or empty
- *   2. every browser frame through `parseClientMsg`, the same way
+ *   2. every browser frame through `parseClientMsg`, the same way, plus the
+ *      frames a steering Shape used to send and this one cannot parse at all
  *   3. `openSqliteStorage`: worktree-keyed graphs, revisions and audit lines,
  *      the v1 → v2 migration that puts a pre-worktree canvas on the main
  *      worktree of its project, and `adoptLegacyKey` moving a canvas off the
  *      project key an older Shape derived from a worktree's directory
- *   4. every loopback frame through `parseLinkMsg`, including the v2 session
- *      frames (`hello`, `delivered`, `bye`) and the `text_delta` event
+ *   4. every loopback frame through `parseLinkMsg`, including the `delivered`
+ *      receipt a harness on an older integration still sends: it parses, and
+ *      `ExternalIo` then drops it without an answer
  *   5. the fakes, for real: `scripts/fake-omp-tui.mjs` against a bare
- *      WebSocket server (hello, a turn, abort, `bye` on SIGTERM — every frame
- *      it sends read back through `parseLinkMsg`), and `scripts/fake-herdr.mjs`
- *      over its unix socket (tab, agent, prompt, focus, close, events) with the
- *      real server's framing: one exchange per connection and then a hang-up,
- *      and status subscribed per pane
+ *      WebSocket server (hello, a turn typed into its stdin, `bye` on SIGTERM
+ *      — every frame it sends read back through `parseLinkMsg`), and
+ *      `scripts/fake-herdr.mjs` over its unix socket (tab, agent, prompt,
+ *      list, focus, close, events) with the real server's framing: one
+ *      exchange per connection and then a hang-up, and status subscribed per
+ *      pane
  *
  * Usage (from packages/bridge): node scripts/smoke-wire.mjs
  */
@@ -37,6 +40,7 @@ import { fileURLToPath } from "node:url";
 
 import { WebSocketServer } from "ws";
 
+import { ExternalIo } from "../src/agent/external.ts";
 import { isHerdrClient, parsePsRows, terminalAppOf } from "../src/agent/launcher/herdr.ts";
 import { parseLinkMsg } from "../src/agent/linkparse.ts";
 import { parseAgentToServerMsg, parseServerToAgentMsg } from "../src/linkframes.ts";
@@ -72,24 +76,36 @@ const WT = "/repo/main";
 const WT2 = "/repo/feature";
 
 const CAPABILITIES = {
-  steerMidTurn: true,
+  steerMidTurn: false,
   hostTool: true,
   events: "native",
-  resume: true,
-  // Shape owns the pty this harness runs in, so the browser may show a drawer
-  terminal: "pane",
+  resume: false,
+  // the session runs in a terminal of its own, which Shape can only focus
+  terminal: "external",
 };
-const BACKEND = { id: "omp", label: "omp", capabilities: CAPABILITIES };
+const BACKEND = { id: "omp", label: "agent", capabilities: CAPABILITIES };
 const SESSION = { sessionId: "s-1", sessionName: "shape", model: { provider: "anthropic", id: "claude" } };
 const LEGACY = { [WT]: "k-legacy-main", [WT2]: "k-legacy-feature" };
-/** what the agent's machine has, and how it starts a harness on it */
+/** what the agent's machine has: the multiplexer a session can be focused in */
 const TOOLS = {
-  launcher: "pty",
+  launcher: "herdr",
   launchers: [{ id: "herdr", label: "herdr", path: "/usr/local/bin/herdr", version: "0.8.0" }],
   harnesses: [
     { id: "omp", label: "omp", path: "/usr/local/bin/omp", version: "1.2.3" },
     { id: "claude", label: "Claude Code", path: "/usr/local/bin/claude", version: null },
   ],
+};
+/** one session somebody started themselves, as the agent's scan reports it */
+const DISCOVERED = {
+  harness: "omp",
+  pid: 4242,
+  command: "omp",
+  cwd: WT2,
+  sessionId: "s-9",
+  sessionFile: "/tmp/fake/s-9.jsonl",
+  startedAt: "2026-01-01T00:00:00.000Z",
+  resumeCommand: null,
+  attach: "socket",
 };
 const PROJECT = {
   key: "k-1",
@@ -98,9 +114,8 @@ const PROJECT = {
   backend: BACKEND,
   tools: TOOLS,
   targetHasCode: true,
-  canPublish: false,
   directivePath: "/home/u/.shape/server/projects/k-1/shape-directive.md",
-  // this fixture's launcher is the pty, which has no workspace to put a manager in
+  // no manager tab open in this project's workspace, which is the usual state
   manager: null,
   legacyKeys: LEGACY,
 };
@@ -177,6 +192,31 @@ const WORKTREES = [
     badLegacy !== null && Object.keys(badLegacy.project.legacyKeys).join() === WT,
     JSON.stringify(badLegacy?.project.legacyKeys),
   );
+
+  const noLauncher = parseAgentToServerMsg(
+    JSON.stringify({ ...attach, project: { ...PROJECT, tools: { ...TOOLS, launcher: null } } }),
+  );
+  check(
+    "attach: an agent with no multiplexer names no launcher, and still attaches",
+    noLauncher !== null && noLauncher.project.tools.launcher === null,
+    JSON.stringify(noLauncher?.project.tools.launcher),
+  );
+  check(
+    "attach: a session whose terminal is a kind Shape cannot show is refused",
+    parseAgentToServerMsg(
+      JSON.stringify({
+        ...attach,
+        sessions: [
+          {
+            worktree: WT,
+            session: SESSION,
+            backend: { ...BACKEND, capabilities: { ...CAPABILITIES, terminal: "drawer" } },
+            state: "idle",
+          },
+        ],
+      }),
+    ) === null,
+  );
 }
 
 roundTrip(parseAgentToServerMsg, "session_started", {
@@ -193,37 +233,11 @@ roundTrip(parseAgentToServerMsg, "agent_event", {
 });
 roundTrip(parseAgentToServerMsg, "canvas_call", { type: "canvas_call", worktree: WT, id: "c-1", args: { ops: [] } });
 roundTrip(parseAgentToServerMsg, "reality", { type: "reality", worktree: WT2, reality: REALITY, head: "def456" });
-roundTrip(parseAgentToServerMsg, "delivered", {
-  type: "delivered",
-  worktree: WT,
-  id: "d-1",
-  mode: "steer",
-  queued: false,
-});
 roundTrip(parseAgentToServerMsg, "skeleton_result", { type: "skeleton_result", worktree: WT, id: "s-1", ops: [] });
-roundTrip(parseAgentToServerMsg, "file_index", { type: "file_index", worktree: WT, id: "f-1", files: ["src/a.ts"] });
-roundTrip(parseAgentToServerMsg, "agent pty_data", { type: "pty_data", worktree: WT, data: "hi" });
-roundTrip(parseAgentToServerMsg, "agent pty_exit", { type: "pty_exit", worktree: WT, code: 0 });
-roundTrip(parseAgentToServerMsg, "agent pty_state", {
-  type: "pty_state",
-  worktree: WT,
-  open: true,
-  shell: "/bin/zsh",
-  cwd: WT,
-});
-// the pty launcher asking the browser for its drawer, on the way out
-roundTrip(parseAgentToServerMsg, "terminal", { type: "terminal", worktree: WT, open: true });
-roundTrip(parseAgentToServerMsg, "terminal closed", { type: "terminal", worktree: WT2, open: false });
-check(
-  "terminal: a frame that does not say which way is refused",
-  parseAgentToServerMsg(JSON.stringify({ type: "terminal", worktree: WT })) === null,
-);
-check(
-  "terminal: a non-boolean open is refused",
-  parseAgentToServerMsg(JSON.stringify({ type: "terminal", worktree: WT, open: "yes" })) === null,
-);
 // project-wide answers stay project-wide: they are about the agent, not one harness
 roundTrip(parseAgentToServerMsg, "worktrees", { type: "worktrees", id: "w-1", worktrees: WORKTREES }, { worktreeScoped: false });
+// what the agent's scan found running on the machine, answered by request id
+roundTrip(parseAgentToServerMsg, "sessions", { type: "sessions", id: "d-1", sessions: [DISCOVERED] }, { worktreeScoped: false });
 roundTrip(parseAgentToServerMsg, "agent_error", { type: "agent_error", message: "no such worktree" }, { worktreeScoped: false });
 // the chooser's answer is about the machine, not about one variation
 roundTrip(parseAgentToServerMsg, "folder_picked", { type: "folder_picked", path: "/chosen/project" }, { worktreeScoped: false });
@@ -241,59 +255,44 @@ check(
 // 2. Agent link: server → agent
 // ---------------------------------------------------------------------------
 
-roundTrip(parseServerToAgentMsg, "deliver", { type: "deliver", worktree: WT, id: "d-1", body: "go" });
+roundTrip(parseServerToAgentMsg, "attached", { type: "attached", projectId: "k-1" }, { worktreeScoped: false });
 roundTrip(parseServerToAgentMsg, "focus_terminal", { type: "focus_terminal", worktree: WT });
-roundTrip(parseServerToAgentMsg, "abort", { type: "abort", worktree: WT });
 roundTrip(parseServerToAgentMsg, "extract_reality", { type: "extract_reality", worktree: WT2 });
 roundTrip(parseServerToAgentMsg, "synthesize_skeleton", { type: "synthesize_skeleton", worktree: WT, id: "s-1" });
-roundTrip(parseServerToAgentMsg, "server file_index", { type: "file_index", worktree: WT, id: "f-1" });
-roundTrip(parseServerToAgentMsg, "close_worktree", { type: "close_worktree", worktree: WT2 });
-roundTrip(parseServerToAgentMsg, "server pty_open", { type: "pty_open", worktree: WT, cols: 80, rows: 24 });
-roundTrip(parseServerToAgentMsg, "server pty_resize", { type: "pty_resize", worktree: WT, cols: 100, rows: 30 });
-roundTrip(parseServerToAgentMsg, "server pty_input", { type: "pty_input", worktree: WT, data: "ls\n" });
-roundTrip(parseServerToAgentMsg, "server pty_close", { type: "pty_close", worktree: WT });
+roundTrip(
+  parseServerToAgentMsg,
+  "canvas_result",
+  { type: "canvas_result", id: "c-1", text: "applied 3 op(s);", isError: false },
+  { worktreeScoped: false },
+);
 // the chooser is a dialog on the agent's machine: no worktree, no fields
 roundTrip(parseServerToAgentMsg, "pick_folder", { type: "pick_folder" }, { worktreeScoped: false });
+roundTrip(parseServerToAgentMsg, "discover", { type: "discover", id: "d-1" }, { worktreeScoped: false });
+// project-wide questions stay project-wide: they are about the agent's machine
+roundTrip(parseServerToAgentMsg, "list_worktrees", { type: "list_worktrees", id: "w-1" }, { worktreeScoped: false });
+// adopting a discovered session is retargeting onto its cwd: nothing is started
+roundTrip(parseServerToAgentMsg, "adopt", { type: "adopt", pid: 4242 }, { worktreeScoped: false });
 
 {
-  // a worktree is OPENED by path — its id is the realpath the agent resolves
-  roundTrip(parseServerToAgentMsg, "open_worktree", { type: "open_worktree", path: WT2 }, { worktreeScoped: false });
-  const full = parseServerToAgentMsg(
-    JSON.stringify({
-      type: "open_worktree",
-      path: `  ${WT2}  `,
-      backend: "claude",
-      resumeSessionId: "r-1",
-      autonomous: true,
-      remember: true,
-    }),
+  // the whole agent is retargeted BY PATH, and the path is all a switch says
+  roundTrip(parseServerToAgentMsg, "switch", { type: "switch", path: WT2 }, { worktreeScoped: false });
+  const extras = parseServerToAgentMsg(
+    JSON.stringify({ type: "switch", path: `  ${WT2}  `, backend: "claude", resumeSessionId: "r-1" }),
   );
   check(
-    "open_worktree: path is trimmed, and every choice the card made is carried",
-    full?.path === WT2 && full?.backend === "claude" && full?.resumeSessionId === "r-1" &&
-      full?.autonomous === true && full?.remember === true,
-    JSON.stringify(full),
+    "switch: the path is trimmed, and what an older Shape would have started with it is dropped",
+    JSON.stringify(extras) === JSON.stringify({ type: "switch", path: WT2 }),
+    JSON.stringify(extras),
+  );
+  check("switch: a blank path is refused", parseServerToAgentMsg(JSON.stringify({ type: "switch", path: "  " })) === null);
+  check(
+    "attached: a frame naming no room is refused",
+    parseServerToAgentMsg(JSON.stringify({ type: "attached", projectId: "" })) === null,
   );
   check(
-    "open_worktree: a non-boolean autonomous is refused",
-    parseServerToAgentMsg(JSON.stringify({ type: "open_worktree", path: WT2, autonomous: "yes" })) === null,
-  );
-  check(
-    "open_worktree: a non-boolean remember is refused",
-    parseServerToAgentMsg(JSON.stringify({ type: "open_worktree", path: WT2, remember: 1 })) === null,
-  );
-  check("open_worktree: an empty path is refused", parseServerToAgentMsg(JSON.stringify({ type: "open_worktree", path: "  " })) === null);
-  check(
-    "open_worktree: a non-string backend is refused",
-    parseServerToAgentMsg(JSON.stringify({ type: "open_worktree", path: WT2, backend: 7 })) === null,
-  );
-  check(
-    "switch still retargets the whole agent, with no worktree",
-    parseServerToAgentMsg(JSON.stringify({ type: "switch", path: WT2 }))?.type === "switch",
-  );
-  check(
-    "list_worktrees stays project-wide",
-    parseServerToAgentMsg(JSON.stringify({ type: "list_worktrees", id: "w-1" }))?.id === "w-1",
+    "adopt: a pid that is not a whole positive number is refused",
+    parseServerToAgentMsg(JSON.stringify({ type: "adopt", pid: 0 })) === null &&
+      parseServerToAgentMsg(JSON.stringify({ type: "adopt", pid: 4.5 })) === null,
   );
 }
 
@@ -301,73 +300,45 @@ roundTrip(parseServerToAgentMsg, "pick_folder", { type: "pick_folder" }, { workt
 // 3. Browser link: browser → bridge
 // ---------------------------------------------------------------------------
 
-roundTrip(parseClientMsg, "utterance", { type: "utterance", worktree: WT, referent: null, text: "build it" });
-roundTrip(parseClientMsg, "utterance with a referent", {
-  type: "utterance",
-  worktree: WT2,
-  referent: { kind: "node", id: "auth" },
-  text: "explain",
-  productFirst: false,
-});
-roundTrip(parseClientMsg, "onboard", { type: "onboard", worktree: WT });
-roundTrip(parseClientMsg, "onboard with a focus", { type: "onboard", worktree: WT, focus: "auth" });
 roundTrip(parseClientMsg, "diff", { type: "diff", worktree: WT2, revA: 1, revB: 4 });
-roundTrip(parseClientMsg, "abort", { type: "abort", worktree: WT });
-roundTrip(parseClientMsg, "close_worktree", { type: "close_worktree", worktree: WT2 });
-roundTrip(parseClientMsg, "set_autonomous on", { type: "set_autonomous", worktree: WT, on: true });
-roundTrip(parseClientMsg, "set_autonomous off", { type: "set_autonomous", worktree: WT2, on: false });
-roundTrip(parseClientMsg, "client pty_open", { type: "pty_open", worktree: WT, cols: 80, rows: 24 });
-roundTrip(parseClientMsg, "client pty_resize", { type: "pty_resize", worktree: WT, cols: 90, rows: 25 });
-roundTrip(parseClientMsg, "client pty_input", { type: "pty_input", worktree: WT, data: "q" });
-roundTrip(parseClientMsg, "client pty_close", { type: "pty_close", worktree: WT });
-roundTrip(parseClientMsg, "client open_worktree", { type: "open_worktree", path: WT2 }, { worktreeScoped: false });
-roundTrip(
-  parseClientMsg,
-  "client open_worktree from the start card",
-  { type: "open_worktree", path: WT2, backend: "omp", autonomous: true, remember: true },
-  { worktreeScoped: false },
-);
 roundTrip(parseClientMsg, "focus_terminal", { type: "focus_terminal", worktree: WT });
 roundTrip(parseClientMsg, "switch_project", { type: "switch_project", path: "/elsewhere" }, { worktreeScoped: false });
+roundTrip(parseClientMsg, "select_project", { type: "select_project", projectId: "k-1" }, { worktreeScoped: false });
 // asking for the chooser carries nothing: the machine is the connection's
 roundTrip(parseClientMsg, "pick_folder", { type: "pick_folder" }, { worktreeScoped: false });
 roundTrip(parseClientMsg, "discover", { type: "discover" }, { worktreeScoped: false });
 roundTrip(parseClientMsg, "adopt", { type: "adopt", pid: 4242 }, { worktreeScoped: false });
 
 check(
-  "client open_worktree: an empty path is refused",
-  parseClientMsg(JSON.stringify({ type: "open_worktree", path: "   " })) === null,
+  "client switch_project: the path is trimmed, and a blank one is refused",
+  parseClientMsg(JSON.stringify({ type: "switch_project", path: "  /elsewhere  " }))?.path === "/elsewhere" &&
+    parseClientMsg(JSON.stringify({ type: "switch_project", path: "   " })) === null,
 );
 check(
-  "client open_worktree: a harness named as anything but a non-empty string is refused",
-  parseClientMsg(JSON.stringify({ type: "open_worktree", path: WT2, backend: "" })) === null &&
-    parseClientMsg(JSON.stringify({ type: "open_worktree", path: WT2, backend: 7 })) === null,
-);
-check(
-  "client open_worktree: a non-boolean choice is refused",
-  parseClientMsg(JSON.stringify({ type: "open_worktree", path: WT2, autonomous: "yes" })) === null &&
-    parseClientMsg(JSON.stringify({ type: "open_worktree", path: WT2, remember: 1 })) === null,
+  "client select_project: a frame naming no room is refused",
+  parseClientMsg(JSON.stringify({ type: "select_project", projectId: "" })) === null,
 );
 check(
   "client focus_terminal: a frame that names no variation is refused",
   parseClientMsg(JSON.stringify({ type: "focus_terminal" })) === null,
 );
 check(
-  "client utterance: a non-string worktree is refused",
-  parseClientMsg(JSON.stringify({ type: "utterance", worktree: 7, referent: null, text: "hi" })) === null,
-);
-check(
   "client diff: a worktree alone is not a diff",
   parseClientMsg(JSON.stringify({ type: "diff", worktree: WT, revA: 1 })) === null,
 );
 check(
-  "client set_autonomous: a missing flag is refused",
-  parseClientMsg(JSON.stringify({ type: "set_autonomous", worktree: WT })) === null,
+  "client adopt: a pid that is not a whole positive number is refused",
+  parseClientMsg(JSON.stringify({ type: "adopt", pid: 0 })) === null &&
+    parseClientMsg(JSON.stringify({ type: "adopt", pid: -1 })) === null,
 );
-check(
-  "client set_autonomous: a non-boolean flag is refused",
-  parseClientMsg(JSON.stringify({ type: "set_autonomous", worktree: WT, on: "yes" })) === null,
-);
+// the two frames a steering, launching Shape took from the browser: this one
+// has no reader for either, so they do not even parse
+for (const [label, frame] of [
+  ["utterance", { type: "utterance", worktree: WT, referent: null, text: "build it" }],
+  ["open_worktree", { type: "open_worktree", path: WT2, backend: "omp" }],
+]) {
+  check(`client refuses ${label}: the browser cannot ask for a turn any more`, parseClientMsg(JSON.stringify(frame)) === null);
+}
 
 // ---------------------------------------------------------------------------
 // 4. Storage: worktree-keyed rows
@@ -424,11 +395,11 @@ const dir = mkdtempSync(join(tmpdir(), "vh-wire-"));
     JSON.stringify(rows[0]?.sessions),
   );
 
+  // the only line a room writes by itself now: the skeleton it drew on an
+  // empty canvas, and how many of its ops landed
   await storage.appendAudit("local", "k-1", WT2, {
-    kind: "deliver",
-    id: "a-1",
-    referent: null,
-    text: "hello",
+    kind: "onboard",
+    ops: 4,
     at: "2026-01-01T00:04:00.000Z",
     tenant: "local",
     projectId: "k-1",
@@ -439,7 +410,7 @@ const dir = mkdtempSync(join(tmpdir(), "vh-wire-"));
   const db = new DatabaseSync(join(dir, "fresh.db"));
   const audit = db.prepare("SELECT worktree, entry FROM audit").all();
   check(
-    "an audit line is filed against the worktree it was steered into",
+    "an audit line is filed against the worktree whose canvas it was written on",
     audit.length === 1 && audit[0].worktree === WT2 && JSON.parse(audit[0].entry).worktree === WT2,
     JSON.stringify(audit),
   );
@@ -513,7 +484,7 @@ CREATE TABLE audit (
     .run("local", "k-old", 3, "2026-01-01T00:00:00.000Z", JSON.stringify({ rev: 3, at: "2026-01-01T00:00:00.000Z", nodes: [], edges: [] }));
   old
     .prepare("INSERT INTO audit (tenant, key, at, entry) VALUES (?, ?, ?, ?)")
-    .run("local", "k-old", "2026-01-01T00:00:00.000Z", JSON.stringify({ kind: "deliver", id: "old-1", referent: null, text: "hi" }));
+    .run("local", "k-old", "2026-01-01T00:00:00.000Z", JSON.stringify({ kind: "onboard", ops: 2 }));
   old.exec("PRAGMA user_version = 1");
   old.close();
 
@@ -586,11 +557,9 @@ CREATE TABLE audit (
 {
   const storage = openSqliteStorage(join(dir, "adopt.db"));
   const bubble = (id) => ({ id, parentId: null, label: id, summary: "", phase: "idea" });
-  const line = (id, key, worktree) => ({
-    kind: "deliver",
-    id,
-    referent: null,
-    text: id,
+  const line = (ops, key, worktree) => ({
+    kind: "onboard",
+    ops,
     at: "2026-01-01T00:00:00.000Z",
     tenant: "local",
     projectId: key,
@@ -603,7 +572,7 @@ CREATE TABLE audit (
   await storage.saveGraph("local", OLD, WT, { rev: 11, nodes: [bubble("drawn")], edges: [] });
   await storage.saveRevision("local", OLD, WT, { rev: 1, at: "2026-01-01T00:00:00.000Z", nodes: [bubble("drawn")], edges: [] });
   await storage.saveRevision("local", OLD, WT, { rev: 11, at: "2026-01-01T00:11:00.000Z", nodes: [bubble("drawn")], edges: [] });
-  await storage.appendAudit("local", OLD, WT, line("old-steer", OLD, WT));
+  await storage.appendAudit("local", OLD, WT, line(3, OLD, WT));
   await storage.saveProject({
     project: { ...PROJECT, key: OLD, legacyKeys: {} },
     tenant: "local",
@@ -614,7 +583,7 @@ CREATE TABLE audit (
   // and what the first attach on the new key wrote for the same worktree
   await storage.saveGraph("local", NEW, WT, { rev: 1, nodes: [], edges: [] });
   await storage.saveRevision("local", NEW, WT, { rev: 1, at: "2026-02-01T00:00:00.000Z", nodes: [], edges: [] });
-  await storage.appendAudit("local", NEW, WT, line("new-steer", NEW, WT));
+  await storage.appendAudit("local", NEW, WT, line(1, NEW, WT));
 
   check(
     "a legacy key with nothing under it is nothing to adopt",
@@ -698,7 +667,7 @@ CREATE TABLE audit (
     audit.length === 2 &&
       audit.every((row) => row.key === NEW) &&
       audit.every((row) => JSON.parse(row.entry).projectId === NEW) &&
-      audit.map((row) => JSON.parse(row.entry).id).join() === "old-steer,new-steer",
+      audit.map((row) => JSON.parse(row.entry).ops).join() === "3,1",
     JSON.stringify(audit),
   );
   db.close();
@@ -747,6 +716,8 @@ linkTrip("link agent_event session", {
   cwd: CWD,
   event: { kind: "session", sessionId: "s-1", sessionFile: "/tmp/fake/s-1.jsonl", model: MODEL },
 });
+// a harness on an older Shape integration still acknowledges what it was
+// given; the frame parses, and the block below is what the agent does with it
 linkTrip("link delivered", { type: "delivered", cwd: CWD, id: "d-1", mode: "steer", queued: false });
 linkTrip("link bye", { type: "bye", cwd: CWD, reason: "the user quit the tui" });
 
@@ -779,6 +750,37 @@ linkTrip("link bye", { type: "bye", cwd: CWD, reason: "the user quit the tui" })
   for (const [label, frame] of refusals) {
     check(`link refuses ${label}`, parseLinkMsg(JSON.stringify(frame)) === null, JSON.stringify(frame));
   }
+}
+
+{
+  // The receipt, routed for real. Shape sends nothing to acknowledge any more,
+  // so the frame has no reader — and refusing it would come back at the
+  // harness as an `error` it did not earn. It is dropped in silence.
+  const touched = [];
+  const events = new Proxy(
+    {},
+    { get: (_sink, name) => (arg) => touched.push(`${String(name)}:${JSON.stringify(arg ?? null)}`) },
+  );
+  const target = {
+    applyCanvas: async (args) => {
+      touched.push(`applyCanvas:${JSON.stringify(args ?? null)}`);
+      return { text: "", isError: false };
+    },
+    events,
+    onHello: () => touched.push("onHello"),
+    onBye: () => touched.push("onBye"),
+  };
+  const io = new ExternalIo({ route: (cwd) => (cwd === CWD ? target : { error: `no session in ${cwd}` }) });
+  const replies = [];
+  const reply = (msg) => replies.push(msg);
+  io.handle(parseLinkMsg(JSON.stringify({ type: "delivered", cwd: CWD, id: "d-1", mode: "prompt", queued: true })), reply);
+  check(
+    "a receipt for a prompt nobody sent is answered with nothing, and touches no session",
+    replies.length === 0 && touched.length === 0,
+    JSON.stringify({ replies, touched }),
+  );
+  io.handle(parseLinkMsg(JSON.stringify({ type: "bye", cwd: CWD, reason: "the user quit" })), reply);
+  check("the same route does hear a bye, so the silence above was the receipt's own", touched.join() === "onBye", touched.join());
 }
 
 // ---------------------------------------------------------------------------
@@ -824,7 +826,6 @@ const LINK_URL = `ws://127.0.0.1:${linkServer.address().port}/link`;
 const linkFrames = [];
 const unparseable = [];
 const canvasCalls = [];
-const linkSockets = new Map();
 linkServer.on("connection", (socket) => {
   socket.on("message", (data) => {
     const frame = parseLinkMsg(data.toString());
@@ -833,7 +834,6 @@ linkServer.on("connection", (socket) => {
       return;
     }
     linkFrames.push(frame);
-    if (frame.type === "hello") linkSockets.set(frame.cwd, socket);
     if (frame.type === "canvas_call") {
       canvasCalls.push(frame);
       const ops = Array.isArray(frame.args?.ops) ? frame.args.ops.length : 0;
@@ -868,18 +868,10 @@ const eventsIn = (cwd) => linkFrames.filter((f) => f.cwd === cwd && f.type === "
     JSON.stringify(hello?.capabilities),
   );
 
-  const socket = linkSockets.get(wt);
-  socket.send(JSON.stringify({ type: "deliver", id: "d-1", body: "build me an auth service", mode: "prompt" }));
-  const receipt = await waitFor("the deliver is answered with a receipt", () =>
-    linkFrames.find((f) => f.cwd === wt && f.type === "delivered"),
-  );
-  check(
-    "the receipt answers the deliver it was sent, unqueued on an idle session",
-    receipt?.id === "d-1" && receipt?.mode === "prompt" && receipt?.queued === false,
-    JSON.stringify(receipt),
-  );
+  // a turn starts where every turn starts now: the user typing into the pane
+  child.stdin.write(`${JSON.stringify({ type: "typed", text: "build me an auth service" })}\n`);
 
-  const turn = await waitFor("the turn runs to its end", () => {
+  const turn = await waitFor("the typed prompt runs a turn to its end", () => {
     const kinds = eventsIn(wt).map((e) => e.kind);
     return kinds.includes("turn_end") && kinds.at(-1) === "state" ? eventsIn(wt) : null;
   });
@@ -908,8 +900,9 @@ const eventsIn = (cwd) => linkFrames.filter((f) => f.cwd === cwd && f.type === "
   );
   check("every frame the fake sent is one the agent's own validator accepts", unparseable.length === 0, unparseable.join(" | "));
 
-  socket.send(JSON.stringify({ type: "autonomous", on: true }));
-  await waitFor("the autonomous frame is recorded", () => jsonl(log).some((f) => f.type === "autonomous" && f.on === true && f.__dir === "in"));
+  await waitFor("the typed line is recorded on the fake's log", () =>
+    jsonl(log).some((f) => f.type === "typed" && f.__dir === "stdin"),
+  );
   const logged = jsonl(log);
   const started = logged.find((f) => f.type === "__start");
   check(
@@ -919,7 +912,8 @@ const eventsIn = (cwd) => linkFrames.filter((f) => f.cwd === cwd && f.type === "
   );
   check(
     "the log keeps both directions, one frame per line",
-    logged.some((f) => f.type === "hello" && f.__dir === "out") && logged.some((f) => f.type === "deliver" && f.__dir === "in"),
+    logged.some((f) => f.type === "hello" && f.__dir === "out") &&
+      logged.some((f) => f.type === "canvas_result" && f.__dir === "in"),
     logged.map((f) => `${f.type}/${f.__dir ?? "-"}`).join(),
   );
 
@@ -928,35 +922,6 @@ const eventsIn = (cwd) => linkFrames.filter((f) => f.cwd === cwd && f.type === "
   check("bye says why the session went away", typeof farewell?.reason === "string" && farewell.reason.length > 0, JSON.stringify(farewell));
   await once(child, "exit");
   check("the log closes on an exit marker", jsonl(log).some((f) => f.type === "__exit"));
-}
-
-{
-  // a turn held open is a turn something can be done to: abort must end it
-  // before its own hold does, or the frame did nothing
-  const wt = realpathSync(mkdtempSync(join(tmpdir(), "vh-tui-abort-")));
-  const child = spawn(process.execPath, [TUI], {
-    cwd: wt,
-    env: {
-      ...process.env,
-      SHAPE_LINK: LINK_URL,
-      SHAPE_WORKTREE: wt,
-      FAKE_OMP_LOG: join(wt, "fake-omp.log"),
-      FAKE_OMP_TURN_HOLD_MS: "5000",
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  await waitFor("the second fake reaches the link", () => linkFrames.find((f) => f.cwd === wt && f.type === "hello"));
-  const socket = linkSockets.get(wt);
-  socket.send(JSON.stringify({ type: "deliver", id: "d-2", body: "hold this turn open", mode: "prompt" }));
-  await waitFor("the held turn is under way", () => canvasCalls.find((c) => c.cwd === wt));
-  const at = Date.now();
-  socket.send(JSON.stringify({ type: "abort" }));
-  await waitFor("abort ends the running turn", () => eventsIn(wt).some((e) => e.kind === "turn_end"), 3000);
-  const took = Date.now() - at;
-  check("the turn ended on the abort, not on its own hold", took < 2500, `${took}ms of a 5000ms hold`);
-  check("an aborted turn still leaves the session idle", eventsIn(wt).at(-1)?.state === "idle", JSON.stringify(eventsIn(wt).at(-1)));
-  child.kill("SIGTERM");
-  await once(child, "exit");
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,27 +1087,18 @@ function herdrStream(path, subscriptions) {
     agent?.agent_session?.kind === "path" && agent?.agent_session?.value.endsWith("r-7.jsonl") === true,
     JSON.stringify(agent?.agent_session),
   );
-  const paneHello = await waitFor("the pane's harness reached the loopback link", () =>
-    linkFrames.find((f) => f.cwd === wt && f.type === "hello"),
-  );
+  // global by protocol: every pane with a live harness in it, whoever started
+  // it, which is how the agent finds the pane a worktree's session runs in
+  const listed = await herdrCall(socketPath, "agent.list", {});
+  const row = listed.result?.agents?.find((a) => a.pane_id === pane);
   check(
-    "the tab's env carried the link and the resume id into the child",
-    paneHello?.sessionId === "r-7" && paneHello?.harness === "omp",
-    JSON.stringify(paneHello),
+    "agent.list answers rows naming the pane, its tab and workspace, and the cwd a session is matched on",
+    row?.tab_id === created.result.tab.tab_id && typeof row?.workspace_id === "string" && row?.cwd === wt,
+    JSON.stringify(listed.error ?? listed.result?.agents),
   );
 
   const prompted = await herdrCall(socketPath, "agent.prompt", { target: "shape-main-1", text: "next probe" });
   check("agent.prompt submits into the pane", prompted.result?.submitted === true, JSON.stringify(prompted.error ?? prompted.result));
-  const typedCall = await waitFor("the typed prompt ran a turn in the child", () => canvasCalls.find((c) => c.cwd === wt));
-  check(
-    "a prompt typed through herdr reaches the harness and draws on the canvas",
-    typedCall?.args?.note === "where things stand" && typeof typedCall?.args?.next?.summary === "string",
-    JSON.stringify(typedCall?.args?.note),
-  );
-  check(
-    "a typed prompt earns no receipt: nobody asked for one",
-    !linkFrames.some((f) => f.cwd === wt && f.type === "delivered"),
-  );
 
   await waitFor(
     "the status stream reports the turn, working then idle",
@@ -1177,7 +1133,7 @@ function herdrStream(path, subscriptions) {
   check(
     "every call is recorded, in the order it arrived",
     methods.join() ===
-      "session.snapshot,events.subscribe,events.subscribe,tab.create,events.subscribe,agent.start,agent.prompt,agent.focus,tab.focus,agent.focus,tab.close",
+      "session.snapshot,events.subscribe,events.subscribe,tab.create,events.subscribe,agent.start,agent.list,agent.prompt,agent.focus,tab.focus,agent.focus,tab.close",
     methods.join(),
   );
   check(

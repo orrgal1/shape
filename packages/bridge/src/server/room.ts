@@ -81,11 +81,13 @@ interface WorktreeState {
   /** the harness's backend; null exactly when `session` is */
   backend: BackendInfo | null;
   /**
-   * The session this room already seeded the skeleton for, so a re-attach of a
-   * live harness — or the `session_started` right behind the attach that
-   * announced it — does not seed it a second time. Null until one has been.
+   * The skeleton has been seeded for the session reporting in from here. A
+   * session announces itself twice — once as a directory somebody is working
+   * in, again when the harness greets with its id — and a reconnect announces
+   * it a third time; none of those is a new start. Reset when the session
+   * stops, so the next one in this worktree is owed its own look.
    */
-  autoMappedSession: string | null;
+  autoMapped: boolean;
   /**
    * This worktree's canvas is owed the mechanical skeleton, and the room has
    * asked the agent to read its code first: a canvas seeded before the
@@ -155,7 +157,7 @@ const PICK_TIMEOUT_MS = 600_000;
  * again. Any other adapter error may well arrive mid-switch and says nothing
  * about it. (`scripts/ctl.mjs` reads the same prefixes as "switch over".)
  */
-const SWITCH_SETTLED_PREFIXES = ["switch_project", "adopt rejected", "no Shape adapter"];
+const SWITCH_SETTLED_PREFIXES = ["switch_project", "adopt rejected"];
 
 /** Refusal for everything that needs the agent while none is attached. */
 const AGENT_GONE = "no agent is attached to this project — start `shape agent` in it";
@@ -533,7 +535,7 @@ export class ProjectRoom {
       agent: "idle",
       session: null,
       backend: null,
-      autoMappedSession: null,
+      autoMapped: false,
       autoMapPending: false,
       now: "",
       nowTimer: null,
@@ -817,12 +819,11 @@ export class ProjectRoom {
    * canvas that has bubbles is left exactly as it is — what the code did since
    * is shown on the picture as drift, and nobody is asked to redraw it.
    *
-   * Once per session start, and never twice for the same session: an attach
-   * that announces a live harness and the `session_started` behind it are one
-   * start, and a reconnect of that same harness is not another one. A worktree
-   * whose code the room has never had read to it is asked for it first — a
-   * skeleton drawn blind would be empty — and the seeding waits for that
-   * extraction to land (`#reality`).
+   * Once per session start, and never twice for the same session: the
+   * `session_started` a hello re-posts, or a reconnect repeats, is the same
+   * start. A worktree whose code the room has never had read to it is asked
+   * for it first — a skeleton drawn blind would be empty — and the seeding
+   * waits for that extraction to land (`#reality`).
    */
   async #autoMap(state: WorktreeState): Promise<void> {
     if (!AUTO_MAP || !this.#agentConnected || !this.#project.targetHasCode) return;
@@ -834,13 +835,10 @@ export class ProjectRoom {
       state.autoMapPending = true;
       return;
     }
-    if (doc.nodes.length > 0) return;
-    // the session, as the room can name it: a harness that never says which
-    // session it is on is seeded once per open of this worktree, which is what
-    // the reset in `session_stopped` makes true
-    const session = state.session.sessionId ?? state.id;
-    if (state.autoMappedSession === session) return;
-    state.autoMappedSession = session;
+    if (state.autoMapped || doc.nodes.length > 0) return;
+    // marked before the await: the hello behind this start re-enters here
+    // while the skeleton is still being synthesized
+    state.autoMapped = true;
     await this.#seedSkeleton(state);
   }
 
@@ -875,7 +873,7 @@ export class ProjectRoom {
         state.backend = null;
         // the next session in this worktree is a new start: it is owed the
         // skeleton even if the harness never named itself
-        state.autoMappedSession = null;
+        state.autoMapped = false;
         state.autoMapPending = false;
         this.#setAgent(state, "idle");
         this.#setActivity(state, []);

@@ -139,8 +139,8 @@ function str(value: unknown): string | null {
 
 /**
  * Path-ish tokens out of a tool's argument projection, for codeRefs matching.
- * Same rule as the rpc adapter used (`packages/bridge/src/agent/backend/omp.ts`),
- * so a bubble matches the same tool calls whichever channel reported them.
+ * Same rule the bridge's own event sink applies to hook-reported calls, so a
+ * bubble matches the same tool calls whichever channel reported them.
  */
 function argPaths(args: unknown): string[] {
   if (args === null || typeof args !== "object") return [];
