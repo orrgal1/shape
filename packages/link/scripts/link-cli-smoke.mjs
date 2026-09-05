@@ -526,6 +526,8 @@ try {
     shown(insideJson.session),
   );
 
+  // a scratch directory outside git: no active project contains it, and the
+  // fleet says so — it is not a project either, so nothing is made of it
   const outside = await mkdtemp(join(tmpdir(), "vh-linkcli-outside-"));
   scratch.push(outside);
   const away = await runCli(["status"], outside, cliBridge.link);
@@ -533,7 +535,7 @@ try {
   check(
     "`cli.ts status` from outside the project reports the routing refusal, bridge still reachable",
     away.code === 0 && awayJson.reachable === true && awayJson.worktree === null &&
-      awayJson.session.includes("is not part of"),
+      awayJson.session.includes("no active project contains"),
     shown(awayJson),
   );
 
