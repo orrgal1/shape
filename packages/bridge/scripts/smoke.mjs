@@ -171,25 +171,15 @@ function startSession({ worktree, port, holdMs = 0, resume = null, log = ompLogI
 }
 
 const target = await mkdtemp(join(tmpdir(), "vh-smoke-a-"));
-const targetB = await mkdtemp(join(tmpdir(), "vh-smoke-b-"));
-/** a project whose canvas was left behind by a Shape that predates the database */
-const legacyTarget = await mkdtemp(join(tmpdir(), "vh-smoke-legacy-"));
 /**
- * A project whose canvas is stored under the project key Shape derived before
- * the key came off the repo's common dir: machine + the DIRECTORY. Its rows are
- * seeded below, before the bridge starts, and the first attach on it has to
- * adopt them.
+ * A second repo, which nothing seeds and nobody opens: it becomes a project
+ * because a session dials the link from inside it, which is the only way a
+ * project ever enters the registry.
  */
-const oldKeyTarget = await mkdtemp(join(tmpdir(), "vh-smoke-oldkey-"));
+const targetB = await mkdtemp(join(tmpdir(), "vh-smoke-b-"));
 const fakeHome = await mkdtemp(join(tmpdir(), "vh-smoke-home-"));
 await seedWorkspace(target, "t");
 await seedWorkspace(targetB, "b");
-await seedWorkspace(legacyTarget, "lg");
-await seedWorkspace(oldKeyTarget, "ok");
-// HOME is pointed at fakeHome for the bridge child, so "~/proj" is this dir
-const homeProj = join(fakeHome, "proj");
-await mkdir(homeProj, { recursive: true });
-await seedWorkspace(homeProj, "h");
 
 // two more worktrees of target A's repo, each on its own branch: one that runs
 // a session of its own, one that only ever hears from a link caller
@@ -197,19 +187,18 @@ const worktree = join(tmpdir(), `vh-smoke-wt-${process.pid}`);
 execFileSync("git", ["worktree", "add", "-b", "variation", worktree], { cwd: target, stdio: "ignore" });
 const worktree2 = join(tmpdir(), `vh-smoke-wt2-${process.pid}`);
 execFileSync("git", ["worktree", "add", "-b", "variation-2", worktree2], { cwd: target, stdio: "ignore" });
+/** a third variation, added under the running bridge: the worktree list must follow */
+const worktree3 = join(tmpdir(), `vh-smoke-wt3-${process.pid}`);
 /**
  * Worktree ids: the realpath of each directory, which is what every frame that
  * is about one canvas carries. `wtA`, `wtVariation` and `wt2` are three
- * variations of ONE project (they share its key); the others are each their own
- * project's only worktree.
+ * variations of ONE project (they share its key); `wtB` is the whole of the
+ * second one.
  */
 const wtA = realpathSync(target);
 const wtVariation = realpathSync(worktree);
 const wt2 = realpathSync(worktree2);
 const wtB = realpathSync(targetB);
-const wtHome = realpathSync(homeProj);
-const wtLegacy = realpathSync(legacyTarget);
-const wtOldKey = realpathSync(oldKeyTarget);
 const frames = [];
 let bridge = null;
 let socket = null;
@@ -466,65 +455,20 @@ async function openSocket(url, sink) {
   storeDb.close();
 }
 
-// --- a canvas stored under the project key an older Shape derived -----------
-// Written before the bridge exists, exactly as the upgrade finds it: the graph,
-// its revisions, an audit line and a registry row, all under
-// sha256(machine + the directory). The attach that switches onto this project
-// has to move them onto the key this build derives from the repo's common dir.
-const OLD_KEY = legacyProjectKeyOf(oldKeyTarget);
-const OLD_KEY_NODE = { id: "old-key-canvas", parentId: null, label: "Drawn under the old key", summary: "Must survive the upgrade.", phase: "built" };
-{
-  const { openSqliteStorage } = await import(new URL("../src/server/sqlite.ts", import.meta.url));
-  const seeded = openSqliteStorage(shapeDb);
-  await seeded.saveGraph("local", OLD_KEY, wtOldKey, { rev: 7, nodes: [OLD_KEY_NODE], edges: [] });
-  await seeded.saveRevision("local", OLD_KEY, wtOldKey, {
-    rev: 7,
-    at: "2026-01-01T00:00:00.000Z",
-    nodes: [OLD_KEY_NODE],
-    edges: [],
-  });
-  // the only line a room ever writes: the map it drew onto this canvas by itself
-  await seeded.appendAudit("local", OLD_KEY, wtOldKey, {
-    kind: "onboard",
-    ops: 4,
-    at: "2026-01-01T00:00:00.000Z",
-    tenant: "local",
-    projectId: OLD_KEY,
-    worktree: wtOldKey,
-  });
-  await seeded.saveProject({
-    project: {
-      key: OLD_KEY,
-      label: basename(oldKeyTarget),
-      cwd: wtOldKey,
-      backend: null,
-      tools: { launcher: null, launchers: [], harnesses: [] },
-      targetHasCode: true,
-      directivePath: null,
-      manager: null,
-      legacyKeys: {},
-    },
-    tenant: "local",
-    worktrees: [{ id: wtOldKey, path: wtOldKey, branch: "main", head: null }],
-    sessions: [],
-    lastSeen: "2026-01-01T00:00:00.000Z",
-  });
-  seeded.close();
-}
-
 // --- the whole of it, over one bridge --------------------------------------
-// One project with three variations, sessions that report in from two of them,
-// and everything the browser may ask a read-only Shape for: which project to
-// look at, a comparison of two snapshots, another look at what is running, and
-// a session's own terminal.
+// One project with three variations and sessions that report in from two of
+// them, a second project that enters the registry because a session dialed the
+// link from inside it, and everything the browser may ask a read-only Shape
+// for: which project to watch, whether it is active at all, a comparison of
+// two snapshots, and a session's own terminal.
 try {
   bridge = spawn(
     process.execPath,
     ["src/index.ts", "--cwd", target, "--port", String(PORT), "--db", shapeDb],
     {
       cwd: process.cwd(),
-      // SHAPE_HOME/HOME keep recents.json, the directive and "~" out of the
-      // real home dir
+      // SHAPE_HOME/HOME keep the directive and everything else this bridge
+      // writes out of the developer's own home dir
       env: { ...process.env, ...NO_AUTO_MAP, SHAPE_HOME: fakeHome, HOME: fakeHome },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -615,7 +559,33 @@ try {
     "`.shape/` was added to the repo's shared info/exclude",
     readFileSync(join(target, ".git", "info", "exclude"), "utf8").split("\n").filter((l) => l.trim() === ".shape/").length === 1,
   );
-  check("hello carries recentProjects", Array.isArray(hello.recentProjects) && hello.recentProjects[0] === wtA, JSON.stringify(hello.recentProjects));
+  // --- the registry: every project this server knows, on the greeting -------
+  // A project is a row with a status, and every hello carries the whole list.
+  // Nothing has reported in yet, so the seed is a project with a room and
+  // nothing live in it.
+  const seeded = hello.projects.find((p) => p.projectId === projectKeyOf(target));
+  check(
+    "hello lists the seeded project as active, with nothing running in it yet",
+    hello.projects.length === 1 && seeded.cwd === wtA && seeded.status === "active" && seeded.liveSessions === 0 &&
+      seeded.manager === false && seeded.injected === 0 && typeof seeded.caughtUp === "boolean",
+    JSON.stringify(hello.projects),
+  );
+  check(
+    "a project summary says what is true of the project, never what its agent is doing",
+    !("harness" in seeded) && !("agentConnected" in seeded),
+    JSON.stringify(Object.keys(seeded)),
+  );
+
+  /**
+   * The browser asks to watch one of the projects it was told about, and is
+   * answered with a hello for it on its own socket. Every project list read
+   * below comes off one of these: the list is recomputed for every greeting.
+   */
+  const watch = async (projectId, label) => {
+    const at = frames.length;
+    socket.send(JSON.stringify({ type: "select_project", projectId }));
+    return waitFor(label, () => frames.slice(at).find((f) => f.type === "hello" && f.projectId === projectId), 30_000);
+  };
 
   // --- a session reports in -------------------------------------------------
   // Nothing above started it and nothing below tells it what to do: it dialed
@@ -664,6 +634,13 @@ try {
     "the project's session facts name the variation the harness runs in",
     oneRunning.session.sessions[0].worktree === wtA && oneRunning.session.sessions[0].backend.id === "omp",
     JSON.stringify(oneRunning.session.sessions.map((s) => `${s.worktree}:${s.backend.id}`)),
+  );
+
+  const withSession = await watch(projectKeyOf(target), "hello while the harness is running");
+  check(
+    "a harness reporting in is the project's one live session, on the count the switcher shows",
+    withSession.projects.find((p) => p.projectId === projectKeyOf(target)).liveSessions === 1,
+    JSON.stringify(withSession.projects.map((p) => `${p.label}:${p.liveSessions}`)),
   );
 
   // --- one turn, typed at the harness's own pane ----------------------------
@@ -915,59 +892,6 @@ try {
     strange.message === "/tmp/not-a-variation is not a variation of this project",
     strange.message,
   );
-
-  // --- another look at what is running on this machine ----------------------
-  const discoverAt = frames.length;
-  socket.send(JSON.stringify({ type: "discover" }));
-  const discovered = await waitFor("the answer to discover", () =>
-    frames.slice(discoverAt).find((f) => f.type === "sessions"),
-  );
-  check(
-    // Shape starts nothing, so every session it finds is somebody else's: what
-    // is reported is what could be read off the machine about each one.
-    "discover answers with the sessions on this machine, each described the same way",
-    Array.isArray(discovered.sessions) &&
-      discovered.sessions.every(
-        (s) => typeof s.pid === "number" && typeof s.command === "string" && "cwd" in s && "resumeCommand" in s,
-      ),
-    JSON.stringify(discovered.sessions.map((s) => `${s.harness}:${s.pid}`)),
-  );
-  const adoptAt = frames.length;
-  socket.send(JSON.stringify({ type: "adopt", pid: 2_147_483_646 }));
-  const noSuchPid = await waitFor("adopt refused for a pid nothing answers to", () =>
-    frames.slice(adoptAt).find((f) => f.type === "error" && f.message.startsWith("adopt rejected")),
-  );
-  check(
-    "adopting a session that is not running is refused, naming the pid",
-    noSuchPid.message === "adopt rejected: no running agent session with pid 2147483646",
-    noSuchPid.message,
-  );
-
-  // --- a variation of the same repo is not another project ------------------
-  // Switching onto one is not a retarget at all: the canvas already holds it,
-  // whatever reports in from it is already being watched, and the only thing
-  // that can be out of date is the worktree list.
-  const inRepoAt = frames.length;
-  socket.send(JSON.stringify({ type: "switch_project", path: worktree }));
-  const refreshed = await waitFor("the worktree list refreshed in place", () =>
-    frames.slice(inRepoAt).find((f) => f.type === "session" && f.session.worktrees.length === 3),
-  );
-  check(
-    "switching onto a variation of the same project re-lists its worktrees and nothing else",
-    frames.slice(inRepoAt).every((f) => f.type !== "hello") &&
-      refreshed.session.sessions.map((s) => s.worktree).join(",") === wtA,
-    JSON.stringify({
-      helloes: frames.slice(inRepoAt).filter((f) => f.type === "hello").length,
-      sessions: refreshed.session.sessions.map((s) => s.worktree),
-    }),
-  );
-
-  socket.send(JSON.stringify({ type: "switch_project", path: join(targetB, "does-not-exist") }));
-  const badSwitch = await waitFor("bad switch refused", () =>
-    frames.find((f) => f.type === "error" && f.message.startsWith("switch_project rejected")),
-  );
-  check("non-directory path refused", badSwitch.message.includes("is not an existing directory"), badSwitch.message);
-  check("no hello after the refused switch", frames.filter((f) => f.type === "hello").length === 1);
 
   // --- several variations at once, on one canvas ----------------------------
   // A second session, in another worktree of the same repo. One project, one
@@ -1412,45 +1336,201 @@ try {
     JSON.stringify(dbRows("SELECT entry FROM audit WHERE tenant = ? AND key = ?", "local", projectKeyOf(target))),
   );
 
-  // --- another repo is the real switch --------------------------------------
-  // Every observed session is forgotten: the browsers are still looking at the
-  // project being left, and nothing there is being watched any more.
-  const switchAt = frames.length;
-  socket.send(JSON.stringify({ type: "switch_project", path: targetB }));
-  const dropped = await waitFor("the variation's session dropped by the retarget", () =>
-    frames.slice(switchAt).find((f) => f.type === "session_stopped" && f.worktree === wtVariation),
-  );
-  check("retargeting onto another repo drops the sessions it was watching, and says why", dropped.reason === "agent retargeted", dropped.reason);
-  const helloB = await waitFor("hello after switch", () =>
-    frames.slice(switchAt).find((f) => f.type === "hello" && f.session.cwd === wtB),
-  );
-  check("switch_project re-hellos with the new target", helloB.session.cwd === wtB);
-  check(
-    "the new target comes up with nothing running in it: a bridge starts nothing",
-    helloB.session.sessions.length === 0 && helloB.graphs[wtB].nodes.length === 0,
-    JSON.stringify({ sessions: helloB.session.sessions.length, nodes: helloB.graphs[wtB].nodes.length }),
+  // --- another repo reports in: a project enters the registry ---------------
+  // Nothing opens it. A harness dials the link from inside a repo no active
+  // project contains, is refused, and is hung up on the moment that project
+  // exists — its own re-dial is what gets it a session.
+  const bKey = projectKeyOf(targetB);
+  const bAt = frames.length;
+  const bSession = startSession({ worktree: targetB, port: PORT });
+  sessions.push(bSession);
+  const refusal = await waitFor("the refusal the caller in the second repo heard", () =>
+    ompFrames(bSession.log).find((f) => f.__dir === "in" && f.type === "error"),
   );
   check(
-    "the project it left is not on the new target's view: one project, its own worktrees",
-    Object.keys(helloB.graphs).join(",") === wtB,
-    Object.keys(helloB.graphs).join(","),
+    "a caller no active project contains is refused, and told which directory nothing claims",
+    refusal.message === `no active project contains ${wtB}`,
+    refusal.message,
+  );
+  const bothActive = await waitFor(
+    "the project list with the second repo on it",
+    () =>
+      frames.slice(bAt).find(
+        (f) =>
+          f.type === "projects" && f.projects.length === 2 && f.projects.every((p) => p.status === "active") &&
+          f.projects.find((p) => p.projectId === bKey)?.liveSessions === 1,
+      ),
+    30_000,
   );
   check(
-    "new target's reality layer was extracted before the hello",
-    helloB.graphs[wtB].reality.nodes.map((n) => n.id).sort().join(",") === "r:@b/auth,r:@b/db",
-    helloB.graphs[wtB].reality.nodes.map((n) => n.id).join(","),
+    "the repo it dialed from becomes a project of its own, active, with that session live in it",
+    bothActive.projects.find((p) => p.projectId === bKey).cwd === wtB &&
+      bothActive.projects.some((p) => p.projectId === projectKeyOf(target)),
+    JSON.stringify(bothActive.projects.map((p) => `${p.label}:${p.status}:${p.liveSessions}`)),
   );
-  check("recents are most-recent-first and deduped", helloB.recentProjects.join(" | ") === `${wtB} | ${wtA}`, helloB.recentProjects.join(" | "));
+  const redialled = await waitFor(
+    "the caller hung up on, dialling again",
+    () => {
+      const said = ompFrames(bSession.log);
+      const greetings = said.filter((f) => f.type === "hello" && f.__dir === "out");
+      return said.some((f) => f.type === "__closed") && greetings.length >= 2 ? greetings : null;
+    },
+    30_000,
+  );
   check(
-    "recents.json written under SHAPE_HOME",
-    JSON.parse(await readFile(join(fakeHome, ".shape", "recents.json"), "utf8"))[0] === wtB,
+    "hanging up is the whole of it: the client re-dials by itself and greets again",
+    redialled.length === 2,
+    JSON.stringify(ompFrames(bSession.log).filter((f) => f.type === "__closed" || f.type === "hello").map((f) => f.type)),
+  );
+
+  const helloB = await watch(bKey, "hello for the second project");
+  check(
+    "watching it answers this browser with that project alone: its worktree, its canvas",
+    helloB.session.cwd === wtB && Object.keys(helloB.graphs).join(",") === wtB,
+    JSON.stringify({ cwd: helloB.session.cwd, graphs: Object.keys(helloB.graphs) }),
+  );
+  const placed = await waitFor("the re-greeted session on the second project's canvas", () =>
+    helloB.session.sessions.find((s) => s.worktree === wtB && s.backend.id === "omp") ??
+      frames
+        .slice(frames.indexOf(helloB))
+        .flatMap((f) => (f.type === "session" ? f.session.sessions : []))
+        .find((s) => s.worktree === wtB && s.backend.id === "omp"),
+  );
+  check(
+    "and the caller that was refused is a named session of the project that now claims it",
+    placed.session.sessionId.startsWith("fake-tui-"),
+    JSON.stringify(placed.session),
+  );
+
+  // --- parked: every record kept, nothing running ---------------------------
+  const parkedAt = frames.length;
+  socket.send(JSON.stringify({ type: "set_project_status", projectId: bKey, status: "inactive" }));
+  const parked = await waitFor("the list after the second project was parked", () =>
+    frames
+      .slice(parkedAt)
+      .find((f) => f.type === "projects" && f.projects.find((p) => p.projectId === bKey)?.status === "inactive"),
+  );
+  check(
+    "a project marked inactive stays on the list, parked, and the other one is untouched",
+    parked.projects.length === 2 && parked.projects.find((p) => p.projectId === projectKeyOf(target)).status === "active",
+    JSON.stringify(parked.projects.map((p) => `${p.label}:${p.status}`)),
+  );
+  const moved = await waitFor("the browser that was watching it, greeted elsewhere", () =>
+    frames.slice(parkedAt).find((f) => f.type === "hello" && f.projectId === projectKeyOf(target)),
+  );
+  check(
+    "a browser watching a project that is parked is moved onto the tenant's newest active one",
+    moved.session.cwd === wtA,
+    moved.session.cwd,
+  );
+  const refusedAt = frames.length;
+  socket.send(JSON.stringify({ type: "select_project", projectId: bKey }));
+  const refusedSelect = await waitFor("the parked project refused", () =>
+    frames.slice(refusedAt).find((f) => f.type === "error"),
+  );
+  check(
+    "there is nothing to watch in a parked project, and the browser is told exactly that",
+    refusedSelect.message === `project ${bKey} is inactive`,
+    refusedSelect.message,
+  );
+  const parkedRow = await waitFor("the parked row in the database", () => {
+    const rows = dbRows("SELECT status, status_changed_at FROM projects WHERE tenant = ? AND key = ?", "local", bKey);
+    return rows === null || rows.length === 0 || rows[0].status !== "inactive" ? null : rows[0];
+  });
+  check(
+    "the status is stored with the moment it moved: a restart finds the project as it was left",
+    parkedRow.status === "inactive" && parkedRow.status_changed_at.length > 0,
+    JSON.stringify(parkedRow),
+  );
+  const unheardAt = ompFrames(bSession.log).length;
+  bSession.type("plain probe");
+  const unheard = await waitFor("what the session in the parked project hears", () =>
+    ompFrames(bSession.log).slice(unheardAt).find((f) => f.__dir === "in" && f.type === "error"),
+  );
+  check(
+    "a session left running in a parked project is refused, and reporting in never revives it",
+    unheard.message === `no active project contains ${wtB}` &&
+      frames
+        .slice(parkedAt)
+        .every((f) => f.type !== "projects" || f.projects.find((p) => p.projectId === bKey).status === "inactive"),
+    unheard.message,
+  );
+
+  // --- and back: the room returns with everything the project had -----------
+  const revivedAt = frames.length;
+  socket.send(JSON.stringify({ type: "set_project_status", projectId: bKey, status: "active" }));
+  const revived = await waitFor("the list after the second project came back", () =>
+    frames
+      .slice(revivedAt)
+      .find((f) => f.type === "projects" && f.projects.find((p) => p.projectId === bKey)?.status === "active"),
+  );
+  check(
+    "marking it active again gives it a room, and the switcher says so",
+    revived.projects.length === 2 && revived.projects.every((p) => p.status === "active"),
+    JSON.stringify(revived.projects.map((p) => `${p.label}:${p.status}`)),
+  );
+  const helloBack = await watch(bKey, "hello for the project that came back");
+  check(
+    "and a browser can watch it again, on the canvas it always had",
+    helloBack.session.cwd === wtB && Object.keys(helloBack.graphs).join(",") === wtB,
+    JSON.stringify({ cwd: helloBack.session.cwd, graphs: Object.keys(helloBack.graphs) }),
+  );
+  const unknownAt = frames.length;
+  socket.send(JSON.stringify({ type: "set_project_status", projectId: "no-such-project", status: "inactive" }));
+  const unknown = await waitFor("a status change aimed at a project nobody has", () =>
+    frames.slice(unknownAt).find((f) => f.type === "error"),
+  );
+  check(
+    "an id this tenant has no row for is unknown, and only the socket that asked hears about it",
+    unknown.message === "unknown project no-such-project",
+    unknown.message,
+  );
+
+  // The pane in it never closed: what it says is heard again, which is the
+  // live count coming back — and the goodbye takes it away at once, long
+  // before the next scan would have noticed.
+  const spokeAt = frames.length;
+  bSession.type("plain probe");
+  await waitFor("the session in the revived project heard again", () =>
+    frames.slice(spokeAt).find((f) => f.type === "session_started" && f.worktree === wtB),
+  );
+  const liveAgain = await watch(bKey, "hello for the revived project with its session on it");
+  check(
+    "a caller heard again is a live session of the project that claims it",
+    liveAgain.projects.find((p) => p.projectId === bKey).liveSessions === 1,
+    JSON.stringify(liveAgain.projects.map((p) => `${p.label}:${p.liveSessions}`)),
+  );
+  const byeAt = frames.length;
+  await bSession.stop();
+  await waitFor("the goodbye from the pane that closed", () =>
+    frames.slice(byeAt).find((f) => f.type === "session_stopped" && f.worktree === wtB),
+  );
+  const emptied = await watch(bKey, "hello after the second project's pane closed");
+  check(
+    "a session that says goodbye takes the project's live count back to zero",
+    emptied.projects.find((p) => p.projectId === bKey).liveSessions === 0,
+    JSON.stringify(emptied.projects.map((p) => `${p.label}:${p.liveSessions}`)),
+  );
+
+  // --- a variation added under a running bridge -----------------------------
+  // The worktree list is re-detected on every hello, so a variation created
+  // just now is on the very next greeting, with a canvas of its own.
+  execFileSync("git", ["worktree", "add", "-b", "variation-3", worktree3], { cwd: target, stdio: "ignore" });
+  const wt3 = realpathSync(worktree3);
+  const helloWt3 = await watch(projectKeyOf(target), "hello after a third variation was added");
+  check(
+    "a variation added while the bridge runs is on the next hello, with a canvas of its own",
+    helloWt3.session.worktrees.length === 4 &&
+      helloWt3.session.worktrees.some((w) => w.id === wt3 && w.branch === "variation-3") &&
+      helloWt3.graphs[wt3] !== undefined,
+    JSON.stringify(helloWt3.session.worktrees.map((w) => `${basename(w.path)}@${w.branch}`)),
   );
   await varSession.stop();
 
   // the file a harness Shape never registered a tool in reads to find the
-  // canvas: written under SHAPE_HOME per project, rewritten on every open
+  // canvas: written under SHAPE_HOME per project, rewritten on every attach
   const { CANVAS_TOOL_DESCRIPTION } = await import(new URL("../../shared/src/index.ts", import.meta.url));
-  const directiveFile = join(fakeHome, ".shape", "server", "projects", projectKeyOf(targetB), "shape-directive.md");
+  const directiveFile = join(fakeHome, ".shape", "server", "projects", projectKeyOf(target), "shape-directive.md");
   const directive = await readFile(directiveFile, "utf8");
   check(
     "the project's shape-directive.md names the link, the fallback CLI and the canvas contract verbatim",
@@ -1461,161 +1541,61 @@ try {
   );
   check(
     "hello points a launcher at the directive it wrote",
-    helloB.session.directivePath === directiveFile,
-    `${helloB.session.directivePath} / ${directiveFile}`,
+    hello.session.directivePath === directiveFile,
+    `${hello.session.directivePath} / ${directiveFile}`,
   );
 
-  const persistedA = storedGraph(target);
+  // --- a restart: the registry IS the fleet ---------------------------------
+  // The same database and no `--cwd` at all. Every row comes back and only the
+  // active ones get a room, so the parked project is on the list with nothing
+  // to watch in it.
+  const parkAgainAt = frames.length;
+  socket.send(JSON.stringify({ type: "set_project_status", projectId: bKey, status: "inactive" }));
+  await waitFor("the second project parked again, before the restart", () =>
+    frames
+      .slice(parkAgainAt)
+      .find((f) => f.type === "projects" && f.projects.find((p) => p.projectId === bKey)?.status === "inactive"),
+  );
+  socket.close();
+  bridge.kill("SIGKILL");
+  await sleep(200);
+  const restartFrames = [];
+  bridge = spawn(process.execPath, ["src/index.ts", "--port", String(PORT), "--db", shapeDb], {
+    cwd: process.cwd(),
+    env: { ...process.env, ...NO_AUTO_MAP, SHAPE_HOME: fakeHome, HOME: fakeHome },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let restartErr = "";
+  bridge.stderr.setEncoding("utf8");
+  bridge.stderr.on("data", (d) => {
+    restartErr += d;
+    process.stderr.write(`[bridge:again] ${d}`);
+  });
+  await waitFor("the bridge back up on the same database", () => restartErr.includes("canvas at ws://"), 30_000);
+  socket = await openSocket(`ws://127.0.0.1:${PORT}/ws`, restartFrames);
+  const helloAgain = await waitFor("hello after the restart", () => restartFrames.find((f) => f.type === "hello"), 30_000);
   check(
-    "the old project's graph was persisted before switching away",
-    persistedA.nodes.length === 2 && persistedA.edges.length === 1,
-    `nodes=${persistedA.nodes.length}`,
-  );
-
-  // --- "~" expansion + a switch cannot race another switch ------------------
-  socket.send(JSON.stringify({ type: "switch_project", path: "~/proj" }));
-  socket.send(JSON.stringify({ type: "switch_project", path: target }));
-  const busy = await waitFor("concurrent switch refused", () =>
-    frames.find((f) => f.type === "error" && f.message.includes("already in progress")),
-  );
-  check("second switch refused while one is in progress", busy.message.startsWith("switch_project rejected"), busy.message);
-
-  const helloHome = await waitFor("hello for the home-relative target", () =>
-    frames.find((f) => f.type === "hello" && f.session.cwd === wtHome),
-  );
-  check('"~" expanded against the home dir', helloHome.session.cwd === wtHome, helloHome.session.cwd);
-  check(
-    "home-relative project brought its own reality layer",
-    helloHome.graphs[wtHome].reality.nodes.map((n) => n.id).sort().join(",") === "r:@h/auth,r:@h/db",
-    helloHome.graphs[wtHome].reality.nodes.map((n) => n.id).join(","),
-  );
-  check("recents now lead with the home-relative project", helloHome.recentProjects[0] === wtHome, helloHome.recentProjects.length.toString());
-
-  // --- back on the first project: every variation kept its own canvas -------
-  const backAt = frames.length;
-  socket.send(JSON.stringify({ type: "switch_project", path: target }));
-  const helloA2 = await waitFor(
-    "hello back on the first project",
-    () => frames.slice(backAt).find((f) => f.type === "hello" && f.session.cwd === wtA),
-    30_000,
-  );
-  check(
-    "every variation of the repo is back on the view, and nothing is running in any of them",
-    Object.keys(helloA2.graphs).sort().join(",") === [wtA, wtVariation, wt2].sort().join(",") &&
-      helloA2.session.sessions.length === 0,
-    JSON.stringify({ graphs: Object.keys(helloA2.graphs), sessions: helloA2.session.sessions.length }),
+    "a bridge started with no target at all comes up on the projects its registry has",
+    helloAgain.projects.length === 2 &&
+      helloAgain.projects.find((p) => p.projectId === bKey).status === "inactive" &&
+      helloAgain.projects.find((p) => p.projectId === projectKeyOf(target)).status === "active" &&
+      helloAgain.projectId === projectKeyOf(target),
+    JSON.stringify(helloAgain.projects.map((p) => `${p.label}:${p.status}`)),
   );
   check(
-    "each variation kept its own canvas: what one session drew is not on another's",
-    helloA2.graphs[wtA].nodes.map((n) => n.id).sort().join(",") === "auth-service,user-db" &&
-      helloA2.graphs[wtVariation].nodes.some((n) => n.id === "mcp-linked") &&
-      helloA2.graphs[wt2].nodes.map((n) => n.id).join(",") === "second-only",
-    JSON.stringify(Object.entries(helloA2.graphs).map(([id, g]) => `${basename(id)}:${g.nodes.length}`)),
+    "the canvas the run before drew is the canvas it opens",
+    helloAgain.graphs[wtA].nodes.map((n) => n.id).sort().join(",") === "auth-service,user-db",
+    JSON.stringify(Object.keys(helloAgain.graphs)),
+  );
+  const parkedAfterAt = restartFrames.length;
+  socket.send(JSON.stringify({ type: "select_project", projectId: bKey }));
+  const stillParked = await waitFor("the parked project refused after the restart", () =>
+    restartFrames.slice(parkedAfterAt).find((f) => f.type === "error"),
   );
   check(
-    "info/exclude stayed idempotent across every open",
-    readFileSync(join(target, ".git", "info", "exclude"), "utf8").split("\n").filter((l) => l.trim() === ".shape/").length === 1,
-  );
-
-  // --- a canvas drawn before Shape kept state in a database ------------------
-  // The files a pre-SQLite bridge wrote are taken over on the first attach: the
-  // graph and its revisions move into the database, the leftovers are removed,
-  // and the project's own config.json is left exactly where it is.
-  await mkdir(join(legacyTarget, ".shape", "revisions"), { recursive: true });
-  await writeFile(
-    join(legacyTarget, ".shape", "graph.json"),
-    JSON.stringify({
-      rev: 1,
-      nodes: [{ id: "old-canvas", parentId: null, label: "Old canvas", summary: "Drawn before the database existed.", phase: "built" }],
-      edges: [],
-    }),
-  );
-  await writeFile(
-    join(legacyTarget, ".shape", "revisions", "1.json"),
-    JSON.stringify({ rev: 1, at: "2020-01-01T00:00:00.000Z", nodes: [], edges: [] }),
-  );
-  await writeFile(join(legacyTarget, ".shape", "config.json"), "{}\n");
-  socket.send(JSON.stringify({ type: "switch_project", path: legacyTarget }));
-  const helloLegacy = await waitFor(
-    "hello for the project whose canvas was left by an older Shape",
-    () => frames.find((f) => f.type === "hello" && f.session.cwd === wtLegacy),
-    30_000,
-  );
-  check(
-    "a graph written by an older Shape opens as this project's canvas",
-    helloLegacy.graphs[wtLegacy].nodes.some((n) => n.id === "old-canvas"),
-    JSON.stringify(helloLegacy.graphs[wtLegacy].nodes.map((n) => n.id)),
-  );
-  check(
-    "its revisions came over with their own timestamps, not the attach's",
-    helloLegacy.revisions[wtLegacy].some((r) => r.rev === 1 && r.at === "2020-01-01T00:00:00.000Z"),
-    JSON.stringify(helloLegacy.revisions[wtLegacy]),
-  );
-  check(
-    "the imported canvas is a row of the database like any other project's",
-    storedGraph(legacyTarget)?.nodes.some((n) => n.id === "old-canvas") === true,
-    JSON.stringify(storedGraph(legacyTarget)?.nodes.map((n) => n.id) ?? null),
-  );
-  check(
-    "the files it came from are moved aside, and the project's own config is untouched",
-    !existsSync(join(legacyTarget, ".shape", "graph.json")) &&
-      !existsSync(join(legacyTarget, ".shape", "revisions")) &&
-      existsSync(join(legacyTarget, ".shape", "imported", "graph.json")) &&
-      existsSync(join(legacyTarget, ".shape", "imported", "revisions", "1.json")) &&
-      existsSync(join(legacyTarget, ".shape", "config.json")),
-    String(readdirSync(join(legacyTarget, ".shape"))),
-  );
-
-  // --- a canvas stored under the project key an older Shape derived ----------
-  // The rows seeded before the bridge started sit under sha256(machine + the
-  // directory); this build keys the same project off its repo's common dir. The
-  // attach adopts them, so the canvas the user drew is the canvas they get back.
-  socket.send(JSON.stringify({ type: "switch_project", path: oldKeyTarget }));
-  const helloOldKey = await waitFor(
-    "hello for the project whose canvas was stored under the old project key",
-    () => frames.find((f) => f.type === "hello" && f.session.cwd === wtOldKey),
-    30_000,
-  );
-  check(
-    "a canvas stored under the previous project key opens as this project's",
-    helloOldKey.graphs[wtOldKey].nodes.some((n) => n.id === "old-key-canvas") && helloOldKey.graphs[wtOldKey].rev >= 7,
-    JSON.stringify({ nodes: helloOldKey.graphs[wtOldKey].nodes.map((n) => n.id), rev: helloOldKey.graphs[wtOldKey].rev }),
-  );
-  check(
-    "its revisions came with it, timestamps and all",
-    helloOldKey.revisions[wtOldKey].some((r) => r.rev === 7 && r.at === "2026-01-01T00:00:00.000Z"),
-    JSON.stringify(helloOldKey.revisions[wtOldKey]),
-  );
-  check(
-    "the row now lives under the key this build derives from the repo",
-    storedGraph(oldKeyTarget)?.nodes.some((n) => n.id === "old-key-canvas") === true,
-    JSON.stringify(storedGraph(oldKeyTarget)?.nodes.map((n) => n.id) ?? null),
-  );
-  check(
-    "and nothing is left under the old one: one project, one canvas",
-    (dbRows("SELECT worktree FROM graphs WHERE tenant = ? AND key = ?", "local", OLD_KEY) ?? []).length === 0 &&
-      (dbRows("SELECT key FROM projects WHERE tenant = ? AND key = ?", "local", OLD_KEY) ?? []).length === 0,
-    JSON.stringify({
-      graphs: dbRows("SELECT worktree FROM graphs WHERE tenant = ? AND key = ?", "local", OLD_KEY),
-      projects: dbRows("SELECT key FROM projects WHERE tenant = ? AND key = ?", "local", OLD_KEY),
-    }),
-  );
-  const adoptedAudit = dbRows(
-    "SELECT key, entry FROM audit WHERE tenant = ? AND worktree = ? ORDER BY seq ASC",
-    "local",
-    wtOldKey,
-  );
-  check(
-    "the map the room drew before the upgrade is still on the record, under the new key",
-    adoptedAudit.some((row) => {
-      const entry = JSON.parse(row.entry);
-      return row.key === projectKeyOf(oldKeyTarget) && entry.kind === "onboard" && entry.ops === 4;
-    }),
-    JSON.stringify(adoptedAudit.map((row) => `${row.key.slice(0, 6)}:${JSON.parse(row.entry).kind}`)),
-  );
-  check(
-    "the adoption is announced, naming the worktree it moved",
-    stderr.includes(`adopted the canvas of ${wtOldKey} from its previous project key`),
+    "only the active rows got a room back: the parked one has nothing to watch",
+    stillParked.message === `project ${bKey} is inactive`,
+    stillParked.message,
   );
 } catch (err) {
   check("smoke run completed", false, String(err));
@@ -1626,11 +1606,251 @@ try {
   await sleep(100);
   await rm(target, { recursive: true, force: true });
   await rm(targetB, { recursive: true, force: true });
-  await rm(legacyTarget, { recursive: true, force: true });
-  await rm(oldKeyTarget, { recursive: true, force: true });
   await rm(fakeHome, { recursive: true, force: true });
   await rm(worktree, { recursive: true, force: true });
   await rm(worktree2, { recursive: true, force: true });
+  await rm(worktree3, { recursive: true, force: true });
+}
+
+// --- a canvas drawn before Shape kept state in a database -------------------
+// Its own project, its own bridge, its own port. The files a pre-SQLite bridge
+// wrote are taken over by the first attach on that project, and an attach is
+// what a project in the registry gets — so this one is the seed its bridge
+// starts with. The graph and its revisions move into the database, the
+// leftovers are moved aside, and the project's own config.json is left where
+// it is.
+{
+  const legacyTarget = await mkdtemp(join(tmpdir(), "vh-smoke-legacy-"));
+  const legacyHome = await mkdtemp(join(tmpdir(), "vh-smoke-legacy-home-"));
+  await seedWorkspace(legacyTarget, "lg");
+  const wtLegacy = realpathSync(legacyTarget);
+  const legacyDb = join(legacyHome, "shape.db");
+  const legacyPort = PORT + 4;
+  const legacyFrames = [];
+  let legacyBridge = null;
+  let legacySocket = null;
+  try {
+    await mkdir(join(legacyTarget, ".shape", "revisions"), { recursive: true });
+    await writeFile(
+      join(legacyTarget, ".shape", "graph.json"),
+      JSON.stringify({
+        rev: 1,
+        nodes: [{ id: "old-canvas", parentId: null, label: "Old canvas", summary: "Drawn before the database existed.", phase: "built" }],
+        edges: [],
+      }),
+    );
+    await writeFile(
+      join(legacyTarget, ".shape", "revisions", "1.json"),
+      JSON.stringify({ rev: 1, at: "2020-01-01T00:00:00.000Z", nodes: [], edges: [] }),
+    );
+    await writeFile(join(legacyTarget, ".shape", "config.json"), "{}\n");
+
+    legacyBridge = spawn(
+      process.execPath,
+      ["src/index.ts", "--cwd", legacyTarget, "--port", String(legacyPort), "--db", legacyDb],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, ...NO_AUTO_MAP, SHAPE_HOME: legacyHome, HOME: legacyHome },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let legacyErr = "";
+    legacyBridge.stderr.setEncoding("utf8");
+    legacyBridge.stderr.on("data", (d) => {
+      legacyErr += d;
+    });
+    await waitFor("bridge listening for the project with a canvas on disk", () => legacyErr.includes("canvas at ws://"), 30_000);
+    legacySocket = await openSocket(`ws://127.0.0.1:${legacyPort}/ws`, legacyFrames);
+    const helloLegacy = await waitFor(
+      "hello for the project whose canvas was left by an older Shape",
+      () => legacyFrames.find((f) => f.type === "hello"),
+      30_000,
+    );
+    check(
+      "a graph written by an older Shape opens as this project's canvas",
+      helloLegacy.graphs[wtLegacy].nodes.some((n) => n.id === "old-canvas"),
+      JSON.stringify(helloLegacy.graphs[wtLegacy].nodes.map((n) => n.id)),
+    );
+    check(
+      "its revisions came over with their own timestamps, not the attach's",
+      helloLegacy.revisions[wtLegacy].some((r) => r.rev === 1 && r.at === "2020-01-01T00:00:00.000Z"),
+      JSON.stringify(helloLegacy.revisions[wtLegacy]),
+    );
+    const imported = dbRowsIn(
+      legacyDb,
+      "SELECT doc FROM graphs WHERE tenant = ? AND key = ? AND worktree = ?",
+      "local",
+      projectKeyOf(legacyTarget),
+      wtLegacy,
+    );
+    check(
+      "the imported canvas is a row of the database like any other project's",
+      (imported ?? []).length === 1 && JSON.parse(imported[0].doc).nodes.some((n) => n.id === "old-canvas"),
+      JSON.stringify(imported),
+    );
+    check(
+      "the files it came from are moved aside, and the project's own config is untouched",
+      !existsSync(join(legacyTarget, ".shape", "graph.json")) &&
+        !existsSync(join(legacyTarget, ".shape", "revisions")) &&
+        existsSync(join(legacyTarget, ".shape", "imported", "graph.json")) &&
+        existsSync(join(legacyTarget, ".shape", "imported", "revisions", "1.json")) &&
+        existsSync(join(legacyTarget, ".shape", "config.json")),
+      String(readdirSync(join(legacyTarget, ".shape"))),
+    );
+  } catch (err) {
+    check("the imported-canvas run completed", false, String(err));
+  } finally {
+    legacySocket?.close();
+    legacyBridge?.kill("SIGKILL");
+    await sleep(100);
+    await rm(legacyTarget, { recursive: true, force: true });
+    await rm(legacyHome, { recursive: true, force: true });
+  }
+}
+
+// --- a canvas stored under the project key an older Shape derived -----------
+// The rows are written before the bridge exists, exactly as the upgrade finds
+// them: sha256(machine + the DIRECTORY), which is how a Shape from before
+// `repoIdentity` keyed a project. This build keys the same project off its
+// repo's common dir, so the first attach has to move them — the canvas the
+// user drew is the canvas they get back, and the project is on the list once.
+{
+  const oldKeyTarget = await mkdtemp(join(tmpdir(), "vh-smoke-oldkey-"));
+  const oldKeyHome = await mkdtemp(join(tmpdir(), "vh-smoke-oldkey-home-"));
+  await seedWorkspace(oldKeyTarget, "ok");
+  const wtOldKey = realpathSync(oldKeyTarget);
+  const oldKey = legacyProjectKeyOf(oldKeyTarget);
+  const oldKeyNode = { id: "old-key-canvas", parentId: null, label: "Drawn under the old key", summary: "Must survive the upgrade.", phase: "built" };
+  const oldKeyDb = join(oldKeyHome, "shape.db");
+  const oldKeyPort = PORT + 5;
+  const oldKeyFrames = [];
+  let oldKeyBridge = null;
+  let oldKeySocket = null;
+  try {
+    const { openSqliteStorage } = await import(new URL("../src/server/sqlite.ts", import.meta.url));
+    const seeded = openSqliteStorage(oldKeyDb);
+    await seeded.saveGraph("local", oldKey, wtOldKey, { rev: 7, nodes: [oldKeyNode], edges: [] });
+    await seeded.saveRevision("local", oldKey, wtOldKey, {
+      rev: 7,
+      at: "2026-01-01T00:00:00.000Z",
+      nodes: [oldKeyNode],
+      edges: [],
+    });
+    // the only line a room ever writes: the map it drew onto this canvas by itself
+    await seeded.appendAudit("local", oldKey, wtOldKey, {
+      kind: "onboard",
+      ops: 4,
+      at: "2026-01-01T00:00:00.000Z",
+      tenant: "local",
+      projectId: oldKey,
+      worktree: wtOldKey,
+    });
+    await seeded.saveProject({
+      project: {
+        key: oldKey,
+        label: basename(oldKeyTarget),
+        cwd: wtOldKey,
+        backend: null,
+        tools: { launcher: null, launchers: [], harnesses: [] },
+        targetHasCode: true,
+        directivePath: null,
+        manager: null,
+        legacyKeys: {},
+      },
+      tenant: "local",
+      worktrees: [{ id: wtOldKey, path: wtOldKey, branch: "smoke", head: null }],
+      sessions: [],
+      liveSessions: 0,
+      status: "active",
+      statusChangedAt: "2026-01-01T00:00:00.000Z",
+      lastSeen: "2026-01-01T00:00:00.000Z",
+    });
+    seeded.close();
+
+    oldKeyBridge = spawn(
+      process.execPath,
+      ["src/index.ts", "--cwd", oldKeyTarget, "--port", String(oldKeyPort), "--db", oldKeyDb],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, ...NO_AUTO_MAP, SHAPE_HOME: oldKeyHome, HOME: oldKeyHome },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let oldKeyErr = "";
+    oldKeyBridge.stderr.setEncoding("utf8");
+    oldKeyBridge.stderr.on("data", (d) => {
+      oldKeyErr += d;
+    });
+    await waitFor("bridge listening for the project stored under the old key", () => oldKeyErr.includes("canvas at ws://"), 30_000);
+    oldKeySocket = await openSocket(`ws://127.0.0.1:${oldKeyPort}/ws`, oldKeyFrames);
+    const helloOldKey = await waitFor(
+      "hello for the project whose canvas was stored under the old project key",
+      () => oldKeyFrames.find((f) => f.type === "hello" && f.projectId === projectKeyOf(oldKeyTarget)),
+      30_000,
+    );
+    check(
+      "a canvas stored under the previous project key opens as this project's",
+      helloOldKey.graphs[wtOldKey].nodes.some((n) => n.id === "old-key-canvas") && helloOldKey.graphs[wtOldKey].rev >= 7,
+      JSON.stringify({ nodes: helloOldKey.graphs[wtOldKey].nodes.map((n) => n.id), rev: helloOldKey.graphs[wtOldKey].rev }),
+    );
+    check(
+      "its revisions came with it, timestamps and all",
+      helloOldKey.revisions[wtOldKey].some((r) => r.rev === 7 && r.at === "2026-01-01T00:00:00.000Z"),
+      JSON.stringify(helloOldKey.revisions[wtOldKey]),
+    );
+    const adopted = dbRowsIn(
+      oldKeyDb,
+      "SELECT doc FROM graphs WHERE tenant = ? AND key = ? AND worktree = ?",
+      "local",
+      projectKeyOf(oldKeyTarget),
+      wtOldKey,
+    );
+    check(
+      "the row now lives under the key this build derives from the repo",
+      (adopted ?? []).length === 1 && JSON.parse(adopted[0].doc).nodes.some((n) => n.id === "old-key-canvas"),
+      JSON.stringify(adopted),
+    );
+    check(
+      "and nothing is left under the old one: one project, one canvas",
+      (dbRowsIn(oldKeyDb, "SELECT worktree FROM graphs WHERE tenant = ? AND key = ?", "local", oldKey) ?? []).length === 0 &&
+        (dbRowsIn(oldKeyDb, "SELECT key FROM projects WHERE tenant = ? AND key = ?", "local", oldKey) ?? []).length === 0,
+      JSON.stringify({
+        graphs: dbRowsIn(oldKeyDb, "SELECT worktree FROM graphs WHERE tenant = ? AND key = ?", "local", oldKey),
+        projects: dbRowsIn(oldKeyDb, "SELECT key FROM projects WHERE tenant = ? AND key = ?", "local", oldKey),
+      }),
+    );
+    check(
+      "the registry says so too: the switcher shows one project, not the same repo twice",
+      helloOldKey.projects.length === 1 && helloOldKey.projects[0].projectId === projectKeyOf(oldKeyTarget),
+      JSON.stringify(helloOldKey.projects.map((p) => `${p.projectId.slice(0, 6)}:${p.label}:${p.status}`)),
+    );
+    const adoptedAudit = dbRowsIn(
+      oldKeyDb,
+      "SELECT key, entry FROM audit WHERE tenant = ? AND worktree = ? ORDER BY seq ASC",
+      "local",
+      wtOldKey,
+    );
+    check(
+      "the map the room drew before the upgrade is still on the record, under the new key",
+      (adoptedAudit ?? []).some((row) => {
+        const entry = JSON.parse(row.entry);
+        return row.key === projectKeyOf(oldKeyTarget) && entry.kind === "onboard" && entry.ops === 4;
+      }),
+      JSON.stringify((adoptedAudit ?? []).map((row) => `${row.key.slice(0, 6)}:${JSON.parse(row.entry).kind}`)),
+    );
+    check(
+      "the adoption is announced, naming the worktree it moved",
+      oldKeyErr.includes(`adopted the canvas of ${wtOldKey} from its previous project key`),
+    );
+  } catch (err) {
+    check("the old-project-key run completed", false, String(err));
+  } finally {
+    oldKeySocket?.close();
+    oldKeyBridge?.kill("SIGKILL");
+    await sleep(100);
+    await rm(oldKeyTarget, { recursive: true, force: true });
+    await rm(oldKeyHome, { recursive: true, force: true });
+  }
 }
 
 // --- structure down to classes and functions -------------------------------
@@ -2261,137 +2481,6 @@ volumes:
     await sleep(100);
     await rm(vTarget, { recursive: true, force: true });
     await rm(vHome, { recursive: true, force: true });
-  }
-}
-
-// --- the native folder chooser ----------------------------------------------
-// "Open another" with an empty box asks the machine the project's agent runs
-// on for a folder, because no browser API hands a page an absolute path. The
-// dialog itself is stood in for by SHAPE_PICK_FOLDER — one command per process,
-// so each case needs a bridge of its own: a person choosing a folder, a person
-// closing the dialog, and a machine with no chooser to run at all.
-{
-  const pickHome = await mkdtemp(join(tmpdir(), "vh-smoke-pick-home-"));
-  const chosen = await mkdtemp(join(tmpdir(), "vh-smoke-chosen-"));
-  const running = [];
-
-  /** a bridge whose chooser is `command`, with a browser watching its project */
-  const chooserBridge = async (label, command, port) => {
-    const dir = await mkdtemp(join(tmpdir(), "vh-smoke-pick-"));
-    const picked = [];
-    const child = spawn(
-      process.execPath,
-      ["src/index.ts", "--cwd", dir, "--port", String(port), "--db", join(pickHome, "shape.db")],
-      {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          ...NO_AUTO_MAP,
-          SHAPE_PICK_FOLDER: command,
-          SHAPE_HOME: pickHome,
-          HOME: pickHome,
-        },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    // registered before anything is awaited: a bridge that never comes up is
-    // still a process this block has to take down
-    let err = "";
-    const live = { target: dir, frames: picked, bridge: child, socket: null, stderr: () => err };
-    running.push(live);
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (d) => {
-      err += d;
-    });
-    await waitFor(`bridge listening for ${label}`, () => err.includes("canvas at ws://"), 30_000);
-    live.socket = await openSocket(`ws://127.0.0.1:${port}/ws`, picked);
-    await waitFor(`hello for ${label}`, () => picked.find((f) => f.type === "hello"));
-    return live;
-  };
-
-  try {
-    // node, not printf: its startup is what keeps the "dialog" standing open
-    // long enough for the second ask below to find one already there
-    const answers = await chooserBridge(
-      "the chooser that answers with a folder",
-      `${process.execPath} -e process.stdout.write(${JSON.stringify(chosen)})`,
-      PORT + 4,
-    );
-    // a second browser on the same project: it opened no dialog, so the answer
-    // is none of its business
-    const otherFrames = [];
-    const other = await openSocket(`ws://127.0.0.1:${PORT + 4}/ws`, otherFrames);
-    await waitFor("hello for the second browser on the project", () => otherFrames.find((f) => f.type === "hello"));
-
-    const pickAt = answers.frames.length;
-    answers.socket.send(JSON.stringify({ type: "pick_folder" }));
-    answers.socket.send(JSON.stringify({ type: "pick_folder" }));
-    const answer = await waitFor("folder_picked on the socket that asked", () =>
-      answers.frames.slice(pickAt).find((f) => f.type === "folder_picked"),
-    );
-    check("the folder the chooser named is what comes back", answer.path === chosen, JSON.stringify(answer));
-    const second = await waitFor("the second chooser refused", () =>
-      answers.frames.slice(pickAt).find((f) => f.type === "error" && f.message.startsWith("pick_folder")),
-    );
-    check(
-      "a second chooser while one is open is refused, not queued behind it",
-      second.message === "pick_folder rejected: a folder chooser is already open",
-      second.message,
-    );
-    check(
-      "the answer reached the browser that asked and nobody else",
-      !otherFrames.some((f) => f.type === "folder_picked") &&
-        !otherFrames.some((f) => f.type === "error" && f.message.startsWith("pick_folder")),
-      JSON.stringify(otherFrames.filter((f) => f.type === "folder_picked" || f.type === "error")),
-    );
-    other.close();
-
-    // closing the dialog is an answer about nothing: exit 1, no path
-    const cancels = await chooserBridge("the chooser the user closes", "false", PORT + 5);
-    const cancelAt = cancels.frames.length;
-    cancels.socket.send(JSON.stringify({ type: "pick_folder" }));
-    const cancelled = await waitFor("folder_picked for the closed chooser", () =>
-      cancels.frames.slice(cancelAt).find((f) => f.type === "folder_picked"),
-    );
-    check("closing the chooser answers with no folder at all", cancelled.path === null, JSON.stringify(cancelled));
-
-    // and a machine whose chooser cannot be run says so, twice: the second ask
-    // proves the failure released the room's slot instead of wedging it
-    const missing = await chooserBridge("a machine with no chooser", "/nonexistent/binary", PORT + 6);
-    const missingAt = missing.frames.length;
-    missing.socket.send(JSON.stringify({ type: "pick_folder" }));
-    const failure = await waitFor("the failure the browser hears", () =>
-      missing.frames.slice(missingAt).find((f) => f.type === "error" && f.message.startsWith("pick_folder")),
-    );
-    check(
-      "a chooser that cannot be run is a failure, not a cancel",
-      failure.message.startsWith("pick_folder failed:") &&
-        !missing.frames.slice(missingAt).some((f) => f.type === "folder_picked"),
-      failure.message,
-    );
-    const retryAt = missing.frames.length;
-    missing.socket.send(JSON.stringify({ type: "pick_folder" }));
-    const retry = await waitFor("the second ask after a failure", () =>
-      missing.frames.slice(retryAt).find((f) => f.type === "error" && f.message.startsWith("pick_folder")),
-    );
-    check(
-      "a failed chooser leaves the next one free to try",
-      retry.message.startsWith("pick_folder failed:"),
-      retry.message,
-    );
-  } catch (failure) {
-    // what a bridge that never came up printed is the only thing that explains it
-    const said = running.map((live) => live.stderr().trim().split("\n").at(-1) ?? "").join(" | ");
-    check("the folder chooser run completed", false, `${String(failure)} — ${said}`);
-  } finally {
-    for (const live of running) {
-      live.socket?.close();
-      live.bridge?.kill("SIGKILL");
-    }
-    await sleep(100);
-    for (const live of running) await rm(live.target, { recursive: true, force: true });
-    await rm(chosen, { recursive: true, force: true });
-    await rm(pickHome, { recursive: true, force: true });
   }
 }
 

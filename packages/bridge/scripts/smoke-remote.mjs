@@ -9,12 +9,15 @@
  *   a session reports in      — a harness dialing the agent's loopback link from
  *                               inside a worktree IS the session appearing
  *   a turn in that session    — its canvas call comes back to the browser as a graph
- *   agent SIGTERM             — session_stopped, session/projects flip to
- *                               disconnected, and nothing else is drawn
+ *   agent SIGTERM             — session_stopped, the session flips to
+ *                               disconnected, its project keeps nothing live in
+ *                               it, and nothing else is drawn
  *   agent restart             — the room outlives the agent and re-greets it
  *   a second agent            — two projects, select_project joins the other one
  *   remote storage            — a graph row per variation and a registry in <data-dir>/shape.db
  *   server restart            — the rooms come back; live agents re-bind them
+ *   a parked project          — set_project_status closes its room, refuses the
+ *                               agent behind it, and survives the next restart
  *   agentless restore         — restored rooms are read-only, and still diffable
  *
  * The sessions are scripts/fake-omp-tui.mjs processes this smoke starts itself,
@@ -152,11 +155,11 @@ const spawned = [];
 let socket = null;
 
 /**
- * Starts one of the binaries with SHAPE_HOME pointed at a throwaway dir (recents
- * must not touch the real home). Returns a handle whose `log` accumulates the
- * child's stderr — the banners the steps wait on, including the loopback link
- * URL a session dials. cwd stays packages/bridge: the binaries are named
- * relative to it.
+ * Starts one of the binaries with SHAPE_HOME pointed at a throwaway dir (a
+ * saved token, a local database and a project's directive must not touch the
+ * real home). Returns a handle whose `log` accumulates the child's stderr —
+ * the banners the steps wait on, including the loopback link URL a session
+ * dials. cwd stays packages/bridge: the binaries are named relative to it.
  *
  * SHAPE_AUTO_MAP=0 goes to every child: the server is the one that reads it, and
  * the targets below are seeded WITH code and an empty canvas — a room that maps
@@ -204,13 +207,15 @@ const agentArgs = (target, linkPort) => [
 /**
  * The server binary, pointed at this run's data dir. It is started three times
  * (fresh, restarted under live agents, restarted alone), so each start waits on
- * its own banners — the restore line first when rows are expected, since a step
- * that raced past it would be talking to a server without its rooms.
+ * its own banners — the restore line first when rooms are expected, since a
+ * step that raced past it would be talking to a server without them. The count
+ * is ROOMS, which is the ACTIVE registry rows alone: a parked project comes
+ * back as a row and opens nothing.
  */
-async function startServer(label, restoredProjects = 0) {
+async function startServer(label, activeRooms = 0) {
   const handle = launch(label, ["src/server-cli.ts", "--port", String(PORT), "--data-dir", dataDir]);
-  if (restoredProjects > 0) {
-    const banner = `restored ${restoredProjects} project(s)`;
+  if (activeRooms > 0) {
+    const banner = `restored ${activeRooms} active project(s)`;
     await waitFor(`${label} ${banner}`, () => handle.log.includes(banner));
   }
   await waitFor(`${label} listening`, () => handle.log.includes("server at ws://"));
@@ -282,6 +287,26 @@ async function openBrowser() {
   next.on("error", opened.reject);
   await opened.promise;
   socket = next;
+}
+
+/**
+ * Join a project's room and answer with the hello that reports its agent back
+ * in it. The switcher's list carries a status and a live count, never whether
+ * an agent is attached — that is the room's own answer — and a re-attach
+ * broadcasts a fresh hello to whoever is watching the room. So the frame worth
+ * reading is the first hello for this project that says the agent is
+ * connected: the one this select is answered with, or the one the re-attach
+ * sends right after it.
+ */
+function agentBackIn(projectId, label) {
+  const at = mark();
+  send({ type: "select_project", projectId });
+  return frameAfter(
+    at,
+    (f) => f.type === "hello" && f.projectId === projectId && f.session.agentConnected === true,
+    label,
+    RECONNECT_MS,
+  );
 }
 
 try {
@@ -417,9 +442,10 @@ try {
     (f) => f.type === "projects" && f.projects.some((p) => p.cwd === mainA),
     "projects frame after the agent left",
   );
+  const listedA = offline.projects.find((p) => p.cwd === mainA);
   check(
-    "a departed agent leaves its project listed as offline",
-    offline.projects.find((p) => p.cwd === mainA)?.agentConnected === false,
+    "a departed agent leaves its project active with nothing live in it",
+    listedA?.status === "active" && listedA.liveSessions === 0,
     JSON.stringify(offline.projects),
   );
 
@@ -485,7 +511,7 @@ try {
   );
   check(
     "the room outlives its agent across a second restart",
-    thirdHello.session.cwd === mainA && thirdHello.projects.some((p) => p.cwd === mainA && p.agentConnected === true),
+    thirdHello.session.cwd === mainA && thirdHello.projects.some((p) => p.cwd === mainA && p.status === "active"),
     JSON.stringify(thirdHello.projects),
   );
 
@@ -544,7 +570,9 @@ try {
   const registry = await waitFor(
     "both projects in the server's registry",
     () => {
-      const rows = dbRows("SELECT tenant, key, project, sessions, worktrees, last_seen FROM projects");
+      const rows = dbRows(
+        "SELECT tenant, key, project, sessions, worktrees, status, status_changed_at, live_sessions, last_seen FROM projects",
+      );
       return rows !== null && rows.length === 2
         ? rows.map((row) => ({ ...row, project: JSON.parse(row.project), sessions: JSON.parse(row.sessions) }))
         : null;
@@ -567,6 +595,13 @@ try {
     ),
     JSON.stringify(registry.map((row) => Object.keys(row.project))),
   );
+  check(
+    "and each row carries the status the switcher reads, stamped with when it was set",
+    registry.every(
+      (row) => row.status === "active" && typeof row.status_changed_at === "string" && row.status_changed_at.length > 0,
+    ),
+    JSON.stringify(registry.map((row) => `${row.status}@${row.status_changed_at}`)),
+  );
 
   // --- 9. the server restarts while both agents are still up ----------------
 
@@ -577,49 +612,70 @@ try {
   const restartHello = await frameAfter(restartAt, (f) => f.type === "hello", "hello from the restarted server", 3_000);
   check(
     "a restarted server greets a browser at once, out of its registry alone",
-    restartHello.projects.length === 2,
-    JSON.stringify(restartHello.projects.map((p) => `${p.cwd}:${String(p.agentConnected)}`)),
+    restartHello.projects.length === 2 && restartHello.projects.every((p) => p.status === "active"),
+    JSON.stringify(restartHello.projects.map((p) => `${p.cwd}:${p.status}`)),
   );
 
-  const reattached = await waitFor(
-    "both restored rooms reporting their agent back",
-    () =>
-      frames
-        .slice(restartAt)
-        .filter((f) => f.type === "projects" || f.type === "hello")
-        .map((f) => f.projects)
-        .find((projects) => projects.length === 2 && projects.every((p) => p.agentConnected === true)) ?? null,
-    RECONNECT_MS,
-  );
+  const restoredA = restartHello.projects.find((p) => p.cwd === mainA);
+  const restoredB = restartHello.projects.find((p) => p.cwd === mainB);
+  const backA = await agentBackIn(restoredA.projectId, "the first restored room with its agent back in it");
+  const backB = await agentBackIn(restoredB.projectId, "the second restored room with its agent back in it");
   check(
     "the live agents reconnect and re-bind the rooms the restart restored",
-    reattached.some((p) => p.cwd === mainA) && reattached.some((p) => p.cwd === mainB),
-    JSON.stringify(reattached.map((p) => `${p.cwd}:${String(p.agentConnected)}`)),
-  );
-
-  const restoredA = reattached.find((p) => p.cwd === mainA);
-  const restoredAt = mark();
-  send({ type: "select_project", projectId: restoredA.projectId });
-  const helloRestored = await frameAfter(
-    restoredAt,
-    (f) => f.type === "hello" && f.projectId === restoredA.projectId,
-    "hello for the first project after the restart",
+    backA.session.cwd === mainA && backB.session.cwd === mainB,
+    `${backA.session.cwd} / ${backB.session.cwd}`,
   );
   check(
     "a restored room keeps its project key and serves the graph the old server persisted",
-    restoredA.projectId === projectAId &&
-      helloRestored.graphs[mainA].nodes.some((n) => n.id === "auth-service") &&
-      helloRestored.session.agentConnected === true,
-    `${restoredA.projectId} vs ${projectAId}; ${JSON.stringify(helloRestored.graphs[mainA]?.nodes.map((n) => n.id))}`,
+    restoredA.projectId === projectAId && backA.graphs[mainA].nodes.some((n) => n.id === "auth-service"),
+    `${restoredA.projectId} vs ${projectAId}; ${JSON.stringify(backA.graphs[mainA]?.nodes.map((n) => n.id))}`,
   );
 
-  // --- 10. the same rooms with no agent anywhere ----------------------------
+  // --- 9b. a project marked inactive, and what a restart does with it -------
+
+  // Marking a project inactive is the one input a browser has, and it is not a
+  // hint: the room closes, the agent that was feeding it is told why its link
+  // is going away, and the ROW keeps the status. This socket was watching that
+  // project, so it is moved onto the tenant's remaining active one.
+  const parkAt = mark();
+  send({ type: "set_project_status", projectId: restoredB.projectId, status: "inactive" });
+  const parked = await frameAfter(
+    parkAt,
+    (f) => f.type === "projects" && f.projects.some((p) => p.cwd === mainB && p.status === "inactive"),
+    "projects frame after the second project was parked",
+  );
+  check(
+    "marking a project inactive lists it inactive, and leaves the other one active",
+    parked.projects.length === 2 && parked.projects.find((p) => p.cwd === mainA)?.status === "active",
+    JSON.stringify(parked.projects.map((p) => `${p.cwd}:${p.status}`)),
+  );
+
+  const parkedSelectAt = mark();
+  send({ type: "select_project", projectId: restoredB.projectId });
+  const parkedError = await frameAfter(parkedSelectAt, (f) => f.type === "error", "error for the parked project");
+  check(
+    "select_project on a parked project is refused as inactive, not as unknown",
+    parkedError.message === `project ${restoredB.projectId} is inactive`,
+    parkedError.message,
+  );
+
+  // A parked project has nothing for its agent to feed, so the link is closed
+  // with the same line — and the reconnect the agent makes by itself is
+  // refused the same way: only marking the project active again lets it in.
+  const refusalB = `project ${restoredB.label} is inactive`;
+  const toldAgentB = await waitFor(`agent B told ${refusalB}`, () => agentB.log.includes(refusalB), RECONNECT_MS)
+    .then(() => true)
+    .catch(() => false);
+  check("the agent of a parked project is refused by name, link and all", toldAgentB, refusalB);
+
+  // --- 10. the same rows with no agent anywhere, and the parked one parked ---
 
   await stopChild(agentA);
   await stopChild(agentB);
   await stopChild(server2);
   const aloneAt = mark();
-  await startServer("server-3", 2);
+  // one room, not two: a restart opens the ACTIVE rows and keeps the rest as rows
+  await startServer("server-3", 1);
   await openBrowser();
   const aloneHello = await frameAfter(aloneAt, (f) => f.type === "hello", "hello from the agentless server", 3_000);
   check(
@@ -628,11 +684,35 @@ try {
     JSON.stringify(aloneHello.session.agentConnected),
   );
   check(
-    "both projects come back agentless after a restart with no agents",
+    "the room it greets with is the active project's: a parked one has none to greet with",
+    aloneHello.session.cwd === mainA,
+    aloneHello.session.cwd,
+  );
+  check(
+    "both projects come back listed after a restart with no agents, each with the status it was left with",
     aloneHello.projects.length === 2 &&
-      aloneHello.projects.every((p) => p.agentConnected === false) &&
-      [mainA, mainB].every((cwd) => aloneHello.projects.some((p) => p.cwd === cwd)),
-    JSON.stringify(aloneHello.projects.map((p) => `${p.cwd}:${String(p.agentConnected)}`)),
+      aloneHello.projects.find((p) => p.cwd === mainA)?.status === "active" &&
+      aloneHello.projects.find((p) => p.cwd === mainB)?.status === "inactive",
+    JSON.stringify(aloneHello.projects.map((p) => `${p.cwd}:${p.status}`)),
+  );
+  check(
+    "and nothing is live in the room that came back: the harnesses died with the server that saw them",
+    aloneHello.projects.find((p) => p.cwd === mainA)?.liveSessions === 0,
+    JSON.stringify(aloneHello.projects.map((p) => `${p.cwd}:${String(p.liveSessions)}`)),
+  );
+
+  const parkedIdB = aloneHello.projects.find((p) => p.cwd === mainB)?.projectId;
+  const stillParkedAt = mark();
+  send({ type: "select_project", projectId: parkedIdB });
+  const stillParked = await frameAfter(
+    stillParkedAt,
+    (f) => f.type === "error",
+    "error for the parked project after the restart",
+  );
+  check(
+    "a project parked before the restart is refused after it too: the status is a stored row, not a room's memory",
+    stillParked.message === `project ${parkedIdB} is inactive`,
+    stillParked.message,
   );
 
   const agentlessIdA = aloneHello.projects.find((p) => p.cwd === mainA)?.projectId;
@@ -649,14 +729,14 @@ try {
     JSON.stringify(agentlessA.session.sessions),
   );
 
-  // everything that needs the machine — a re-scan for sessions to adopt — is
-  // refused by name in a room nothing is attached to
+  // everything that needs the machine — taking the user to a session's own
+  // terminal — is refused by name in a room nothing is attached to
   const refusedAloneAt = mark();
-  send({ type: "discover" });
+  send({ type: "focus_terminal", worktree: mainA });
   const refusedAlone = await frameAfter(
     refusedAloneAt,
     (f) => f.type === "error",
-    "error for the discover in a restored room",
+    "error for the focus_terminal in a restored room",
   );
   check(
     "a request that needs the machine is refused by name in a restored room with no agent",

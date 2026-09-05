@@ -10,8 +10,10 @@
  * every prompt TYPED into its pane. Shape reads sessions, it never sends them
  * work, so nothing on the link starts a turn here; a turn produces the frames
  * a real one does (state, text deltas, a whole text, a tool pair, a
- * `canvas_call`, `turn_end`), and `bye` goes out on SIGTERM or when the link
- * closes.
+ * `canvas_call`, `turn_end`), and `bye` goes out on SIGTERM. A hang-up is not
+ * the end of it: like the real extension it re-dials and greets again, which
+ * is how a caller the fleet refused (no active project contained its
+ * directory) gets a session once that project exists.
  *
  * Environment:
  *   SHAPE_LINK              ws url of the agent's loopback link (required)
@@ -21,6 +23,8 @@
  *                           so a test can watch a session while it is working
  *   FAKE_OMP_SESSION_DIR    where the fake session file is claimed to live
  *                           (default /tmp/fake-omp-tui)
+ *   FAKE_OMP_REDIAL_MS      pause before re-dialling a closed link (default 250)
+ *   FAKE_OMP_REDIAL_TRIES   dials before giving up altogether (default 24)
  * Arguments:
  *   --resume <id>           echoed as `hello.sessionId` instead of a fresh one
  *
@@ -34,8 +38,9 @@
  *
  * Every frame sent or received is appended as JSONL to $FAKE_OMP_LOG with a
  * `__dir` of "out"/"in" — one frame per line, which is what the smokes'
- * `ompFrames()` helper reads. Lifecycle markers `__start`/`__exit` carry the
- * pid and argv.
+ * `ompFrames()` helper reads; a frame written while the link was down is
+ * logged as "dropped", because it never left. Lifecycle markers
+ * `__start`/`__closed`/`__exit` carry the pid, the argv and the dial count.
  */
 
 import { appendFileSync } from "node:fs";
@@ -263,7 +268,21 @@ function planTurn(text) {
 // The link
 // ---------------------------------------------------------------------------
 
-const socket = new WebSocket(LINK);
+/**
+ * The link, re-dialled exactly as the real omp extension re-dials it: the
+ * bridge hangs up on a caller it refused (no active project contained its
+ * directory) once that project exists, and the client's own reconnect is what
+ * gets it a session. Faster than the extension's 1–8 s backoff, because a
+ * smoke waits on it. The tries are counted and never reset, so a fake left
+ * behind by a dead bridge gives up instead of spinning for the rest of a run.
+ */
+const REDIAL_MS = Number(process.env.FAKE_OMP_REDIAL_MS ?? 250);
+const REDIAL_TRIES = Number(process.env.FAKE_OMP_REDIAL_TRIES ?? 24);
+
+let socket = null;
+/** this pane is closing: a hang-up is then the end, not something to dial again */
+let leaving = false;
+let dials = 0;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let callSeq = 0;
@@ -272,6 +291,12 @@ const pendingCanvas = new Map();
 let turns = Promise.resolve();
 
 function send(frame) {
+  // a frame written while the link is down is gone: the log says so rather
+  // than claiming it left
+  if (socket === null || socket.readyState !== WebSocket.OPEN) {
+    record({ ...frame, __dir: "dropped" });
+    return;
+  }
   record({ ...frame, __dir: "out" });
   socket.send(JSON.stringify(frame));
 }
@@ -318,61 +343,75 @@ async function runTurn(text) {
 }
 
 function bye(reason) {
-  if (socket.readyState === WebSocket.OPEN) send({ type: "bye", cwd: CWD, reason });
+  leaving = true;
+  if (socket?.readyState === WebSocket.OPEN) send({ type: "bye", cwd: CWD, reason });
   record({ type: "__exit", pid: process.pid, reason });
   // let the frame leave before the socket does
   setTimeout(() => process.exit(0), 20);
 }
 
-socket.addEventListener("open", () => {
-  send({
-    type: "hello",
-    cwd: CWD,
-    harness: "omp",
-    sessionId: SESSION_ID,
-    sessionFile: SESSION_FILE,
-    model: MODEL,
-    capabilities: { steer: true, tool: true },
-  });
-  event({ kind: "session", sessionId: SESSION_ID, sessionFile: SESSION_FILE, model: MODEL });
-  tell({ type: "ready", pid: process.pid, sessionId: SESSION_ID, sessionFile: SESSION_FILE, cwd: CWD });
-});
+/** one dial, and the greeting that follows every open — first or hundredth */
+function dial() {
+  dials++;
+  socket = new WebSocket(LINK);
 
-socket.addEventListener("message", (message) => {
-  let frame;
-  try {
-    frame = JSON.parse(String(message.data));
-  } catch {
-    record({ type: "__unparseable", raw: String(message.data), __dir: "in" });
-    return;
-  }
-  record({ ...frame, __dir: "in" });
-  // every frame the link can send is an answer or a notice; nothing here
-  // starts, steers or stops a turn, because Shape does not send work
-  switch (frame.type) {
-    case "canvas_result": {
-      const resolve = pendingCanvas.get(frame.id);
-      if (resolve !== undefined) {
-        pendingCanvas.delete(frame.id);
-        resolve(frame);
-      }
+  socket.addEventListener("open", () => {
+    send({
+      type: "hello",
+      cwd: CWD,
+      harness: "omp",
+      sessionId: SESSION_ID,
+      sessionFile: SESSION_FILE,
+      model: MODEL,
+      capabilities: { steer: true, tool: true },
+    });
+    event({ kind: "session", sessionId: SESSION_ID, sessionFile: SESSION_FILE, model: MODEL });
+    tell({ type: "ready", pid: process.pid, sessionId: SESSION_ID, sessionFile: SESSION_FILE, cwd: CWD });
+  });
+
+  socket.addEventListener("message", (message) => {
+    let frame;
+    try {
+      frame = JSON.parse(String(message.data));
+    } catch {
+      record({ type: "__unparseable", raw: String(message.data), __dir: "in" });
       return;
     }
-    case "error":
-      return;
-    default:
-      return;
-  }
-});
+    record({ ...frame, __dir: "in" });
+    // every frame the link can send is an answer or a notice; nothing here
+    // starts, steers or stops a turn, because Shape does not send work
+    switch (frame.type) {
+      case "canvas_result": {
+        const resolve = pendingCanvas.get(frame.id);
+        if (resolve !== undefined) {
+          pendingCanvas.delete(frame.id);
+          resolve(frame);
+        }
+        return;
+      }
+      case "error":
+        return;
+      default:
+        return;
+    }
+  });
 
-socket.addEventListener("close", () => {
-  record({ type: "__exit", pid: process.pid, reason: "link closed" });
-  process.exit(0);
-});
+  socket.addEventListener("close", () => {
+    record({ type: "__closed", pid: process.pid, dials });
+    // the pane is going away, or nobody is left to dial: this session is over
+    if (leaving || dials >= REDIAL_TRIES) {
+      record({ type: "__exit", pid: process.pid, reason: "link closed" });
+      process.exit(0);
+    }
+    setTimeout(dial, REDIAL_MS);
+  });
 
-socket.addEventListener("error", (err) => {
-  record({ type: "__error", message: String(err.message ?? "link error") });
-});
+  socket.addEventListener("error", (err) => {
+    record({ type: "__error", message: String(err.message ?? "link error") });
+  });
+}
+
+dial();
 
 let buf = "";
 process.stdin.setEncoding("utf8");

@@ -9,12 +9,16 @@
  *   1. every agent-link frame, both directions, round-tripped through
  *      `parseAgentToServerMsg` / `parseServerToAgentMsg` — accepted whole, and
  *      rejected when the worktree it is about is missing or empty
- *   2. every browser frame through `parseClientMsg`, the same way, plus the
- *      frames a steering Shape used to send and this one cannot parse at all
+ *   2. every browser frame through `parseClientMsg` — the four a canvas has
+ *      left, one of them the active/inactive mark — the same way, plus the
+ *      frames a steering, launching Shape used to send and this one cannot
+ *      parse at all
  *   3. `openSqliteStorage`: worktree-keyed graphs, revisions and audit lines,
- *      the v1 → v2 migration that puts a pre-worktree canvas on the main
- *      worktree of its project, and `adoptLegacyKey` moving a canvas off the
- *      project key an older Shape derived from a worktree's directory
+ *      the v1 → v2 → v3 migrations (a v1 database walks both steps, a v2 one
+ *      only the second) that put a pre-worktree canvas on the main worktree of
+ *      its project and give every stored project a status, and
+ *      `adoptLegacyKey` moving a canvas off the project key an older Shape
+ *      derived from a worktree's directory
  *   4. every loopback frame through `parseLinkMsg`, including the `delivered`
  *      receipt a harness on an older integration still sends: it parses, and
  *      `ExternalIo` then drops it without an answer
@@ -95,18 +99,6 @@ const TOOLS = {
     { id: "claude", label: "Claude Code", path: "/usr/local/bin/claude", version: null },
   ],
 };
-/** one session somebody started themselves, as the agent's scan reports it */
-const DISCOVERED = {
-  harness: "omp",
-  pid: 4242,
-  command: "omp",
-  cwd: WT2,
-  sessionId: "s-9",
-  sessionFile: "/tmp/fake/s-9.jsonl",
-  startedAt: "2026-01-01T00:00:00.000Z",
-  resumeCommand: null,
-  attach: "socket",
-};
 const PROJECT = {
   key: "k-1",
   label: "repo",
@@ -136,10 +128,17 @@ const WORKTREES = [
     worktrees: WORKTREES,
     sessions: [{ worktree: WT, session: SESSION, backend: BACKEND, state: "idle" }],
     realities: { [WT]: REALITY },
-    discovered: [],
-    recentProjects: [WT],
   };
   roundTrip(parseAgentToServerMsg, "attach", attach, { worktreeScoped: false });
+  // an agent built against a Shape that discovered sessions and remembered
+  // recent projects still says both: it must not be refused for saying more
+  // than this build reads, and what it said is simply not in the frame
+  const older = parseAgentToServerMsg(JSON.stringify({ ...attach, discovered: [{ pid: 4242, cwd: WT2 }], recentProjects: [WT] }));
+  check(
+    "attach: an older agent's discoveries and recent projects are dropped, not refused",
+    older !== null && !("discovered" in older) && !("recentProjects" in older),
+    JSON.stringify(older === null ? null : Object.keys(older)),
+  );
 
   check(
     "attach: a worktree row without an id is refused",
@@ -236,20 +235,7 @@ roundTrip(parseAgentToServerMsg, "reality", { type: "reality", worktree: WT2, re
 roundTrip(parseAgentToServerMsg, "skeleton_result", { type: "skeleton_result", worktree: WT, id: "s-1", ops: [] });
 // project-wide answers stay project-wide: they are about the agent, not one harness
 roundTrip(parseAgentToServerMsg, "worktrees", { type: "worktrees", id: "w-1", worktrees: WORKTREES }, { worktreeScoped: false });
-// what the agent's scan found running on the machine, answered by request id
-roundTrip(parseAgentToServerMsg, "sessions", { type: "sessions", id: "d-1", sessions: [DISCOVERED] }, { worktreeScoped: false });
 roundTrip(parseAgentToServerMsg, "agent_error", { type: "agent_error", message: "no such worktree" }, { worktreeScoped: false });
-// the chooser's answer is about the machine, not about one variation
-roundTrip(parseAgentToServerMsg, "folder_picked", { type: "folder_picked", path: "/chosen/project" }, { worktreeScoped: false });
-roundTrip(parseAgentToServerMsg, "folder_picked cancelled", { type: "folder_picked", path: null }, { worktreeScoped: false });
-check(
-  "folder_picked: an empty path is neither an answer nor a folder",
-  parseAgentToServerMsg(JSON.stringify({ type: "folder_picked", path: "" })) === null,
-);
-check(
-  "folder_picked: a path that is not a string is refused",
-  parseAgentToServerMsg(JSON.stringify({ type: "folder_picked", path: 7 })) === null,
-);
 
 // ---------------------------------------------------------------------------
 // 2. Agent link: server → agent
@@ -265,35 +251,22 @@ roundTrip(
   { type: "canvas_result", id: "c-1", text: "applied 3 op(s);", isError: false },
   { worktreeScoped: false },
 );
-// the chooser is a dialog on the agent's machine: no worktree, no fields
-roundTrip(parseServerToAgentMsg, "pick_folder", { type: "pick_folder" }, { worktreeScoped: false });
-roundTrip(parseServerToAgentMsg, "discover", { type: "discover", id: "d-1" }, { worktreeScoped: false });
 // project-wide questions stay project-wide: they are about the agent's machine
 roundTrip(parseServerToAgentMsg, "list_worktrees", { type: "list_worktrees", id: "w-1" }, { worktreeScoped: false });
-// adopting a discovered session is retargeting onto its cwd: nothing is started
-roundTrip(parseServerToAgentMsg, "adopt", { type: "adopt", pid: 4242 }, { worktreeScoped: false });
 
-{
-  // the whole agent is retargeted BY PATH, and the path is all a switch says
-  roundTrip(parseServerToAgentMsg, "switch", { type: "switch", path: WT2 }, { worktreeScoped: false });
-  const extras = parseServerToAgentMsg(
-    JSON.stringify({ type: "switch", path: `  ${WT2}  `, backend: "claude", resumeSessionId: "r-1" }),
-  );
-  check(
-    "switch: the path is trimmed, and what an older Shape would have started with it is dropped",
-    JSON.stringify(extras) === JSON.stringify({ type: "switch", path: WT2 }),
-    JSON.stringify(extras),
-  );
-  check("switch: a blank path is refused", parseServerToAgentMsg(JSON.stringify({ type: "switch", path: "  " })) === null);
-  check(
-    "attached: a frame naming no room is refused",
-    parseServerToAgentMsg(JSON.stringify({ type: "attached", projectId: "" })) === null,
-  );
-  check(
-    "adopt: a pid that is not a whole positive number is refused",
-    parseServerToAgentMsg(JSON.stringify({ type: "adopt", pid: 0 })) === null &&
-      parseServerToAgentMsg(JSON.stringify({ type: "adopt", pid: 4.5 })) === null,
-  );
+check(
+  "attached: a frame naming no room is refused",
+  parseServerToAgentMsg(JSON.stringify({ type: "attached", projectId: "" })) === null,
+);
+// what a Shape that retargeted, picked, discovered and adopted sent down the
+// link: a project is a stored row now, and the agent serves the one it attached
+for (const [label, frame] of [
+  ["switch", { type: "switch", path: "/x" }],
+  ["adopt", { type: "adopt", pid: 42 }],
+  ["pick_folder", { type: "pick_folder" }],
+  ["discover", { type: "discover", id: "d-1" }],
+]) {
+  check(`the link refuses ${label}: the server cannot retarget an agent any more`, parseServerToAgentMsg(JSON.stringify(frame)) === null);
 }
 
 // ---------------------------------------------------------------------------
@@ -302,21 +275,37 @@ roundTrip(parseServerToAgentMsg, "adopt", { type: "adopt", pid: 4242 }, { worktr
 
 roundTrip(parseClientMsg, "diff", { type: "diff", worktree: WT2, revA: 1, revB: 4 });
 roundTrip(parseClientMsg, "focus_terminal", { type: "focus_terminal", worktree: WT });
-roundTrip(parseClientMsg, "switch_project", { type: "switch_project", path: "/elsewhere" }, { worktreeScoped: false });
 roundTrip(parseClientMsg, "select_project", { type: "select_project", projectId: "k-1" }, { worktreeScoped: false });
-// asking for the chooser carries nothing: the machine is the connection's
-roundTrip(parseClientMsg, "pick_folder", { type: "pick_folder" }, { worktreeScoped: false });
-roundTrip(parseClientMsg, "discover", { type: "discover" }, { worktreeScoped: false });
-roundTrip(parseClientMsg, "adopt", { type: "adopt", pid: 4242 }, { worktreeScoped: false });
-
-check(
-  "client switch_project: the path is trimmed, and a blank one is refused",
-  parseClientMsg(JSON.stringify({ type: "switch_project", path: "  /elsewhere  " }))?.path === "/elsewhere" &&
-    parseClientMsg(JSON.stringify({ type: "switch_project", path: "   " })) === null,
+// the whole of what a browser may do to the registry: mark a project active,
+// so the server holds a room for it, or inactive, so it keeps only its records
+roundTrip(
+  parseClientMsg,
+  "set_project_status inactive",
+  { type: "set_project_status", projectId: "k-1", status: "inactive" },
+  { worktreeScoped: false },
 );
+roundTrip(
+  parseClientMsg,
+  "set_project_status active",
+  { type: "set_project_status", projectId: "k-1", status: "active" },
+  { worktreeScoped: false },
+);
+
 check(
   "client select_project: a frame naming no room is refused",
   parseClientMsg(JSON.stringify({ type: "select_project", projectId: "" })) === null,
+);
+check(
+  "client set_project_status: a status Shape does not have is refused",
+  parseClientMsg(JSON.stringify({ type: "set_project_status", projectId: "k-1", status: "parked" })) === null &&
+    parseClientMsg(JSON.stringify({ type: "set_project_status", projectId: "k-1", status: "" })) === null &&
+    parseClientMsg(JSON.stringify({ type: "set_project_status", projectId: "k-1" })) === null &&
+    parseClientMsg(JSON.stringify({ type: "set_project_status", projectId: "k-1", status: 1 })) === null,
+);
+check(
+  "client set_project_status: a frame naming no project is refused",
+  parseClientMsg(JSON.stringify({ type: "set_project_status", projectId: "", status: "inactive" })) === null &&
+    parseClientMsg(JSON.stringify({ type: "set_project_status", status: "inactive" })) === null,
 );
 check(
   "client focus_terminal: a frame that names no variation is refused",
@@ -326,18 +315,18 @@ check(
   "client diff: a worktree alone is not a diff",
   parseClientMsg(JSON.stringify({ type: "diff", worktree: WT, revA: 1 })) === null,
 );
-check(
-  "client adopt: a pid that is not a whole positive number is refused",
-  parseClientMsg(JSON.stringify({ type: "adopt", pid: 0 })) === null &&
-    parseClientMsg(JSON.stringify({ type: "adopt", pid: -1 })) === null,
-);
-// the two frames a steering, launching Shape took from the browser: this one
-// has no reader for either, so they do not even parse
+// the frames a steering, launching Shape took from the browser: this one has a
+// reader for none of them, so they do not even parse. The browser cannot open,
+// pick, discover or adopt a project any more — it marks one active or inactive
 for (const [label, frame] of [
   ["utterance", { type: "utterance", worktree: WT, referent: null, text: "build it" }],
   ["open_worktree", { type: "open_worktree", path: WT2, backend: "omp" }],
+  ["switch_project", { type: "switch_project", path: "/elsewhere" }],
+  ["pick_folder", { type: "pick_folder" }],
+  ["discover", { type: "discover" }],
+  ["adopt", { type: "adopt", pid: 4242 }],
 ]) {
-  check(`client refuses ${label}: the browser cannot ask for a turn any more`, parseClientMsg(JSON.stringify(frame)) === null);
+  check(`client refuses ${label}: there is no reader for it`, parseClientMsg(JSON.stringify(frame)) === null);
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +375,9 @@ const dir = mkdtempSync(join(tmpdir(), "vh-wire-"));
     tenant: "local",
     worktrees: WORKTREES,
     sessions: [{ worktree: WT, session: SESSION, backend: BACKEND, state: "idle" }],
+    liveSessions: 1,
+    status: "active",
+    statusChangedAt: "2026-01-01T00:00:00.000Z",
     lastSeen: "2026-01-01T00:00:00.000Z",
   });
   const rows = await storage.listProjects();
@@ -393,6 +385,11 @@ const dir = mkdtempSync(join(tmpdir(), "vh-wire-"));
     "a registry row carries every worktree and every running harness",
     rows.length === 1 && rows[0].worktrees.length === 2 && rows[0].sessions[0]?.worktree === WT,
     JSON.stringify(rows[0]?.sessions),
+  );
+  check(
+    "and the columns a project with no room is listed by: its status, when that was set, and how many worktrees had a session",
+    rows[0]?.status === "active" && rows[0]?.statusChangedAt === "2026-01-01T00:00:00.000Z" && rows[0]?.liveSessions === 1,
+    JSON.stringify({ status: rows[0]?.status, statusChangedAt: rows[0]?.statusChangedAt, liveSessions: rows[0]?.liveSessions }),
   );
 
   // the only line a room writes by itself now: the skeleton it drew on an
@@ -415,12 +412,12 @@ const dir = mkdtempSync(join(tmpdir(), "vh-wire-"));
     JSON.stringify(audit),
   );
   const version = db.prepare("PRAGMA user_version").get();
-  check("a fresh database is written at schema 2", version.user_version === 2, JSON.stringify(version));
+  check("a fresh database is written at schema 3", version.user_version === 3, JSON.stringify(version));
   db.close();
 }
 
 // ---------------------------------------------------------------------------
-// 5. Storage: the v1 → v2 migration
+// 5. Storage: the v1 → v3 migration, walked in two steps
 // ---------------------------------------------------------------------------
 
 {
@@ -530,7 +527,7 @@ CREATE TABLE audit (
   storage.close();
 
   const db = new DatabaseSync(file);
-  check("the migrated database reports schema 2", db.prepare("PRAGMA user_version").get().user_version === 2);
+  check("the migrated database reports schema 3", db.prepare("PRAGMA user_version").get().user_version === 3);
   check(
     "a post-migration save updates the migrated row instead of adding one",
     db.prepare("SELECT count(*) AS n FROM graphs WHERE tenant = ? AND key = ?").get("local", "k-old").n === 1,
@@ -543,7 +540,7 @@ CREATE TABLE audit (
   );
   db.close();
 
-  // re-opening a database already at 2 must not migrate a second time
+  // re-opening a database already at 3 must not migrate a second time
   const reopened = openSqliteStorage(file);
   const again = await reopened.loadGraph("local", "k-old", real);
   check("re-opening a migrated database is a no-op", again?.rev === 4, JSON.stringify(again));
@@ -551,7 +548,177 @@ CREATE TABLE audit (
 }
 
 // ---------------------------------------------------------------------------
-// 6. Storage: adopting a canvas stored under an older project key
+// 6. Storage: the v2 → v3 migration
+// ---------------------------------------------------------------------------
+
+{
+  // A v2 database predates the registry's status: it kept a row for every
+  // project an agent had attached, and each of those was a project the operator
+  // was working in — so the upgrade owes all of them the active status they
+  // were never stored with, and the moment we learned it.
+  const LAST_SEEN = "2026-01-01T00:00:00.000Z";
+  /** the stamps have millisecond resolution, so a change must land after one */
+  const nextMs = () => new Promise((r) => setTimeout(r, 2));
+  const file = join(dir, "v2.db");
+  const old = new DatabaseSync(file);
+  old.exec(`
+CREATE TABLE projects (
+  tenant     TEXT NOT NULL,
+  key        TEXT NOT NULL,
+  project    TEXT NOT NULL,
+  sessions   TEXT NOT NULL,
+  worktrees  TEXT NOT NULL,
+  last_seen  TEXT NOT NULL,
+  PRIMARY KEY (tenant, key)
+);
+CREATE TABLE graphs (
+  tenant     TEXT NOT NULL,
+  key        TEXT NOT NULL,
+  worktree   TEXT NOT NULL,
+  doc        TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (tenant, key, worktree)
+);
+CREATE TABLE revisions (
+  tenant   TEXT NOT NULL,
+  key      TEXT NOT NULL,
+  worktree TEXT NOT NULL,
+  rev      INTEGER NOT NULL,
+  at       TEXT NOT NULL,
+  snapshot TEXT NOT NULL,
+  PRIMARY KEY (tenant, key, worktree, rev)
+);
+CREATE TABLE audit (
+  seq      INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant   TEXT NOT NULL,
+  key      TEXT NOT NULL,
+  worktree TEXT NOT NULL,
+  at       TEXT NOT NULL,
+  entry    TEXT NOT NULL
+);
+`);
+  const insertProject = old.prepare(
+    "INSERT INTO projects (tenant, key, project, sessions, worktrees, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
+  );
+  insertProject.run(
+    "local",
+    "k-v2",
+    JSON.stringify({ ...PROJECT, key: "k-v2" }),
+    JSON.stringify([{ worktree: WT, session: SESSION, backend: BACKEND, state: "idle" }]),
+    JSON.stringify(WORKTREES),
+    LAST_SEEN,
+  );
+  insertProject.run(
+    "local",
+    "k-v2-other",
+    JSON.stringify({ ...PROJECT, key: "k-v2-other" }),
+    "[]",
+    JSON.stringify([WORKTREES[1]]),
+    LAST_SEEN,
+  );
+  old
+    .prepare("INSERT INTO graphs (tenant, key, worktree, doc, updated_at) VALUES (?, ?, ?, ?, ?)")
+    .run("local", "k-v2", WT, JSON.stringify({ rev: 7, nodes: [{ id: "v2-bubble" }], edges: [] }), LAST_SEEN);
+  old.exec("PRAGMA user_version = 2");
+  old.close();
+
+  const storage = openSqliteStorage(file);
+  const listed = await storage.listProjects();
+  const migrated = listed.find((row) => row.project.key === "k-v2");
+  check(
+    "every project of a v2 database is active after the upgrade",
+    listed.length === 2 && listed.every((row) => row.status === "active"),
+    JSON.stringify(listed.map((row) => `${row.project.key}:${row.status}`)),
+  );
+  check(
+    "and its status carries the stamp the migration wrote, not the empty column it added",
+    // `parseRow` answers `lastSeen` for a row whose stamp is empty, so a stamp
+    // that is merely non-empty proves nothing: it must not be that fallback
+    (migrated?.statusChangedAt ?? "").length > 0 && migrated?.statusChangedAt !== LAST_SEEN,
+    JSON.stringify(migrated?.statusChangedAt),
+  );
+  check(
+    "a v2 row counted no live sessions, so the switcher is shown none",
+    migrated?.liveSessions === 0,
+    JSON.stringify(migrated?.liveSessions),
+  );
+
+  const stampedAt = migrated?.statusChangedAt;
+  await nextMs();
+  check("a migrated project can be marked inactive", (await storage.setProjectStatus("local", "k-v2", "inactive")) === true);
+  const parked = (await storage.listProjects()).find((row) => row.project.key === "k-v2");
+  check(
+    "the mark is what the registry reads back, with the moment it changed",
+    parked?.status === "inactive" && parked?.statusChangedAt !== stampedAt,
+    JSON.stringify([parked?.status, parked?.statusChangedAt, stampedAt]),
+  );
+  const changedAt = parked?.statusChangedAt;
+  await nextMs();
+  check(
+    "asking for the status a project already has is still answered for the row",
+    (await storage.setProjectStatus("local", "k-v2", "inactive")) === true,
+  );
+  const confirmed = (await storage.listProjects()).find((row) => row.project.key === "k-v2");
+  check(
+    "and confirming a status leaves the moment it CHANGED where it was",
+    confirmed?.statusChangedAt === changedAt,
+    JSON.stringify([confirmed?.statusChangedAt, changedAt]),
+  );
+  check(
+    "a status cannot be set on a project no row has",
+    (await storage.setProjectStatus("local", "k-never-attached", "inactive")) === false,
+  );
+
+  // the room's own save, which happens whenever its worktrees or sessions
+  // move: it must not undo the decision the operator just made
+  await storage.saveProject({
+    project: { ...PROJECT, key: "k-v2" },
+    tenant: "local",
+    worktrees: WORKTREES,
+    sessions: [],
+    liveSessions: 2,
+    status: "active",
+    statusChangedAt: new Date().toISOString(),
+    lastSeen: "2026-02-01T00:00:00.000Z",
+  });
+  const saved = (await storage.listProjects()).find((row) => row.project.key === "k-v2");
+  check(
+    "a save does not resurrect a parked project: only a status change moves a status",
+    saved?.status === "inactive" && saved?.statusChangedAt === changedAt,
+    JSON.stringify([saved?.status, saved?.statusChangedAt]),
+  );
+  check(
+    "what the save DOES write lands: the row it wrote is the row that is read",
+    saved?.liveSessions === 2 && saved?.lastSeen === "2026-02-01T00:00:00.000Z",
+    JSON.stringify([saved?.liveSessions, saved?.lastSeen]),
+  );
+  const graph = await storage.loadGraph("local", "k-v2", WT);
+  check("a canvas stored under v2 comes through the migration untouched", graph?.rev === 7 && graph?.nodes[0]?.id === "v2-bubble", JSON.stringify(graph));
+  storage.close();
+
+  const db = new DatabaseSync(file);
+  check("the migrated database reports schema 3", db.prepare("PRAGMA user_version").get().user_version === 3);
+  db.close();
+
+  // re-opening a database already at 3 must not migrate a second time: the
+  // columns the step adds are already there
+  const reopened = openSqliteStorage(file);
+  const after = await reopened.listProjects();
+  check(
+    "re-opening a migrated database is a no-op",
+    after.length === 2 &&
+      after.find((row) => row.project.key === "k-v2")?.status === "inactive" &&
+      after.find((row) => row.project.key === "k-v2-other")?.status === "active",
+    JSON.stringify(after.map((row) => `${row.project.key}:${row.status}`)),
+  );
+  reopened.close();
+  const reread = new DatabaseSync(file);
+  check("and it is still at schema 3", reread.prepare("PRAGMA user_version").get().user_version === 3);
+  reread.close();
+}
+
+// ---------------------------------------------------------------------------
+// 7. Storage: adopting a canvas stored under an older project key
 // ---------------------------------------------------------------------------
 
 {
@@ -578,6 +745,9 @@ CREATE TABLE audit (
     tenant: "local",
     worktrees: [WORKTREES[0]],
     sessions: [],
+    liveSessions: 0,
+    status: "active",
+    statusChangedAt: "2026-01-01T00:00:00.000Z",
     lastSeen: "2026-01-01T00:00:00.000Z",
   });
   // and what the first attach on the new key wrote for the same worktree
@@ -645,6 +815,9 @@ CREATE TABLE audit (
     tenant: "local",
     worktrees: [WORKTREES[1]],
     sessions: [],
+    liveSessions: 0,
+    status: "active",
+    statusChangedAt: "2026-01-01T00:00:00.000Z",
     lastSeen: "2026-01-01T00:00:00.000Z",
   });
   check("an empty canvas under the new key is replaced", (await storage.adoptLegacyKey("local", OLD3, "k-2", WT2)) === true);
@@ -674,7 +847,7 @@ CREATE TABLE audit (
 }
 
 // ---------------------------------------------------------------------------
-// 7. Loopback link: harness-side process → agent
+// 8. Loopback link: harness-side process → agent
 // ---------------------------------------------------------------------------
 
 const CWD = "/repo/main";
@@ -784,7 +957,7 @@ linkTrip("link bye", { type: "bye", cwd: CWD, reason: "the user quit the tui" })
 }
 
 // ---------------------------------------------------------------------------
-// 8. The fakes, for real: fake-omp-tui on a bare link
+// 9. The fakes, for real: fake-omp-tui on a bare link
 // ---------------------------------------------------------------------------
 
 const SCRIPTS = dirname(fileURLToPath(import.meta.url));
@@ -925,7 +1098,7 @@ const eventsIn = (cwd) => linkFrames.filter((f) => f.cwd === cwd && f.type === "
 }
 
 // ---------------------------------------------------------------------------
-// 9. The fakes, for real: fake-herdr over its socket
+// 10. The fakes, for real: fake-herdr over its socket
 // ---------------------------------------------------------------------------
 
 /** every request this smoke sends, so herdr's log can be read back in order */
@@ -1154,7 +1327,7 @@ function herdrStream(path, subscriptions) {
 }
 
 // ---------------------------------------------------------------------------
-// 10. Which terminal application hosts the herdr client
+// 11. Which terminal application hosts the herdr client
 // ---------------------------------------------------------------------------
 // Focusing a herdr tab is invisible unless the terminal APP comes forward too,
 // and which app that is comes out of the process table: the client's parent

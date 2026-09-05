@@ -10,7 +10,8 @@
  *   browser upgrade      — no `?token=` is a 401 at the upgrade, not a frame
  *   agent upgrade        — a tokenless agent exits 1 with the 401 message, no retry
  *   tenancy             — each browser sees only its own tenant's rooms, and
- *                         select_project across tenants is an unknown project
+ *                         neither select_project nor set_project_status can
+ *                         name another tenant's project
  *   shape login         — servers.json (0600) alone authenticates an agent
  *   audit               — the mechanical skeleton the room draws by itself is
  *                         the ONE thing it files, under the caller's tenant
@@ -148,7 +149,7 @@ async function seedWorkspace(dir, scope) {
 const targetA = await mkdtemp(join(tmpdir(), "vh-auth-a-"));
 const targetB = await mkdtemp(join(tmpdir(), "vh-auth-b-"));
 const targetC = await mkdtemp(join(tmpdir(), "vh-auth-c-"));
-/** SHAPE_HOME for everything that must NOT find a saved token (recents only) */
+/** SHAPE_HOME for everything that must NOT find a saved token; a local database and a project's directive land here too */
 const fakeHome = await mkdtemp(join(tmpdir(), "vh-auth-home-"));
 /** a second SHAPE_HOME, written by `shape login` and read by exactly one agent */
 const loginHome = await mkdtemp(join(tmpdir(), "vh-auth-login-"));
@@ -190,13 +191,13 @@ const spawned = [];
 const browsers = [];
 
 /**
- * Starts one of the binaries with SHAPE_HOME pointed at a throwaway dir (recents
- * and saved tokens must not touch the real home). `SHAPE_TOKEN` is stripped
- * unless a step passes one: the operator's own env must not authenticate the
- * child this smoke expects to be refused. cwd stays packages/bridge, so the
- * binaries resolve against this package. `log` accumulates both streams — the
- * banners and refusals the steps wait on are on stderr, but `shape login`
- * reports where it saved on stdout.
+ * Starts one of the binaries with SHAPE_HOME pointed at a throwaway dir (a
+ * saved token, a local database and a project's directive must not touch the
+ * real home). `SHAPE_TOKEN` is stripped unless a step passes one: the
+ * operator's own env must not authenticate the child this smoke expects to be
+ * refused. cwd stays packages/bridge, so the binaries resolve against this
+ * package. `log` accumulates both streams — the banners and refusals the steps
+ * wait on are on stderr, but `shape login` reports where it saved on stdout.
  *
  * The automatic map is deliberately LEFT ON: the skeleton the room draws for a
  * project whose canvas nobody has drawn is the only write the server makes by
@@ -443,6 +444,24 @@ try {
     "select_project on another tenant's project is refused as an unknown project",
     crossError.message.includes("unknown project"),
     crossError.message,
+  );
+
+  // The other input a browser has is the status of a project, and it is scoped
+  // exactly like the one above: an id this tenant has no row for is unknown,
+  // whoever else holds it. A refusal here is the whole answer — the list that
+  // says the project was left alone is the first tenant's own, below.
+  const crossFlipAt = mark(wireB);
+  send(wireB, { type: "set_project_status", projectId: projectAId, status: "inactive" });
+  const crossFlip = await frameAfter(
+    wireB,
+    crossFlipAt,
+    (f) => f.type === "error",
+    "error for parking the other tenant's project",
+  );
+  check(
+    "set_project_status on another tenant's project is refused as an unknown project",
+    crossFlip.message === `unknown project ${projectAId}`,
+    crossFlip.message,
   );
 
   const leakAt = mark(wireA);

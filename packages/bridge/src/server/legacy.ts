@@ -105,7 +105,14 @@ async function importShapeDir(
  */
 export async function importLegacyProject(storage: Storage, tenant: string, project: AgentProject): Promise<void> {
   const worktree = mainWorktreeOf(project.cwd);
-  if ((await storage.loadGraph(tenant, project.key, worktree)) !== null) return;
+  const stored = await storage.loadGraph(tenant, project.key, worktree);
+  // A canvas somebody has drawn under the current key is the newer truth and
+  // stops the import; an EMPTY row does not. A project's room is now opened by
+  // the discovery scan, before any agent attaches, and closing its states
+  // files an empty canvas for every worktree — so "the database has a row" no
+  // longer means "this project has been imported", and reading it that way
+  // would cost every upgrading user the canvas they drew.
+  if (stored !== null && Array.isArray(stored.nodes) && stored.nodes.length > 0) return;
   const dir = join(project.cwd, ".shape");
   let imported: boolean;
   try {

@@ -417,12 +417,36 @@ export class ShapeServer {
     // switcher reads for it; a stale one costs a project
     void room.saveProject();
     this.#remember(key, room.row());
+    // The attach names the keys an older Shape derived for this repo's
+    // worktrees, and `retarget` has just moved their canvases onto the current
+    // one (the storage drops the legacy registry row with the last of them). A
+    // restart had meanwhile opened a room for such a row, and that room is now
+    // this very project a second time: it is FORGOTTEN, never closed, because
+    // closing it would file the canvases it no longer owns back under the key
+    // they were adopted from.
+    const orphaned: WebSocket[] = [];
+    for (const legacy of Object.values(msg.project.legacyKeys)) {
+      const stale = `${tenant}/${legacy}`;
+      if (stale === key) continue;
+      // the storage drops the legacy row whether or not it had a room (a parked
+      // one has none), and the switcher must not go on listing it
+      this.#registry.delete(stale);
+      if (!this.#rooms.delete(stale)) continue;
+      if (this.#defaultKeys.get(tenant) === stale) this.#defaultKeys.set(tenant, key);
+      orphaned.push(...this.#hub.leave(stale));
+    }
 
     const hello = await room.hello();
     // a fresh room's browsers were greeted on connect (or are owed one below);
     // only a re-attach onto a room that was already there is news to sockets
     // already joined
     if (existing !== undefined) this.#hub.broadcastTo(key, hello);
+    // the browsers that were watching this project under its old key are on it
+    // under the new one, and hear the same greeting
+    for (const socket of orphaned) {
+      this.#hub.join(socket, key);
+      if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(hello));
+    }
     // the sockets that beat the first attach are joined here and greeted once
     this.#hub.greetPending(tenant, key, hello);
     this.#broadcastProjects(tenant);

@@ -1,15 +1,13 @@
 #!/usr/bin/env node
 /**
  * Bridge control CLI — drives a *running* Shape bridge over its WebSocket, for
- * scripts and skills that need to read what the bridge sees, or point it at
- * another project, without the web UI. Shape is a read-only picture: nothing
- * here starts a session, prompts one or stops one.
+ * scripts and skills that need to read what the bridge sees, or mark one of its
+ * projects active or inactive, without the web UI. Shape is a read-only
+ * picture: nothing here starts a session, prompts one or stops one.
  *
  *   node packages/bridge/scripts/ctl.mjs status
- *   node packages/bridge/scripts/ctl.mjs switch-project <abs-path>
+ *   node packages/bridge/scripts/ctl.mjs set-project-status <projectId> <active|inactive>
  *   node packages/bridge/scripts/ctl.mjs focus-terminal [--worktree <id>]
- *   node packages/bridge/scripts/ctl.mjs discover
- *   node packages/bridge/scripts/ctl.mjs adopt <pid>
  *
  * A repo's variations each have their own canvas, so a command that acts on one
  * takes `--worktree <id>` (an id `status` lists); without it the main worktree —
@@ -18,9 +16,6 @@
  * Global: --port <n> (default 4400). One JSON line on stdout.
  * Exit codes: 0 ok; 1 bridge rejected the request; 2 no bridge listening.
  */
-
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
 
 import WebSocket from "ws";
 
@@ -39,25 +34,32 @@ const argv = process.argv.slice(2);
 let command = null;
 let port = DEFAULT_PORT;
 let worktree;
-let targetPath;
+/** the command's own positional arguments, in the order they were given */
+const rest = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--port") port = Number(argv[++i]);
   else if (a === "--worktree") worktree = argv[++i];
   else if (command === null) command = a;
-  else if (targetPath === undefined) targetPath = a;
+  else if (rest.length < 2) rest.push(a);
   else out(1, { ok: false, error: `unexpected argument: ${a}` });
 }
-if (!["status", "switch-project", "focus-terminal", "discover", "adopt"].includes(command ?? "")) {
+if (!["status", "set-project-status", "focus-terminal"].includes(command ?? "")) {
   out(1, {
     ok: false,
     error:
-      "usage: ctl.mjs [--port <n>] status | switch-project <abs-path> | focus-terminal [--worktree <id>] | discover | adopt <pid>",
+      "usage: ctl.mjs [--port <n>] status | set-project-status <projectId> <active|inactive> | focus-terminal [--worktree <id>]",
   });
 }
 if (!Number.isInteger(port) || port <= 0) out(1, { ok: false, error: "invalid --port" });
-if (command === "switch-project" && !targetPath) out(1, { ok: false, error: "switch-project needs a path" });
-if (command === "adopt" && !/^\d+$/.test(targetPath ?? "")) out(1, { ok: false, error: "adopt needs a pid" });
+const [projectId, wanted] = rest;
+if (command === "set-project-status") {
+  if (projectId === undefined) out(1, { ok: false, error: "set-project-status needs a project id (`status` lists them)" });
+  // the only two states a project has: anything else is a caller inventing one
+  if (wanted !== "active" && wanted !== "inactive") {
+    out(1, { ok: false, error: "set-project-status needs a status: active or inactive" });
+  }
+}
 
 // --- connection ------------------------------------------------------------
 const frames = [];
@@ -95,18 +97,29 @@ function nextFrame(predicate, timeoutMs) {
 await new Promise((resolve) => socket.once("open", resolve));
 clearTimeout(connectDeadline);
 
-// every command starts from the bridge's hello for this connection
+// Every command starts from the bridge's hello for this connection — except
+// `set-project-status`, which must work on a bridge that has nothing to greet
+// with: a bridge whose every project is inactive holds no room, and marking one
+// active again is exactly the request that fixes that. The socket is open by
+// here, so an ungreeted connection is a bridge with no active project, not a
+// missing one.
 const hello = frames.find((f) => f.type === "hello") ?? (await nextFrame((f) => f.type === "hello", CONNECT_TIMEOUT_MS));
-if (!hello) out(2, { ok: false, error: "no bridge" });
+if (!hello && command !== "set-project-status") {
+  out(1, { ok: false, error: "the bridge holds no active project to report on" });
+}
 
-/** the bridge lists worktrees by realpath; a path only compares to them resolved the same way */
-const realpath = (path) => {
-  try {
-    return realpathSync(path);
-  } catch {
-    return path;
-  }
-};
+/**
+ * One row of the switcher, as a caller of this CLI needs it: the `projectId`
+ * `set-project-status` takes, and what that project is doing.
+ */
+const summarize = (project) => ({
+  projectId: project.projectId,
+  label: project.label,
+  status: project.status,
+  liveSessions: project.liveSessions,
+  manager: project.manager,
+  caughtUp: project.caughtUp,
+});
 
 /**
  * The variation a scoped command acts on: `--worktree` (an id, a path or a
@@ -131,6 +144,11 @@ if (command === "status") {
     ok: true,
     cwd,
     agentConnected,
+    // the project this connection is watching, and every project the bridge
+    // holds for it: their ids are what `set-project-status` is given, and a
+    // caller has no other way to learn them
+    projectId: hello.projectId,
+    projects: hello.projects.map((project) => ({ ...summarize(project), cwd: project.cwd })),
     // whether Shape can take the user to a session's own terminal here, and
     // which harnesses are installed where the agent runs
     launcher: hello.tools?.launcher ?? "none",
@@ -156,24 +174,24 @@ if (command === "status") {
   });
 }
 
-if (command === "switch-project") {
-  // A path inside the project the bridge is already on is a VARIATION, not a
-  // retarget: nothing is dropped and nothing is opened, the agent only
-  // refreshes its worktree list, and the room reports that as a fresh
-  // `session`. Another repo is the real switch, and it re-hellos — so which
-  // frame settles this command depends on which of the two was asked for.
-  const asked = realpath(resolve(targetPath));
-  const variation = hello.session.worktrees.some((w) => asked === w.path || asked.startsWith(`${w.path}/`));
-  socket.send(JSON.stringify({ type: "switch_project", path: targetPath }));
-  // a retarget forgets every observed session, opens the new project and
-  // re-extracts its reality before it re-attaches — allow time
-  const result = await nextFrame(
-    (f) => f.type === "hello" || (variation && f.type === "session") || (f.type === "error" && /^switch_project/.test(f.message)),
-    60_000,
-  );
+if (command === "set-project-status") {
+  // The same status again is nothing at all on the wire — the server sends a
+  // list only when something moved — so a caller asking for what is already
+  // true is answered from the list this connection was greeted with, instead
+  // of waiting for a frame nobody is going to send. An ungreeted connection
+  // has no list to check it against, and asks.
+  const listed = hello ? hello.projects : null;
+  const known = listed?.find((project) => project.projectId === projectId) ?? null;
+  if (known?.status === wanted) out(0, { ok: true, projects: listed.map(summarize) });
+  socket.send(JSON.stringify({ type: "set_project_status", projectId, status: wanted }));
+  // Marking a project inactive closes its room and marking it active reopens
+  // it from the registry, so the answer is a fresh list — broadcast to every
+  // browser of the tenant, this one included. The only refusal there is, an id
+  // no project of this tenant has, comes back to this socket alone.
+  const result = await nextFrame((f) => f.type === "projects" || f.type === "error", 10_000);
   if (!result) out(1, { ok: false, error: "timed out waiting for the bridge" });
   if (result.type === "error") out(1, { ok: false, error: result.message });
-  out(0, { ok: true, cwd: result.session.cwd });
+  out(0, { ok: true, projects: result.projects.map(summarize) });
 }
 
 if (command === "focus-terminal") {
@@ -193,46 +211,4 @@ if (command === "focus-terminal") {
   if (rejection) out(1, { ok: false, error: rejection.message });
   const running = hello.session.sessions.find((s) => s.worktree === target) ?? null;
   out(0, { ok: true, worktree: target, terminal: running?.backend.capabilities.terminal ?? null });
-}
-
-if (command === "discover") {
-  socket.send(JSON.stringify({ type: "discover" }));
-  // a scan is `ps` + a walk of every harness's session store
-  const result = await nextFrame((f) => f.type === "sessions", 10_000);
-  if (!result) out(1, { ok: false, error: "timed out waiting for a sessions frame" });
-  out(0, {
-    ok: true,
-    count: result.sessions.length,
-    sessions: result.sessions.map((s) => ({
-      harness: s.harness,
-      pid: s.pid,
-      cwd: s.cwd,
-      sessionId: s.sessionId,
-      startedAt: s.startedAt,
-      attach: s.attach,
-    })),
-  });
-}
-
-if (command === "adopt") {
-  socket.send(JSON.stringify({ type: "adopt", pid: Number(targetPath) }));
-  // adopt is a project switch onto the directory that session runs in, and
-  // nothing else: the same budget as switch-project. A session already inside
-  // this repo ends in a refreshed `session` frame rather than a new hello.
-  const result = await nextFrame(
-    (f) =>
-      f.type === "hello" ||
-      f.type === "session" ||
-      (f.type === "error" && /^(adopt rejected|switch_project)/.test(f.message)),
-    60_000,
-  );
-  if (!result) out(1, { ok: false, error: "timed out waiting for the bridge to re-hello" });
-  if (result.type === "error") out(1, { ok: false, error: result.message });
-  const running = result.session.sessions[0] ?? null;
-  out(0, {
-    ok: true,
-    cwd: result.session.cwd,
-    backend: running?.backend.id ?? null,
-    sessionId: running?.session.sessionId ?? null,
-  });
 }
