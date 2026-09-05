@@ -14,14 +14,12 @@ import {
   type AgentSession,
   type AgentState,
   type BackendInfo,
-  type DiscoveredSession,
   type DriftMap,
   type EdgeKind,
   type EntityDelta,
   type GraphDelta,
   type GraphDoc,
   type GraphEdge,
-  type Harness,
   type IntentNode,
   type ManagerHandle,
   type ModelRole,
@@ -414,7 +412,8 @@ function asManagerHandle(value: unknown): ManagerHandle | null {
   const agentName = asStr(value.agentName);
   if (paneId === null || tabId === null || workspaceId === null || agentName === null) return null;
   if (paneId === "" || tabId === "" || workspaceId === "" || agentName === "") return null;
-  if (value.origin !== "found" && value.origin !== "opened") return null;
+  // "found" is the only origin there is: Shape never opens a manager
+  if (value.origin !== "found") return null;
   if (typeof value.shapeAware !== "boolean") return null;
   return { paneId, tabId, workspaceId, agentName, origin: value.origin, shapeAware: value.shapeAware };
 }
@@ -441,50 +440,32 @@ function asSessionInfo(value: unknown): SessionInfo | null {
   };
 }
 
-/** one row of the project picker: a room this server hosts */
+/** one row of the switcher: a project this server knows, whatever its status */
 function asProjectSummary(value: unknown): ProjectSummary | null {
   if (!isRecord(value)) return null;
   const projectId = asStr(value.projectId);
   const label = asStr(value.label);
   const cwd = asStr(value.cwd);
-  const harness = asStr(value.harness);
   const lastSeen = asStr(value.lastSeen);
-  if (projectId === null || label === null || cwd === null || harness === null || lastSeen === null) return null;
-  if (typeof value.agentConnected !== "boolean") return null;
-  return { projectId, label, cwd, harness, agentConnected: value.agentConnected, lastSeen };
-}
-
-const HARNESSES: readonly string[] = ["omp", "claude", "codex", "opencode", "cursor"];
-const SESSION_ATTACH: readonly string[] = ["socket", "daemon", "http", "none"];
-
-/** one row of the bridge's `discoverSessions()` scan */
-function asDiscoveredSession(value: unknown): DiscoveredSession | null {
-  if (!isRecord(value)) return null;
-  const harness = asStr(value.harness);
-  const command = asStr(value.command);
-  const attach = asStr(value.attach);
-  const cwd = asNullableStr(value.cwd);
-  const sessionId = asNullableStr(value.sessionId);
-  const sessionFile = asNullableStr(value.sessionFile);
-  const startedAt = asNullableStr(value.startedAt);
-  if (harness === null || !HARNESSES.includes(harness)) return null;
-  if (command === null || attach === null || !SESSION_ATTACH.includes(attach)) return null;
-  if (cwd === undefined || sessionId === undefined || sessionFile === undefined || startedAt === undefined) return null;
-  if (typeof value.pid !== "number" || !Number.isInteger(value.pid)) return null;
-  // null is a legitimate value here: not every harness can be resumed
-  const resumeCommand = value.resumeCommand === null ? null : asStrArray(value.resumeCommand);
-  if (resumeCommand === null && value.resumeCommand !== null) return null;
+  if (projectId === null || label === null || cwd === null || lastSeen === null) return null;
+  if (value.status !== "active" && value.status !== "inactive") return null;
+  const liveSessions = value.liveSessions;
+  const injected = value.injected;
+  // the counts drive a live dot and a tooltip, so a non-number is a frame this
+  // client cannot draw rather than a zero to invent
+  if (typeof liveSessions !== "number" || !Number.isInteger(liveSessions)) return null;
+  if (typeof injected !== "number" || !Number.isInteger(injected)) return null;
+  if (typeof value.manager !== "boolean" || typeof value.caughtUp !== "boolean") return null;
   return {
-    // membership checked above; the casts only name the narrowed unions
-    harness: harness as Harness,
-    pid: value.pid,
-    command,
+    projectId,
+    label,
     cwd,
-    sessionId,
-    sessionFile,
-    startedAt,
-    resumeCommand,
-    attach: attach as DiscoveredSession["attach"],
+    status: value.status,
+    liveSessions,
+    manager: value.manager,
+    caughtUp: value.caughtUp,
+    injected,
+    lastSeen,
   };
 }
 
@@ -518,25 +499,21 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
       const graphs = mapValues(raw.graphs, asGraphDoc);
       const session = asSessionInfo(raw.session);
       const agents = mapValues(raw.agents, asAgentState);
-      const recentProjects = asStrArray(raw.recentProjects);
       const projects = mapAll(raw.projects, asProjectSummary);
       const projectId = asStr(raw.projectId);
       const revisions = mapValues(raw.revisions, (item) => mapAll(item, asRevisionInfo));
-      const sessions = mapAll(raw.sessions, asDiscoveredSession);
       const tools = asProjectTools(raw.tools);
-      if (graphs === null || session === null || agents === null || recentProjects === null) return null;
-      if (revisions === null || sessions === null || projects === null || projectId === null) return null;
+      if (graphs === null || session === null || agents === null) return null;
+      if (revisions === null || projects === null || projectId === null) return null;
       if (tools === null) return null;
       return {
         type: "hello",
         graphs,
         session,
         agents,
-        recentProjects,
         projects,
         projectId,
         revisions,
-        sessions,
         tools,
       };
     }
@@ -557,21 +534,9 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
       if (worktree === null || reason === null) return null;
       return { type: "session_stopped", worktree, reason };
     }
-    case "folder_picked": {
-      // null is the answer, not a missing field: it is how the agent reports
-      // that the person closed the chooser. An empty string is neither an
-      // answer nor a path, so it is a malformed frame like any other.
-      if (raw.path === null) return { type: "folder_picked", path: null };
-      const path = asStr(raw.path);
-      return path === null || path === "" ? null : { type: "folder_picked", path };
-    }
     case "projects": {
       const projects = mapAll(raw.projects, asProjectSummary);
       return projects === null ? null : { type: "projects", projects };
-    }
-    case "sessions": {
-      const sessions = mapAll(raw.sessions, asDiscoveredSession);
-      return sessions === null ? null : { type: "sessions", sessions };
     }
     case "graph": {
       const worktree = asWorktreeId(raw.worktree);

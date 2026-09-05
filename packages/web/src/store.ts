@@ -5,10 +5,10 @@ import {
   type AgentSession,
   type AgentState,
   type BackendInfo,
-  type DiscoveredSession,
   type GraphDelta,
   type GraphDoc,
   type Layer,
+  type ProjectStatus,
   type ProjectSummary,
   type ProjectTools,
   type RevisionInfo,
@@ -268,29 +268,22 @@ export interface AppState {
    * parks the bubble you came from as the selection to come back to.
    */
   parked: Record<Layer, ViewPlace>;
-  /** project paths offered by the bridge in `hello`, most recent first */
-  recentProjects: string[];
   /**
-   * Every project this server hosts, newest-seen first — the picker's list.
-   * One entry in local mode; more once several agents attach to one server.
+   * Every project this server knows, both statuses, newest-seen first — the
+   * switcher's list. A project is here because a session reported in from it;
+   * its status decides whether it is one of the ones to switch between.
    */
   projects: ProjectSummary[];
   /** which of `projects` this socket is joined to; null until the first hello */
   projectId: string | null;
   /**
-   * The answer to one native-chooser request, one-shot: `path` is the folder to
-   * open, or null when the person closed the chooser. `seq` rises with every
-   * answer, so choosing the same folder twice still reads as two answers — and
-   * so a cancel, which opens nothing, still tells the button asking to stop
-   * saying "picking…". A cancel produces no `error` frame, so this is the only
-   * signal it leaves.
+   * The list as the server last stated it, kept while a `set_project_status`
+   * we already applied locally is still unanswered. The optimistic move is
+   * what makes marking a project feel done; this is what puts it back when the
+   * server refuses, and it is dropped the moment a `projects` frame states the
+   * truth.
    */
-  pickedFolder: { path: string | null; seq: number } | null;
-  /**
-   * Agent sessions running on this machine, newest first — the adopt list. The
-   * bridge refreshes it on every hello and on demand (`discover`).
-   */
-  sessions: DiscoveredSession[];
+  pendingStatus: { previous: ProjectSummary[] } | null;
   /** saved versions of each variation's canvas, oldest first */
   revisions: Record<string, RevisionInfo[]>;
   /**
@@ -339,6 +332,12 @@ export interface AppState {
   setFilter: (ids: ReadonlySet<string> | null) => void;
   /** pin the variation the header and the terminal button are about, or null for the default rule */
   setTarget: (worktree: string | null) => void;
+  /**
+   * Move a project's status in the list now, alongside the `set_project_status`
+   * frame that asks the server for it: the row is what the click was about, so
+   * it must not wait a round trip to move.
+   */
+  markProjectStatus: (projectId: string, status: ProjectStatus) => void;
   /** switch layers, restoring where that layer was last left */
   setView: (view: Layer) => void;
   /** product → build: show exactly the bubbles that make one capability real */
@@ -579,11 +578,9 @@ export const useApp = create<AppState>((set, get) => ({
   viewPinnedAt: 0,
   focus: null,
   parked: { product: NOWHERE, build: NOWHERE, infra: NOWHERE, correctness: NOWHERE },
-  recentProjects: [],
   projects: [],
   projectId: null,
-  pickedFolder: null,
-  sessions: [],
+  pendingStatus: null,
   revisions: {},
   filter: null,
   target: null,
@@ -608,8 +605,8 @@ export const useApp = create<AppState>((set, get) => ({
         // "where does this run" and "what proves it works", which are questions
         // about parts a reader has not met yet.
         const view: Layer = doc.nodes.some((node) => layerOf(node) === "product") ? "product" : "build";
-        // `hello` also arrives after a successful switch_project, so everything
-        // scoped to a session is dropped here. Carrying a selection, a focus or
+        // `hello` also arrives after a `select_project`, so everything scoped
+        // to a session is dropped here. Carrying a selection, a focus or
         // a transcript across projects would attribute one project's work to
         // another — worse than losing scroll position.
         set({
@@ -619,15 +616,11 @@ export const useApp = create<AppState>((set, get) => ({
           session: msg.session,
           tools: msg.tools,
           worktreeIds: sortedIds(msg.session.worktrees),
-          recentProjects: msg.recentProjects,
           projects: msg.projects,
           projectId: msg.projectId,
-          // the chooser's answer is spent by the switch this hello answers: a
-          // pick is read the moment it lands, one task before the socket
-          // carries the new project back, so clearing it here drops a spent
-          // one-shot rather than swallowing a live one
-          pickedFolder: null,
-          sessions: msg.sessions,
+          // the list this hello carries is the server's own word on every
+          // status, so an optimistic move waiting for one is answered
+          pendingStatus: null,
           revisions: msg.revisions,
           agents: msg.agents,
           filter,
@@ -714,9 +707,6 @@ export const useApp = create<AppState>((set, get) => ({
       case "revisions":
         set((s) => ({ revisions: { ...s.revisions, [msg.worktree]: msg.revisions } }));
         return;
-      case "sessions":
-        set({ sessions: msg.sessions });
-        return;
       case "session":
         // Session facts only: an agent attaching, detaching or opening another
         // variation must not cost the reader their selection, their focus or
@@ -766,13 +756,9 @@ export const useApp = create<AppState>((set, get) => ({
         set((s) => ({ now: { ...s.now, [msg.worktree]: msg.text } }));
         return;
       case "projects":
-        set({ projects: msg.projects });
-        return;
-      case "folder_picked":
-        // Every answer lands, cancel included: the reply is addressed to this
-        // client alone, and a cancel is what releases the button that asked.
-        // What it does NOT do is name a folder, so nothing gets opened.
-        set({ pickedFolder: { path: msg.path, seq: ++keySeq } });
+        // the server's own word on every project: it replaces the list whole,
+        // optimistic move and all
+        set({ projects: msg.projects, pendingStatus: null });
         return;
       case "delta": {
         // The answer is broadcast to every attached browser, so a client that
@@ -790,12 +776,19 @@ export const useApp = create<AppState>((set, get) => ({
         });
         return;
       }
-      case "error":
+      case "error": {
         // an unknown revision is answered with an error frame, so a request
         // still waiting for its answer is what just failed
         if (get().delta === null) set({ compare: null });
+        // A status the server refused never happened: the row goes back where
+        // it was rather than sitting in a state nothing on the server agrees
+        // with. Any error while one is in flight counts — the refusal is the
+        // only answer a rejected `set_project_status` gets.
+        const pending = get().pendingStatus;
+        if (pending !== null) set({ projects: pending.previous, pendingStatus: null });
         get().pushError(msg.message);
         return;
+      }
     }
   },
 
@@ -833,6 +826,15 @@ export const useApp = create<AppState>((set, get) => ({
     }),
 
   setTarget: (worktree) => set({ target: worktree }),
+
+  markProjectStatus: (projectId, status) =>
+    set((s) => ({
+      projects: s.projects.map((entry) => (entry.projectId === projectId ? { ...entry, status } : entry)),
+      // the FIRST list a flip left behind is the one to go back to: a second
+      // flip before the server answers must not make the first one the
+      // rollback target, or a refusal would restore a list nobody stated
+      pendingStatus: s.pendingStatus ?? { previous: s.projects },
+    })),
 
   // Asked for by hand, which is the whole difference between this and the
   // canvas following the work: it stamps the pin, so the next few frames of
@@ -1023,6 +1025,16 @@ export function selectRunningSession(state: AppState): WorktreeSession | null {
   const target = selectTarget(state);
   if (target === null || state.session === null) return null;
   return state.session.sessions.find((entry) => entry.worktree === target) ?? null;
+}
+
+/**
+ * The project this socket is joined to, as the server's own row of it — the
+ * one the switcher marks as current. Null on a socket joined to a project the
+ * list does not name, which is what a room closing under a browser looks like
+ * until the next `projects` frame.
+ */
+export function selectCurrentProject(state: AppState): ProjectSummary | null {
+  return state.projects.find((entry) => entry.projectId === state.projectId) ?? null;
 }
 
 /** the saved versions of the target variation's canvas, oldest first */

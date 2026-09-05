@@ -358,42 +358,99 @@ button {
   margin-bottom: var(--s4);
 }
 
-/* the picker stacks several titled sections, so its lists need the gap even
-   though `.project-recents` resets its own margin below; the other menus end
-   on their list and keep the reset */
+/* the switcher's list is followed by the "show inactive" toggle, so it needs
+   the section gap even though `.project-recents` resets its own margin below;
+   the other menus end on their list and keep the reset */
 .project > .project-menu .project-menu-title + * {
   margin-bottom: var(--s4);
 }
 
-/* the running-sessions section is folded: its heading is the toggle, and the
-   title's "space before the list" rule must not apply to the caret beside it */
-.project-fold {
+/* one project in the switcher: the row you switch to it with, and beside it
+   the one input Shape takes on a project — whether it is watched at all */
+.project-row {
   display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+
+.project-row .project-recent {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+/* an inactive project is not somewhere to go: its row states what is kept, and
+   the only thing to do with it sits beside it */
+.project-still {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: var(--s2);
-  width: 100%;
-  margin: 0 0 var(--s2);
-  padding: 0;
-  text-align: left;
+  min-width: 0;
+  padding: 6px var(--s2);
 }
 
-.project-fold .project-menu-title {
-  margin: 0;
-  transition: color var(--dur-fast) var(--ease);
-}
-
-.project-fold:hover .project-menu-title {
+.project-still .project-recent-name {
   color: var(--text-dim);
 }
 
-.project-fold-body {
+/* the row's second line: how much is alive in there, and the two facts that
+   change what watching it means — a manager dispatching in it, and a catch-up
+   still owed */
+.project-meta {
   display: flex;
-  flex-direction: column;
+  flex: none;
   gap: var(--s2);
+  width: 100%;
+  padding-left: 2px;
+  font-size: var(--t-xs);
+  color: var(--text-dim);
 }
 
-.project-rescan {
-  align-self: flex-start;
+/* nothing running is the quiet case, not the alarming one */
+.project-live[data-on="false"] {
+  color: var(--text-faint);
+}
+
+.project-mark {
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+
+/* a project still being caught up on is showing less than it holds, which is
+   worth the reader's attention rather than a grey aside */
+.project-behind {
+  color: var(--phase-building);
+}
+
+.project-act {
+  flex: none;
+  align-self: center;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  transition:
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.project-act:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+/* the inactive ones are kept, not gone: the count is on screen even at zero, so
+   "where did that project go" always has an answer to click */
+.project-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
   padding: 2px 0;
   font-family: var(--font-mono);
   font-size: var(--t-xs);
@@ -403,45 +460,13 @@ button {
   transition: color var(--dur-fast) var(--ease);
 }
 
-.project-rescan:hover {
+.project-toggle:hover:not(:disabled) {
   color: var(--text);
 }
 
-.project-sessions .project-session {
-  flex-wrap: wrap;
-}
-
-.session-harness {
-  flex: none;
-  padding: 1px 6px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-sm);
-  font-family: var(--font-mono);
-  font-size: var(--t-xs);
-  color: var(--text-dim);
-}
-
-.session-meta {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--t-xs);
-  color: var(--text-faint);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* what clicking will do, spelled out: adopting is not a preview */
-.session-hint {
-  flex: none;
-  width: 100%;
-  padding-left: 2px;
-  font-size: var(--t-xs);
-  color: var(--text-faint);
-}
-
-.project-session:hover .session-hint {
-  color: var(--text-dim);
+.project-toggle:disabled {
+  color: var(--line-strong);
+  cursor: default;
 }
 
 .project-recents {
@@ -499,57 +524,17 @@ button {
   color: var(--phase-built);
 }
 
-/* whether that project has an agent right now: a room whose picture is still
-   moving versus one that is frozen. Centred on purpose — the row is
-   baseline-aligned text and a 6px dot on a text baseline reads as a bullet,
+/* whether anything is running in that project right now: a room with live
+   sessions in it versus one nobody is working in. Centred on purpose — the row
+   is baseline-aligned text and a 6px dot on a text baseline reads as a bullet,
    not as a status light. */
 .project-room-dot {
   align-self: center;
   color: var(--text-faint);
 }
 
-.project-room-dot[data-connected="true"] {
+.project-room-dot[data-live="true"] {
   color: var(--phase-built);
-}
-
-.project-rooms .project-room .session-harness {
-  margin-left: auto;
-}
-
-.project-open {
-  display: flex;
-  gap: var(--s2);
-}
-
-.project-path {
-  flex: 1;
-  min-width: 0;
-  height: 30px;
-  padding: 0 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-md);
-  background: var(--surface);
-  color: var(--text);
-  font-size: var(--t-sm);
-}
-
-.project-path::placeholder {
-  color: var(--text-faint);
-}
-
-.project-path:focus {
-  outline: none;
-  border-color: color-mix(in oklab, var(--focus) 45%, var(--line-strong));
-}
-
-/* the open box is followed by the running-session fold: the hint sits close
-   under its box and carries the section gap the title rule would have put
-   there */
-.project-open-hint {
-  margin: calc(var(--s2) - var(--s4)) 0 var(--s4);
-  color: var(--text-faint);
-  font-size: var(--t-sm);
-  overflow-wrap: anywhere;
 }
 
 .project-error {

@@ -7,13 +7,16 @@
  * target already holds code the extractor has read — so the reality strip is on
  * the canvas — but whose intent layer is still empty, which is what the compact
  * "not mapped yet" card is for.
+ *
+ * `?mock=1&switcher=1` opens the project switcher over the same fixture, with
+ * the inactive project revealed: two active projects to switch between and one
+ * kept but not watched.
  */
 import {
   emptyGraph,
   type AgentState,
   type BackendInfo,
   type ClientMsg,
-  type DiscoveredSession,
   type EntityDelta,
   type GraphDoc,
   type GraphEdge,
@@ -38,6 +41,15 @@ function isEmptyVariant(): boolean {
 
 function isTrioVariant(): boolean {
   return new URLSearchParams(window.location.search).get("trio") === "1";
+}
+
+/**
+ * `?mock=1&switcher=1` opens the project switcher on load with the inactive
+ * ones already revealed — the whole control on screen without a click, which
+ * is how it is looked at.
+ */
+export function isSwitcherVariant(): boolean {
+  return isMockMode() && new URLSearchParams(window.location.search).get("switcher") === "1";
 }
 
 /**
@@ -211,7 +223,7 @@ export function mockSession(targetHasCode: boolean): SessionInfo {
     agentConnected: true,
     // the mock has no agent behind it, so there is no directive on disk
     directivePath: null,
-    // no manager tab was found or opened here, so the header pill reads "none"
+    // no manager tab was found here, so the header pill reads "none"
     manager: null,
   };
 }
@@ -268,21 +280,17 @@ export function voiceSpikeGraph(): GraphDoc {
   };
 }
 
-const MOCK_RECENTS: readonly string[] = [
-  "/Users/you/code/vireo",
-  "/Users/you/code/shape",
-  "/Users/you/code/pomo",
-  "/Users/you/work/atlas-api",
-];
-
 const MINUTE_MS = 60_000;
 
 /** what a real agent derives from machine + realpath(cwd); fixed here */
 const MOCK_PROJECT_ID = "mock-machine:/Users/you/code/vireo";
 
 /**
- * The fixture server hosts exactly one project, and `hello` names that same id
- * — which is what keeps the picker's project list correctly hidden.
+ * The registry the fixture server would have: the project `hello` joins this
+ * socket to, a second active one that is behind on its catch-up and has a
+ * manager dispatching in it, and one kept inactive — which is the row the
+ * "show inactive" fold is there for. Ordered the way the server orders it,
+ * newest-seen first, because the switcher renders it as received.
  */
 function mockProjects(): ProjectSummary[] {
   return [
@@ -290,54 +298,44 @@ function mockProjects(): ProjectSummary[] {
       projectId: MOCK_PROJECT_ID,
       label: "vireo",
       cwd: "/Users/you/code/vireo",
-      harness: "omp",
-      agentConnected: true,
+      status: "active",
+      liveSessions: 2,
+      manager: false,
+      caughtUp: true,
+      injected: 2,
       lastSeen: new Date(Date.now() - MINUTE_MS).toISOString(),
+    },
+    {
+      projectId: "mock-machine:/Users/you/work/atlas-api",
+      label: "atlas-api",
+      cwd: "/Users/you/work/atlas-api",
+      status: "active",
+      liveSessions: 1,
+      manager: true,
+      caughtUp: false,
+      injected: 0,
+      lastSeen: new Date(Date.now() - 12 * MINUTE_MS).toISOString(),
+    },
+    {
+      projectId: "mock-machine:/Users/you/code/pomo",
+      label: "pomo",
+      cwd: "/Users/you/code/pomo",
+      status: "inactive",
+      liveSessions: 0,
+      manager: false,
+      caughtUp: true,
+      injected: 1,
+      lastSeen: new Date(Date.now() - 180 * MINUTE_MS).toISOString(),
     },
   ];
 }
 
 /**
- * Three sessions the adopt list can offer: one omp with a resumable id, one
- * Claude Code with a live IPC socket, and one Codex whose cwd is a worktree of
- * the fixture project. Covers the harness badge, the resume tag and the
- * "nothing to attach to" case.
+ * The fixture registry as it stands, which a `set_project_status` moves: the
+ * whole point of the frame is that the list changes, so the mock keeps one
+ * list and restates it rather than answering with the fixture it started from.
  */
-const MOCK_SESSIONS: readonly DiscoveredSession[] = [
-  {
-    harness: "omp",
-    pid: 4821,
-    command: "omp",
-    cwd: "/Users/you/code/pomo",
-    sessionId: "01a05f7c-2b41-7f00-9d3a-6c1e4b8a0d92",
-    sessionFile: "/Users/you/.omp/agent/sessions/--Users-you-code-pomo/2026-09-02T09-12-04Z.jsonl",
-    startedAt: new Date(Date.now() - 62 * MINUTE_MS).toISOString(),
-    resumeCommand: ["omp", "--resume", "01a05f7c-2b41-7f00-9d3a-6c1e4b8a0d92"],
-    attach: "none",
-  },
-  {
-    harness: "claude",
-    pid: 5107,
-    command: "claude",
-    cwd: "/Users/you/work/atlas-api",
-    sessionId: "9f31c0de-7ab2-4c15-8f60-2d7e9a441bb3",
-    sessionFile: "/Users/you/.claude/projects/-Users-you-work-atlas-api/9f31c0de.jsonl",
-    startedAt: new Date(Date.now() - 18 * MINUTE_MS).toISOString(),
-    resumeCommand: ["claude", "--resume", "9f31c0de-7ab2-4c15-8f60-2d7e9a441bb3"],
-    attach: "socket",
-  },
-  {
-    harness: "codex",
-    pid: 5620,
-    command: "codex",
-    cwd: "/Users/you/code/vireo-offline-sync",
-    sessionId: null,
-    sessionFile: null,
-    startedAt: new Date(Date.now() - 3 * MINUTE_MS).toISOString(),
-    resumeCommand: null,
-    attach: "daemon",
-  },
-];
+let mockRegistry: ProjectSummary[] = mockProjects();
 
 /**
  * Three saved versions of the fixture canvas, timed relative to page load so the
@@ -897,10 +895,8 @@ export function startMock(): () => void {
       graphs: { [MOCK_MAIN]: unmappedGraph() },
       session: mockSession(true),
       agents: mockAgents("idle"),
-      recentProjects: [...MOCK_RECENTS],
-      projects: mockProjects(),
+      projects: mockRegistry.map((entry) => ({ ...entry })),
       projectId: MOCK_PROJECT_ID,
-      sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })),
       revisions: {},
       tools: mockTools(),
     });
@@ -915,10 +911,8 @@ export function startMock(): () => void {
       graphs: { [MOCK_MAIN]: trioGraph() },
       session: mockSession(true),
       agents: mockAgents("idle"),
-      recentProjects: [...MOCK_RECENTS],
-      projects: mockProjects(),
+      projects: mockRegistry.map((entry) => ({ ...entry })),
       projectId: MOCK_PROJECT_ID,
-      sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })),
       revisions: { [MOCK_MAIN]: mockRevisions(7) },
       tools: mockTools(),
     });
@@ -932,10 +926,8 @@ export function startMock(): () => void {
     graphs: mockGraphs(),
     session: mockSession(false),
     agents: mockAgents("streaming"),
-    recentProjects: [...MOCK_RECENTS],
-    projects: mockProjects(),
+    projects: mockRegistry.map((entry) => ({ ...entry })),
     projectId: MOCK_PROJECT_ID,
-    sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })),
     revisions: { [MOCK_MAIN]: mockRevisions(41), [MOCK_SPIKE]: mockRevisions(44) },
     tools: mockTools(),
   });
@@ -981,8 +973,10 @@ export function startMock(): () => void {
 
 export function mockSend(msg: ClientMsg): void {
   const store = useApp.getState();
-  // mock mode is also how the adopt UI is verified: every outbound frame is
-  // announced, because there is no socket to watch for it
+  // Every outbound frame is announced: there is no socket to watch for it, and
+  // this is how the switcher's sends are verified. `select_project` stops
+  // here — the fixture has one canvas, so there is no second project's graph
+  // to answer a join with.
   console.info(`[mock] client frame ${JSON.stringify(msg)}`);
   if (msg.type === "focus_terminal") {
     // exactly what the room does with the agent's answer: a session in a herdr
@@ -1000,33 +994,18 @@ export function mockSend(msg: ClientMsg): void {
     store.appendTranscript(msg.worktree, "tool", "brought its own terminal window forward (mock)");
     return;
   }
-  if (msg.type === "switch_project") {
-    // a real bridge answers with a fresh hello; the mock has one project, so it
-    // reports what it would have done instead of faking a second graph
-    store.pushError(`switch_project "${msg.path}" needs the bridge — mock mode has one fixture project`);
-    return;
-  }
-  if (msg.type === "pick_folder") {
-    // the chooser is a window on the machine the agent runs on, and mock mode
-    // is a fixture in a browser: there is no such machine to open it on
-    store.pushError("pick_folder rejected: mock mode has no machine to choose a folder on — this needs the bridge");
-    return;
-  }
-  if (msg.type === "discover") {
-    // the fixture list is fixed, so a re-scan legitimately answers the same rows
-    store.ingest({ type: "sessions", sessions: MOCK_SESSIONS.map((entry) => ({ ...entry })) });
-    store.appendTranscript(MOCK_MAIN, "tool", `discover: ${MOCK_SESSIONS.length} running session(s) (mock)`);
-    return;
-  }
-  if (msg.type === "adopt") {
-    const found = MOCK_SESSIONS.find((entry) => entry.pid === msg.pid);
-    if (found === undefined) {
-      store.pushError(`adopt rejected: no running agent session with pid ${msg.pid} (mock)`);
+  if (msg.type === "set_project_status") {
+    // exactly what the server answers: the registry moves and the whole list
+    // is restated, which is also what settles the client's optimistic move
+    const known = mockRegistry.some((entry) => entry.projectId === msg.projectId);
+    if (!known) {
+      store.pushError(`unknown project ${msg.projectId} (mock)`);
       return;
     }
-    // adopting is a bridge-side retarget; the mock reports the intent instead
-    store.appendTranscript(MOCK_MAIN, "tool", `adopt ${found.harness} pid ${found.pid} in ${found.cwd ?? "?"} (mock)`);
-    store.pushError(`adopt needs the bridge — mock mode cannot attach to ${found.harness} pid ${found.pid}`);
+    mockRegistry = mockRegistry.map((entry) =>
+      entry.projectId === msg.projectId ? { ...entry, status: msg.status } : entry,
+    );
+    store.ingest({ type: "projects", projects: mockRegistry.map((entry) => ({ ...entry })) });
     return;
   }
   if (msg.type === "diff") {

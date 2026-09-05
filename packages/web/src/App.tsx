@@ -1,10 +1,10 @@
 import { ReactFlowProvider } from "@xyflow/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   layerOf,
-  type DiscoveredSession,
-  type Harness,
   type ManagerHandle,
+  type ProjectStatus,
+  type ProjectSummary,
   type ProjectTools,
   type WorktreeInfo,
 } from "../../shared/src/index.ts";
@@ -22,7 +22,7 @@ import {
   isVerifiesId,
   selectLayer,
 } from "./layer.ts";
-import { isMockMode, startMock } from "./mock.ts";
+import { isMockMode, isSwitcherVariant, startMock } from "./mock.ts";
 import {
   branchOf,
   NO_NOW,
@@ -30,6 +30,7 @@ import {
   NO_WORKTREES,
   runsIn,
   selectAgent,
+  selectCurrentProject,
   selectGhostCount,
   selectNow,
   selectRunningSession,
@@ -92,144 +93,91 @@ function basename(path: string): string {
   return cut === -1 ? trimmed : trimmed.slice(cut + 1);
 }
 
-/** how a person names the harness, not how its binary is spelled */
-const HARNESS_LABEL: Record<Harness, string> = {
-  omp: "omp",
-  claude: "Claude Code",
-  codex: "Codex",
-  opencode: "opencode",
-  cursor: "Cursor",
-};
-
-const MINUTE_MS = 60_000;
-
-/** how long ago a session started — the thing that identifies "the one I left open" */
-function startedAgo(iso: string | null): string {
-  if (iso === null) return "started unknown";
-  const ms = Date.now() - Date.parse(iso);
-  if (!Number.isFinite(ms)) return "started unknown";
-  const minutes = Math.max(0, Math.round(ms / MINUTE_MS));
-  if (minutes < 1) return "just started";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  return hours < 24 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
-}
-
 /**
- * One running agent session, offered for connection. Clicking retargets the
- * bridge at that session's folder on that harness — resuming the conversation
- * when the session has an id, and otherwise opening a fresh one there.
+ * The projects a session has reported in from, and which of them are the ones
+ * being watched. Nothing here opens, creates or finds a project: a project is
+ * in this list because an agent turned up in it, and the only input Shape
+ * takes is its status — active means a room is open and its state is
+ * streaming, inactive means that room is closed and everything it knows kept.
  */
-function SessionRow({ session }: { session: DiscoveredSession }) {
-  const folder = session.cwd === null ? "unknown folder" : basename(session.cwd);
-  const short = session.sessionId === null ? null : session.sessionId.slice(0, 8);
-  return (
-    <li>
-      <button
-        type="button"
-        className="project-recent project-session"
-        onClick={() => send({ type: "adopt", pid: session.pid })}
-        title={`connect to ${session.command} (pid ${session.pid}) in ${session.cwd ?? "an unreadable folder"} — attach: ${session.attach}`}
-      >
-        <span className="session-harness">{HARNESS_LABEL[session.harness]}</span>
-        <span className="project-recent-name">{folder}</span>
-        <span className="session-meta mono">
-          {startedAgo(session.startedAt)}
-          {short === null ? null : ` · ${short}`}
-        </span>
-        <span className="session-hint">
-          {session.sessionId === null ? "connect: opens a new conversation here" : "connect: reopens this conversation"}
-        </span>
-      </button>
-    </li>
-  );
-}
-
-/**
- * Current project plus a menu led by recents, then a free-text path, a create
- * form, and a folded list of running sessions to connect to. Switching is a
- * bridge-side retarget, so the answer arrives as a fresh `hello` — which is
- * also what closes this menu.
- */
-function ProjectSelector() {
+function ProjectSwitcher() {
   const session = useApp((state) => state.session);
-  const recents = useApp((state) => state.recentProjects);
-  const sessions = useApp((state) => state.sessions);
   const projects = useApp((state) => state.projects);
   const projectId = useApp((state) => state.projectId);
+  const current = useApp(selectCurrentProject);
   const errors = useApp((state) => state.errors);
-  const pickedFolder = useApp((state) => state.pickedFolder);
-  const [open, setOpen] = useState(false);
-  const [path, setPath] = useState("");
-  const [picking, setPicking] = useState(false);
-  // the fold outlives the menu: it lives here, not in the menu body, so a
-  // person who opened it once finds it open the next time the menu drops
-  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const markProjectStatus = useApp((state) => state.markProjectStatus);
+  const [open, setOpen] = useState(isSwitcherVariant);
+  // the inactive ones are folded away by default: they are the ones nobody
+  // asked to watch, and the fold is what makes reviving one possible at all
+  const [showInactive, setShowInactive] = useState(isSwitcherVariant);
   const menuRef = useDismissable(open, setOpen);
+  const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const active = useMemo(() => projects.filter((entry) => entry.status === "active"), [projects]);
+  const inactive = useMemo(() => projects.filter((entry) => entry.status === "inactive"), [projects]);
   const cwd = session?.cwd ?? null;
-  // recents, the free-text path and the connect list are all answered by this
-  // project's agent; without one they would offer frames the server refuses
-  const agentless = session !== null && !session.agentConnected;
-  // a session already in this project's folder is where you are standing:
-  // nothing to connect to. With no project attached nothing is "here", so a
-  // session whose folder is unreadable (cwd null too) must still be offered
-  const others = cwd === null ? sessions : sessions.filter((entry) => entry.cwd !== cwd);
-  // One room you are already standing in is the local case and needs no list;
-  // a second room on the server — or a socket joined to something the list does
-  // not name — is the only reason to offer a choice of projects. Agentless, the
-  // list is the only thing left in the menu, so it always shows.
-  const showProjects =
-    agentless ||
-    projects.length > 1 ||
-    (projects.length === 1 && !projects.some((entry) => entry.projectId === projectId));
 
-  // a successful switch answers with a hello carrying the new cwd
+  // A switch is answered with a fresh `hello`, so the project arriving is what
+  // closes the menu. Arriving at the FIRST project is not that: nobody asked
+  // for it, and closing on it would shut a menu opened before the socket
+  // greeted.
+  const joined = useRef<string | null>(null);
   useEffect(() => {
+    const was = joined.current;
+    joined.current = projectId;
+    if (was === null || projectId === null || was === projectId) return;
     setOpen(false);
-    setPath("");
-  }, [cwd]);
+  }, [projectId]);
 
   const latestError = errors.length === 0 ? null : errors[errors.length - 1];
 
-  // A chooser the room refused, or one the agent could not open, produces no
-  // hello: the error is what releases Open.
-  useEffect(() => {
-    if (latestError?.message.startsWith("pick_folder") === true) setPicking(false);
-  }, [latestError]);
-
-  const switchTo = (target: string): void => {
-    const trimmed = target.trim();
-    if (trimmed.length === 0) return;
-    send({ type: "switch_project", path: trimmed });
-  };
-
-  // One button, two questions: a path that was typed is opened, and an empty
-  // box means "which folder?" — asked of the machine this project's agent runs
-  // on, because no web API hands a page an absolute path. The answer comes back
-  // as `folder_picked` to this client alone, or as a `pick_folder` error.
-  const openOrPick = (): void => {
-    if (path.trim().length > 0) {
-      switchTo(path);
+  const switchTo = (entry: ProjectSummary): void => {
+    // the one you are already watching is not a switch: the click is a person
+    // finding their place in the list, and the menu has served its purpose
+    if (entry.projectId === projectId) {
+      setOpen(false);
       return;
     }
-    if (picking) return;
-    setPicking(true);
-    send({ type: "pick_folder" });
+    send({ type: "select_project", projectId: entry.projectId });
   };
 
-  // The chosen folder is opened in the same breath as it is shown: the person
-  // already chose it in the chooser, so asking them to press Open a second time
-  // would be asking twice. A cancel names nothing and only frees the button.
-  useEffect(() => {
-    if (pickedFolder === null) return;
-    setPicking(false);
-    if (pickedFolder.path === null) return;
-    setPath(pickedFolder.path);
-    switchTo(pickedFolder.path);
-  }, [pickedFolder]);
+  // The row moves now, not when the server answers: marking a project is the
+  // one thing this list does, and a list that waits a round trip to admit it
+  // reads as a click that missed. `ingest` puts it back if the server refuses.
+  const mark = (entry: ProjectSummary, status: ProjectStatus): void => {
+    send({ type: "set_project_status", projectId: entry.projectId, status });
+    markProjectStatus(entry.projectId, status);
+  };
+
+  /** how much is alive in a project — the reason to switch to one at all */
+  const liveOf = (entry: ProjectSummary): string => {
+    if (entry.liveSessions === 0) return "no live sessions";
+    return entry.liveSessions === 1 ? "1 live session" : `${entry.liveSessions} live sessions`;
+  };
+
+  /**
+   * Arrows walk the rows, the way every other menu on this screen is walked;
+   * Enter is the focused row's own click. The handler sits on the whole
+   * control, so an arrow pressed on the trigger — before anything inside has
+   * focus — steps into the list rather than scrolling the canvas.
+   */
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === "Escape") {
+      setOpen(false);
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const rows = rowRefs.current.filter((node): node is HTMLButtonElement => node !== null);
+    if (rows.length === 0) return;
+    event.preventDefault();
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    const at = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const next = at === -1 ? (step === 1 ? 0 : rows.length - 1) : (at + step + rows.length) % rows.length;
+    rows[next]?.focus();
+  };
 
   return (
-    <div className="project" ref={menuRef}>
+    <div className="project" ref={menuRef} onKeyDown={onKeyDown}>
       <button
         type="button"
         className="project-current"
@@ -237,123 +185,98 @@ function ProjectSelector() {
         onClick={() => setOpen((value) => !value)}
         title={cwd ?? "no project attached"}
       >
-        <span className="project-name">{cwd === null ? "no project" : basename(cwd)}</span>
+        <span className="project-name">{current?.label ?? (cwd === null ? "no project" : basename(cwd))}</span>
         <span className="project-caret">▾</span>
       </button>
 
       {open ? (
         <div className="project-menu">
-          {showProjects ? (
-            <>
-              <p className="project-menu-title">Projects on this server</p>
-              <ul className="project-recents project-rooms">
-                {projects.map((entry) => (
-                  <li key={entry.projectId}>
-                    <button
-                      type="button"
-                      className="project-recent project-room"
-                      data-current={entry.projectId === projectId}
-                      onClick={() => send({ type: "select_project", projectId: entry.projectId })}
-                      title={`${entry.cwd} — ${entry.agentConnected ? "an agent is attached" : "no agent attached"}`}
-                    >
-                      <span className="dot project-room-dot" data-connected={entry.agentConnected} />
-                      <span className="project-recent-name">{entry.label}</span>
-                      <span className="project-recent-path mono">{entry.cwd}</span>
-                      <span className="session-harness">{entry.harness}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </>
-          ) : null}
-
-          {agentless ? (
-            <p className="tl-empty">Open and connect need this project&apos;s agent</p>
+          <p className="project-menu-title">projects being watched</p>
+          {active.length === 0 ? (
+            <p className="tl-empty">No active projects — start an agent in a repo and it appears here.</p>
           ) : (
-            <>
-              <p className="project-menu-title">recent projects</p>
-              {recents.length === 0 ? (
-                <p className="tl-empty">No recent projects yet — open one below.</p>
-              ) : (
-                <ul className="project-recents">
-                  {recents.map((entry) => (
-                    <li key={entry}>
-                      <button
-                        type="button"
-                        className="project-recent"
-                        data-current={entry === cwd}
-                        onClick={() => switchTo(entry)}
-                        title={entry === cwd ? `${entry} — current project` : `open ${entry}`}
-                      >
-                        <span className="project-recent-name">{basename(entry)}</span>
-                        <span className="project-recent-path mono">{entry}</span>
-                        {entry === cwd ? <span className="project-recent-tag">current</span> : null}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-
-              <p className="project-menu-title">open a project</p>
-              <div className="project-open">
-                <input
-                  className="project-path mono"
-                  value={path}
-                  spellCheck={false}
-                  placeholder="~/code/..."
-                  aria-label="project path"
-                  onChange={(event) => setPath(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter") return;
-                    event.preventDefault();
-                    openOrPick();
-                  }}
-                />
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={openOrPick}
-                  disabled={agentless || picking}
-                  title={path.trim().length === 0 ? "pick a folder on this machine" : "open this path"}
-                >
-                  {picking ? "picking…" : "Open"}
-                </button>
-              </div>
-              {path.trim().length === 0 ? (
-                // the empty box is now the interesting case, and a tooltip is
-                // invisible until someone hovers the thing they have not tried
-                <p className="project-open-hint">
-                  Open with nothing typed asks this machine for a folder
-                </p>
-              ) : null}
-
-              <button
-                type="button"
-                className="project-fold"
-                aria-expanded={sessionsOpen}
-                onClick={() => setSessionsOpen((value) => !value)}
-              >
-                <span className="project-caret">{sessionsOpen ? "▾" : "▸"}</span>
-                <span className="project-menu-title">connect to a running session ({others.length})</span>
-              </button>
-              {sessionsOpen ? (
-                <div className="project-fold-body">
-                  {others.length === 0 ? (
-                    <p className="tl-empty">No agent is running anywhere else on this machine.</p>
-                  ) : (
-                    <ul className="project-recents project-sessions">
-                      {others.map((entry) => (
-                        <SessionRow key={entry.pid} session={entry} />
-                      ))}
-                    </ul>
-                  )}
-                  <button type="button" className="project-rescan" onClick={() => send({ type: "discover" })}>
-                    rescan this machine for running sessions
+            <ul className="project-recents">
+              {active.map((entry, index) => (
+                <li key={entry.projectId} className="project-row">
+                  <button
+                    type="button"
+                    className="project-recent"
+                    ref={(node) => {
+                      rowRefs.current[index] = node;
+                    }}
+                    data-current={entry.projectId === projectId}
+                    onClick={() => switchTo(entry)}
+                    title={`${entry.cwd} — ${entry.injected} sessions briefed`}
+                  >
+                    <span className="dot project-room-dot" data-live={entry.liveSessions > 0} />
+                    <span className="project-recent-name">{entry.label}</span>
+                    <span className="project-recent-path mono">{entry.cwd}</span>
+                    {entry.projectId === projectId ? <span className="project-recent-tag">current</span> : null}
+                    <span className="project-meta">
+                      <span className="project-live" data-on={entry.liveSessions > 0}>
+                        {liveOf(entry)}
+                      </span>
+                      {entry.manager ? <span className="project-mark">manager</span> : null}
+                      {entry.caughtUp ? null : <span className="project-mark project-behind">catching up…</span>}
+                    </span>
                   </button>
-                </div>
-              ) : null}
-            </>
+                  <button
+                    type="button"
+                    className="project-act"
+                    onClick={() => mark(entry, "inactive")}
+                    title={`close ${entry.label}'s room and keep everything it knows`}
+                  >
+                    mark inactive
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
+
+          <button
+            type="button"
+            className="project-toggle"
+            aria-expanded={showInactive}
+            disabled={inactive.length === 0}
+            onClick={() => setShowInactive((value) => !value)}
+            title={
+              inactive.length === 0
+                ? "every project this server knows is active"
+                : "projects kept but not watched: no room, no streaming, all their data"
+            }
+          >
+            <span className="project-caret">{showInactive ? "▾" : "▸"}</span>
+            show inactive ({inactive.length})
+          </button>
+          {showInactive && inactive.length > 0 ? (
+            <ul className="project-recents">
+              {inactive.map((entry, index) => (
+                <li key={entry.projectId} className="project-row">
+                  <span className="project-still" title={`${entry.cwd} — ${entry.injected} sessions briefed`}>
+                    <span className="project-recent-name">{entry.label}</span>
+                    <span className="project-recent-path mono">{entry.cwd}</span>
+                    <span className="project-meta">
+                      <span className="project-live" data-on={entry.liveSessions > 0}>
+                        {liveOf(entry)}
+                      </span>
+                      {entry.manager ? <span className="project-mark">manager</span> : null}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className="project-act"
+                    ref={(node) => {
+                      rowRefs.current[active.length + index] = node;
+                    }}
+                    onClick={() => mark(entry, "active")}
+                    title={`open ${entry.label}'s room again and stream its state`}
+                  >
+                    make active
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
 
           {latestError === undefined || latestError === null ? null : (
             <p className="project-error">{latestError.message}</p>
@@ -733,10 +656,12 @@ function managerState(
           : "No manager tab in this project's herdr workspace",
     };
   }
+  // there is one origin: Shape finds a manager in the project's herdr
+  // workspace and points its config here, and never opens one
   return {
-    label: manager.origin === "found" ? "attached" : "opened",
+    label: "attached",
     muted: false,
-    title: `Manager ${manager.agentName} in pane ${manager.paneId} (${manager.origin}; Shape extension: ${manager.shapeAware ? "loaded" : "not loaded"})`,
+    title: `Manager ${manager.agentName} in pane ${manager.paneId} (found; Shape extension: ${manager.shapeAware ? "loaded" : "not loaded"})`,
   };
 }
 
@@ -773,7 +698,7 @@ function Header() {
     <header className="header">
       <div className="brand">
         <span className="brand-mark">Shape</span>
-        <ProjectSelector />
+        <ProjectSwitcher />
         <VariationFilter />
       </div>
       <LayerSwitch />

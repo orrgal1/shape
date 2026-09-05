@@ -400,24 +400,27 @@ const PLAYGROUND_SESSION: SessionInfo = {
   agentConnected: true,
   directivePath: null,
   // this fixture runs on herdr, so it carries the manager the bridge would have
-  // opened there — the header pill's populated state is reachable in the playground
+  // found there — the header pill's populated state is reachable in the playground
   manager: {
     paneId: "pane-7",
     tabId: "tab-3",
     workspaceId: "ws-ledgerly",
     agentName: "manager",
-    origin: "opened",
+    origin: "found",
     shapeAware: true,
   },
 };
 
-/** one project, named by the same id `hello` reports joined */
+/** one active project, named by the same id `hello` reports joined */
 const PLAYGROUND_PROJECT: ProjectSummary = {
   projectId: "playground-fixture:/Users/orgal/code/shape-playground",
   label: "shape-playground",
   cwd: PLAYGROUND_ROOT,
-  harness: "omp",
-  agentConnected: true,
+  status: "active",
+  liveSessions: 2,
+  manager: true,
+  caughtUp: true,
+  injected: 0,
   lastSeen: "2026-02-11T09:14:00.000Z",
 };
 
@@ -438,11 +441,8 @@ export function startPlaygroundMock(): () => void {
     graphs: { [PLAYGROUND_ROOT]: playgroundGraph(), [PLAYGROUND_REMINDERS]: remindersGraph() },
     session: { ...PLAYGROUND_SESSION, worktrees: PLAYGROUND_SESSION.worktrees.map((entry) => ({ ...entry })) },
     agents: { [PLAYGROUND_ROOT]: "streaming", [PLAYGROUND_REMINDERS]: "streaming" },
-    recentProjects: [PLAYGROUND_ROOT],
     projects: [{ ...PLAYGROUND_PROJECT }],
     projectId: PLAYGROUND_PROJECT.projectId,
-    // this fixture is about layout, not adoption: nothing to attach to
-    sessions: [],
     revisions: {},
     tools: PLAYGROUND_TOOLS,
   });
