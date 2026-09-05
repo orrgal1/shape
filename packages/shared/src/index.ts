@@ -1437,25 +1437,13 @@ export interface WorktreeInfo {
 }
 
 // ---------------------------------------------------------------------------
-// Session discovery / adopt
+// Harnesses
 // ---------------------------------------------------------------------------
 
 /**
- * A coding agent Shape knows how to look for. Harness ids ARE backend ids: a
- * discovered `claude` session adopts onto the `claude` backend, and a harness
- * with no adapter registered is rejected by name.
- */
-export type Harness = "omp" | "claude" | "codex" | "opencode" | "cursor";
-
-/**
- * A harness Shape can LAUNCH, by the id the "start a session" card, the
- * `--backend` flag and `.shape/config.json` all spell it with.
- *
- * Deliberately a different set from `Harness` above: that one classifies
- * RUNNING processes for adoption (an older, smaller list that spells Cursor's
- * CLI "cursor"), while these are the ids Shape knows a harness by. Detection
- * (bridge agent/detect.ts) reports which of them is installed on the machine;
- * nothing starts one.
+ * A harness Shape knows by name, as the `--backend` flag and
+ * `.shape/config.json` both spell it. Detection (bridge agent/detect.ts)
+ * reports which of them is installed on the machine; nothing starts one.
  */
 export type HarnessId =
   | "omp"
@@ -1466,19 +1454,6 @@ export type HarnessId =
   | "cursor-agent"
   | "amp"
   | "copilot";
-
-/** one agent session already running on this machine (bridge/src/discover.ts) */
-export interface DiscoveredSession {
-  harness: Harness;
-  pid: number;
-  command: string;
-  cwd: string | null;
-  sessionId: string | null;
-  sessionFile: string | null;
-  startedAt: string | null;
-  resumeCommand: string[] | null;
-  attach: "socket" | "daemon" | "http" | "none";
-}
 
 /**
  * What the bridge knows about the harness it is observing. The client renders
@@ -1530,18 +1505,18 @@ export interface ProjectTools {
 }
 
 /**
- * The project's manager session in the user's herdr, as Shape attached to it:
- * one `omp` tab per project, prompted to act as the manager, whose harness
- * config Shape keeps pointed at this bridge. Null when there is none — no
- * herdr, or Shape could not find or open one (issue #3).
+ * The project's manager session in the user's herdr, as Shape FOUND it: one
+ * `omp` tab per project, already acting as the manager, whose harness config
+ * Shape keeps pointed at this bridge. Shape never opens one — null when there
+ * is none, or when it could not be reached (no herdr, no manager tab).
  */
 export interface ManagerHandle {
   paneId: string;
   tabId: string;
   workspaceId: string;
   agentName: string;
-  /** "found": a manager tab was already there; "opened": Shape opened one */
-  origin: "found" | "opened";
+  /** always "found": Shape only ever attaches to a manager tab that was already there */
+  origin: "found";
   /** the pane is linked to this bridge's loopback link (Shape extension loaded) */
   shapeAware: boolean;
 }
@@ -1591,15 +1566,24 @@ export interface SessionInfo {
   manager: ManagerHandle | null;
 }
 
-/** one project the server knows, for the picker */
+export type ProjectStatus = "active" | "inactive";
+
+/** one project the server knows, for the switcher — every status, not only the ones with rooms */
 export interface ProjectSummary {
   projectId: string;
   label: string;
+  /** the primary path: the repo's main worktree */
   cwd: string;
-  /** backend id of the agent that last attached */
-  harness: string;
-  agentConnected: boolean;
-  /** ISO time of the last attach or detach */
+  status: ProjectStatus;
+  /** worktrees with a live session right now: one seen in herdr or reporting in on the link */
+  liveSessions: number;
+  /** a manager session was found in the project's herdr workspace */
+  manager: boolean;
+  /** false while the bridge still owes this project a catch-up (#29 wires the real signal) */
+  caughtUp: boolean;
+  /** sessions briefed with the Shape directive (#5 wires the real count); 0 until then */
+  injected: number;
+  /** ISO time of the last attach or detach; the list is ordered by it, newest first */
   lastSeen: string;
 }
 
@@ -1609,7 +1593,7 @@ export type AgentState = "idle" | "streaming" | "compacting";
  * Bridge → browser. Every frame that is about ONE worktree names it: the
  * canvas merges the worktrees of a repo into one view, so a graph or a state
  * that did not say where it came from could not be placed. Project-wide
- * frames (`session`, `projects`, `sessions`, `error`) carry none.
+ * frames (`session`, `projects`, `error`) carry none.
  */
 export type ServerMsg =
   | {
@@ -1619,15 +1603,12 @@ export type ServerMsg =
       session: SessionInfo;
       /** what each worktree's harness is doing; a worktree with no session has no entry */
       agents: Record<string, AgentState>;
-      recentProjects: string[];
-      /** every project this server hosts; local mode has exactly one */
+      /** every project of this tenant, both statuses; local mode has one tenant */
       projects: ProjectSummary[];
       /** the project this socket is joined to */
       projectId: string;
       /** available snapshots per worktree, each ascending by rev */
       revisions: Record<string, RevisionInfo[]>;
-      /** agent sessions running on this machine, newest first */
-      sessions: DiscoveredSession[];
       /** what is installed where this project's agent runs */
       tools: ProjectTools;
     }
@@ -1639,7 +1620,7 @@ export type ServerMsg =
   | { type: "session_started"; worktree: string; session: AgentSession; backend: BackendInfo }
   /** that worktree's harness is gone */
   | { type: "session_stopped"; worktree: string; reason: string }
-  /** broadcast whenever the project list changes (attach, detach) */
+  /** broadcast whenever the project list or a project's status/live count changes; every project of the tenant, both statuses */
   | { type: "projects"; projects: ProjectSummary[] }
   | { type: "activity"; worktree: string; nodeIds: string[] }
   | { type: "transcript"; worktree: string; role: "assistant" | "user" | "tool"; text: string }
@@ -1647,49 +1628,29 @@ export type ServerMsg =
   | { type: "revisions"; worktree: string; revisions: RevisionInfo[] }
   /** broadcast reply to a `diff` request, over the worktree it asked about */
   | { type: "delta"; worktree: string; delta: GraphDelta }
-  /** broadcast answer to `discover`, and re-broadcast whenever the bridge re-scans */
-  | { type: "sessions"; sessions: DiscoveredSession[] }
   /**
    * The sentence being written right now, folded from the harness's text
    * deltas — the last of it, throttled, and never stored. `null` at the end of
    * a turn (and when the session stops): there is nothing being said.
    */
   | { type: "now"; worktree: string; text: string | null }
-  /**
-   * The folder the user chose in the native chooser a `pick_folder` opened, or
-   * `null` when they closed it without choosing. An answer, not news: it goes
-   * to the socket that asked and to nobody else — another browser watching the
-   * project did not open a dialog and has nothing to do with the reply.
-   */
-  | { type: "folder_picked"; path: string | null }
   | { type: "error"; message: string };
 
 /**
  * Browser → bridge. Shape is a read-only picture: nothing here instructs,
- * starts, stops or types into an agent. What the browser can ask for is which
- * project to look at, another look at what is running, a comparison of two
- * snapshots, and — under herdr — for a session's own terminal to be raised.
- * A frame that acts on a canvas names the worktree it acts on: with several
- * worktrees merged into one view, "the current one" is a property of the
- * click, not of the connection.
+ * starts, stops or types into an agent. The only input it has is a project's
+ * status — active or inactive — and which of the active ones to watch; the
+ * rest is a comparison of two snapshots and, under herdr, a request for a
+ * session's own terminal to be raised. A frame that acts on a canvas names
+ * the worktree it acts on: with several worktrees merged into one view, "the
+ * current one" is a property of the click, not of the connection.
  */
 export type ClientMsg =
-  /** ask THIS project's agent to retarget onto `path` (local mode; the agent decides) */
-  | { type: "switch_project"; path: string }
-  /**
-   * Show the native folder chooser on the machine this project's agent runs
-   * on, and answer this socket with `folder_picked`. It lives over the wire
-   * because no web API hands a browser an absolute path: the folder the user
-   * points at is only a path on the machine the dialog opened on.
-   */
-  | { type: "pick_folder" }
-  /** join another project this server hosts; answered with a fresh `hello` to this socket only */
+  /** join another ACTIVE project this server hosts; answered with a fresh `hello` to this socket only. Inactive/unknown → `error` */
   | { type: "select_project"; projectId: string }
+  /** mark a project active or inactive; answered by a `projects` broadcast, or an `error` to this socket */
+  | { type: "set_project_status"; projectId: string; status: ProjectStatus }
   /** take the user to the harness's terminal: its herdr tab is switched to and the app raised */
   | { type: "focus_terminal"; worktree: string }
   /** compare two snapshots of one worktree; `revA` = before, `revB` = after. Unknown rev → `error` frame */
-  | { type: "diff"; worktree: string; revA: number; revB: number }
-  /** re-scan running agent sessions; answered with a `sessions` broadcast */
-  | { type: "discover" }
-  /** retarget this bridge onto the repo a discovered session (by pid) runs in, and watch it there */
-  | { type: "adopt"; pid: number };
+  | { type: "diff"; worktree: string; revA: number; revB: number };

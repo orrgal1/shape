@@ -8,9 +8,11 @@
  * view merges — one project, as many graphs as it has worktrees.
  *
  * Both modes are served by the same implementation (`server/sqlite.ts`); they
- * differ only in which database file they open and in whether the server
- * reopens rooms from the registry at startup (local mode does not — the agent
- * that owns the repo is what brings the project back).
+ * differ only in which database file they open. The registry is the switcher's
+ * source of truth in both: every project a session ever reported in stays a
+ * row, and its `status` says whether the server holds a room for it — a room
+ * exists only for an ACTIVE project, an inactive one keeps all its records and
+ * none of its runtime.
  *
  * Nothing here knows about rooms: a `Storage` answers what is stored, the
  * server decides when.
@@ -21,6 +23,7 @@ import type {
   AgentProject,
   GraphDoc,
   GraphSnapshot,
+  ProjectStatus,
   RevisionInfo,
   WorktreeInfo,
   WorktreeSession,
@@ -42,6 +45,12 @@ export interface StoredProject {
    * resume can name the session that was running where.
    */
   sessions: WorktreeSession[];
+  /** worktrees with a live session as of the last attach, detach or discovery scan */
+  liveSessions: number;
+  /** whether the server holds a room for this project; an inactive row keeps its records */
+  status: ProjectStatus;
+  /** ISO time the status was last set; the migration stamps existing rows with the migration time */
+  statusChangedAt: string;
   /** ISO time of the last attach or detach */
   lastSeen: string;
 }
@@ -84,10 +93,21 @@ export interface Storage {
   loadRevision(tenant: string, key: string, worktree: string, rev: number): Promise<GraphSnapshot | null>;
   /** false when `rev` already exists (revisions are immutable); prunes to the newest 50 PER WORKTREE */
   saveRevision(tenant: string, key: string, worktree: string, snapshot: GraphSnapshot): Promise<boolean>;
-  /** projects to reopen agentless at startup, across every tenant */
+  /** every registry row, both statuses, across every tenant */
   listProjects(): Promise<StoredProject[]>;
-  /** upsert one registry row */
+  /**
+   * Upsert one registry row. On an EXISTING row `status` and `statusChangedAt`
+   * are NOT written — only `setProjectStatus` moves them, so a save from a room
+   * that is mid-turn can never resurrect a project an operator just parked;
+   * `row.status` is used on insert only.
+   */
   saveProject(row: StoredProject): Promise<void>;
+  /**
+   * Mark one project active or inactive, and report whether the row was there
+   * to mark. False means no such row; the same status again is a no-op that
+   * still answers true and leaves `statusChangedAt` where it was.
+   */
+  setProjectStatus(tenant: string, key: string, status: ProjectStatus): Promise<boolean>;
   /**
    * Append one audit line, against the worktree it happened in. Never rejects:
    * a canvas the room seeded must not be lost because a disk was.
@@ -144,5 +164,19 @@ export function parseRow(value: unknown): StoredProject | null {
   // it belongs to the tenant an unauthenticated connection gets: dropping it
   // instead would cost the operator every room across the upgrade
   const tenant = typeof row.tenant === "string" && row.tenant.length > 0 ? row.tenant : LOCAL_TENANT;
-  return { project, tenant, worktrees, sessions, lastSeen: row.lastSeen };
+  // a row from before statuses existed is a project the operator was using, so
+  // it comes back active; anything but the two literals is a column no build
+  // wrote and reads as active for the same reason
+  const status: ProjectStatus = row.status === "active" || row.status === "inactive" ? row.status : "active";
+  // never stamped (or stamped with the empty string a migration left behind):
+  // the last time the project was seen is the closest true thing we have
+  const statusChangedAt =
+    typeof row.statusChangedAt === "string" && row.statusChangedAt.length > 0 ? row.statusChangedAt : row.lastSeen;
+  // a count from a build that did not keep one: the sessions the row does
+  // carry are the live worktrees it knew about
+  const liveSessions =
+    typeof row.liveSessions === "number" && Number.isInteger(row.liveSessions) && row.liveSessions >= 0
+      ? row.liveSessions
+      : sessions.length;
+  return { project, tenant, worktrees, sessions, liveSessions, status, statusChangedAt, lastSeen: row.lastSeen };
 }

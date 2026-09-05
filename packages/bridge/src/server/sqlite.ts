@@ -22,7 +22,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
-import type { GraphDoc, GraphSnapshot, RevisionInfo } from "../../../shared/src/index.ts";
+import type { GraphDoc, GraphSnapshot, ProjectStatus, RevisionInfo } from "../../../shared/src/index.ts";
 import { mainWorktreeOf, parseRow, type AuditEntry, type Storage, type StoredProject } from "./storage.ts";
 
 /** how many newest revisions of one worktree's canvas survive a save */
@@ -34,17 +34,24 @@ const RETENTION = 50;
  * 1 → 2: canvases became per worktree. `graphs`, `revisions` and `audit` gained
  * a `worktree` column (in the primary key of the first two), and `projects`
  * traded its single `session` for a `sessions` list.
+ *
+ * 2 → 3: a project became a registry row that outlives its room. `projects`
+ * gained `status` (which rows the server opens a room for), `status_changed_at`
+ * and the `live_sessions` count the switcher shows for a room-less project.
  */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 CREATE TABLE projects (
-  tenant     TEXT NOT NULL,
-  key        TEXT NOT NULL,
-  project    TEXT NOT NULL,
-  sessions   TEXT NOT NULL,
-  worktrees  TEXT NOT NULL,
-  last_seen  TEXT NOT NULL,
+  tenant            TEXT NOT NULL,
+  key               TEXT NOT NULL,
+  project           TEXT NOT NULL,
+  sessions          TEXT NOT NULL,
+  worktrees         TEXT NOT NULL,
+  last_seen         TEXT NOT NULL,
+  status            TEXT NOT NULL DEFAULT 'active',
+  status_changed_at TEXT NOT NULL,
+  live_sessions     INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (tenant, key)
 );
 CREATE TABLE graphs (
@@ -105,6 +112,8 @@ class SqliteStorage implements Storage {
   readonly #pruneRevisions: StatementSync;
   readonly #listProjects: StatementSync;
   readonly #putProject: StatementSync;
+  readonly #setStatus: StatementSync;
+  readonly #hasProject: StatementSync;
   readonly #putAudit: StatementSync;
   /** the adoption of a legacy key: once per worktree per attach, not a hot path, but written once */
   readonly #dropGraph: StatementSync;
@@ -146,13 +155,29 @@ class SqliteStorage implements Storage {
       `DELETE FROM revisions WHERE tenant = ? AND key = ? AND worktree = ? AND rev NOT IN
          (SELECT rev FROM revisions WHERE tenant = ? AND key = ? AND worktree = ? ORDER BY rev DESC LIMIT ${RETENTION})`,
     );
-    this.#listProjects = this.#db.prepare("SELECT tenant, key, project, sessions, worktrees, last_seen FROM projects ORDER BY last_seen ASC");
+    this.#listProjects = this.#db.prepare(
+      `SELECT tenant, key, project, sessions, worktrees, last_seen, status, status_changed_at, live_sessions
+         FROM projects ORDER BY last_seen ASC`,
+    );
+    // `status` and `status_changed_at` are inserted and then left alone: a save
+    // is what a room does every time its worktrees or sessions move, and it
+    // must never undo the operator's last active/inactive decision
     this.#putProject = this.#db.prepare(
-      `INSERT INTO projects (tenant, key, project, sessions, worktrees, last_seen) VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO projects (tenant, key, project, sessions, worktrees, last_seen, status, status_changed_at, live_sessions)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (tenant, key) DO UPDATE SET
          project = excluded.project, sessions = excluded.sessions,
-         worktrees = excluded.worktrees, last_seen = excluded.last_seen`,
+         worktrees = excluded.worktrees, last_seen = excluded.last_seen,
+         live_sessions = excluded.live_sessions`,
     );
+    // `status <> ?` makes asking for the status a row already has a no-op:
+    // `status_changed_at` is when the status CHANGED, not when it was last
+    // confirmed. It also means `changes` cannot tell "no such row" from
+    // "already there", so existence is answered separately
+    this.#setStatus = this.#db.prepare(
+      "UPDATE projects SET status = ?, status_changed_at = ? WHERE tenant = ? AND key = ? AND status <> ?",
+    );
+    this.#hasProject = this.#db.prepare("SELECT 1 FROM projects WHERE tenant = ? AND key = ? LIMIT 1");
     this.#putAudit = this.#db.prepare("INSERT INTO audit (tenant, key, worktree, at, entry) VALUES (?, ?, ?, ?, ?)");
     this.#dropGraph = this.#db.prepare("DELETE FROM graphs WHERE tenant = ? AND key = ? AND worktree = ?");
     this.#dropRevisions = this.#db.prepare("DELETE FROM revisions WHERE tenant = ? AND key = ? AND worktree = ?");
@@ -182,7 +207,10 @@ class SqliteStorage implements Storage {
       this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       return;
     }
-    this.#migrateToWorktrees();
+    // the steps are walked in order, so a v1 database gets the worktree rebuild
+    // and then the status columns on top of what came out of it
+    if (version === 1) this.#migrateToWorktrees();
+    this.#migrateToStatus();
     this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
@@ -323,6 +351,33 @@ ALTER TABLE projects_v2 RENAME TO projects;
     }
   }
 
+  /**
+   * 2 → 3: a project stopped being "a room the agent brought back" and became a
+   * registry row with a status. Every row that already existed is a project the
+   * operator was working in, so it migrates ACTIVE — the column's default does
+   * that on its own.
+   *
+   * `ALTER TABLE ADD COLUMN` is enough here where 1 → 2 had to rebuild the
+   * tables: none of the three columns is part of a primary key, and SQLite can
+   * only add a column, never change a key. `status_changed_at` is added with an
+   * empty default (a NOT NULL column needs one for the rows already there) and
+   * then stamped with the migration time, so the switcher's "since" is the
+   * moment we learned about the status rather than the epoch.
+   */
+  #migrateToStatus(): void {
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      this.#db.exec("ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+      this.#db.exec("ALTER TABLE projects ADD COLUMN status_changed_at TEXT NOT NULL DEFAULT ''");
+      this.#db.exec("ALTER TABLE projects ADD COLUMN live_sessions INTEGER NOT NULL DEFAULT 0");
+      this.#db.prepare("UPDATE projects SET status_changed_at = ? WHERE status_changed_at = ''").run(new Date().toISOString());
+      this.#db.exec("COMMIT");
+    } catch (err) {
+      this.#db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
   loadGraph(tenant: string, key: string, worktree: string): Promise<GraphDoc | null> {
     const row = this.#getGraph.get(tenant, key, worktree);
     if (row === undefined) return Promise.resolve(null);
@@ -383,6 +438,9 @@ ALTER TABLE projects_v2 RENAME TO projects;
         project: safeParse(text(raw.project)),
         sessions: safeParse(text(raw.sessions)),
         worktrees: safeParse(text(raw.worktrees)),
+        liveSessions: Number(raw.live_sessions),
+        status: text(raw.status),
+        statusChangedAt: text(raw.status_changed_at),
         lastSeen: text(raw.last_seen),
       });
       // one unreadable row costs its own project, not every other room
@@ -403,8 +461,20 @@ ALTER TABLE projects_v2 RENAME TO projects;
       JSON.stringify(row.sessions),
       JSON.stringify(row.worktrees),
       row.lastSeen,
+      row.status,
+      row.statusChangedAt,
+      row.liveSessions,
     );
     return Promise.resolve();
+  }
+
+  setProjectStatus(tenant: string, key: string, status: ProjectStatus): Promise<boolean> {
+    const moved = Number(this.#setStatus.run(status, new Date().toISOString(), tenant, key, status).changes) > 0;
+    // nothing moved either because the row is not there or because it already
+    // reads that way; the caller asked whether the project exists, so a row
+    // that was already in the asked-for status still answers true
+    if (moved) return Promise.resolve(true);
+    return Promise.resolve(this.#hasProject.get(tenant, key) !== undefined);
   }
 
   appendAudit(tenant: string, key: string, worktree: string, entry: AuditEntry): Promise<void> {

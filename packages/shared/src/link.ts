@@ -25,7 +25,6 @@ import type {
   AgentState,
   BackendInfo,
   CanvasOp,
-  DiscoveredSession,
   ManagerHandle,
   ProjectTools,
   RealityLayer,
@@ -74,8 +73,8 @@ export type LinkClientMsg =
    * itself is on the link, so it can say what it is, which session it resumed
    * or started, and what it can be asked to do. A client that only forwards
    * (the MCP sidecar, a hook) never sends one — it has no session to announce.
-   * `harness` is a free string, not the closed `Harness` union: a launcher can
-   * host kinds Shape has no adapter for.
+   * `harness` is a free string, not a closed union: a launcher can host kinds
+   * Shape has no adapter for.
    */
   | {
       type: "hello";
@@ -179,8 +178,10 @@ export interface AgentProject {
 }
 
 /**
- * Agent → server. `attach` is always first; sending it again on the same link
- * is a retarget (the agent switched projects) and replaces the room's project.
+ * Agent → server. `attach` is always first: it is a runtime's one announcement
+ * of the project it observes, sent again only when the link came back after a
+ * gap. It never retargets — a runtime is one project for its whole life, and
+ * the room's project never changes under it.
  * Frames carrying an `id` answer a server request of the same id.
  */
 export type AgentToServerMsg =
@@ -203,14 +204,10 @@ export type AgentToServerMsg =
        * whose extraction found nothing (or is unavailable) has no entry.
        */
       realities: Record<string, RealityLayer>;
-      /** agent sessions running on this machine, for the adopt picker */
-      discovered: DiscoveredSession[];
-      /** this machine's recent project paths, most recent first */
-      recentProjects: string[];
     }
   /** a harness started reporting in from `worktree` (a link `hello`, a hook, a canvas call) */
   | { type: "session_started"; worktree: string; session: AgentSession; backend: BackendInfo }
-  /** that worktree's harness is gone (said `bye`, or the agent retargeted) */
+  /** that worktree's harness is gone (it said `bye`, or the agent lost it) */
   | { type: "session_stopped"; worktree: string; reason: string }
   | { type: "agent_event"; worktree: string; event: AgentEvent }
   /** the harness (native host tool or loopback link) wants to write to the canvas */
@@ -219,15 +216,6 @@ export type AgentToServerMsg =
   | { type: "reality"; worktree: string; reality: RealityLayer; head: string | null }
   /** answers `list_worktrees`; also pushed unsolicited when the agent notices a change */
   | { type: "worktrees"; id: string | null; worktrees: WorktreeInfo[] }
-  /** answers `discover` */
-  | { type: "sessions"; id: string | null; sessions: DiscoveredSession[] }
-  | { type: "recents"; paths: string[] }
-  /**
-   * Answers `pick_folder`: the folder the user chose, or `null` when they
-   * closed the chooser. The agent does not act on it — it is the browser that
-   * decides what to open — so this frame only carries the path back.
-   */
-  | { type: "folder_picked"; path: string | null }
   /** answers `synthesize_skeleton`, echoing the request's worktree */
   | { type: "skeleton_result"; worktree: string; id: string; ops: CanvasOp[] }
   /** an adapter error worth showing the user (becomes a browser `error` frame) */
@@ -238,8 +226,7 @@ export type AgentToServerMsg =
 
 /**
  * Server → agent. Requests carry an `id` the agent echoes in its answer, and
- * everything that acts on one harness names its worktree. `switch` is the
- * exception on purpose: it retargets the WHOLE agent at another repo.
+ * everything that acts on one harness names its worktree.
  */
 export type ServerToAgentMsg =
   | { type: "attached"; projectId: string }
@@ -250,18 +237,6 @@ export type ServerToAgentMsg =
    * tab. Answered by `agent_error` when it could not be done.
    */
   | { type: "focus_terminal"; worktree: string }
-  /** retarget: forget every session, open `path`, then re-`attach` */
-  | { type: "switch"; path: string }
-  /** resolve a discovered pid (fresh scan) and `switch` to the repo it runs in */
-  | { type: "adopt"; pid: number }
-  /**
-   * Open the machine's native folder chooser, because the browser cannot: no
-   * web API gives it an absolute path. Answered with `folder_picked`, or with
-   * an `agent_error` starting with `pick_folder` when there is no chooser to
-   * open (or it failed).
-   */
-  | { type: "pick_folder" }
-  | { type: "discover"; id: string }
   | { type: "list_worktrees"; id: string }
   | { type: "extract_reality"; worktree: string }
   | { type: "synthesize_skeleton"; worktree: string; id: string };
