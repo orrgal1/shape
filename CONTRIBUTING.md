@@ -73,24 +73,26 @@ covers; each says what it asserts and why.
 | --- | --- | --- |
 | `pnpm typecheck` | `tsc --noEmit` for every package that has a `typecheck` script — bridge, link and web; each of their tsconfigs also compiles `packages/shared/src` | ~5s |
 | `pnpm smoke:shared` | `applyOps`, the layer walls, verification rules and symbol refs, in-process | ~2s |
-| `pnpm smoke:wire` | every wire frame in both directions, the SQLite store and its migrations, and the fakes themselves | ~3s |
+| `pnpm smoke:wire` | every wire frame in both directions, the SQLite store and its migrations — including the v2→v3 project-status migration — and the fakes themselves | ~3s |
 | `pnpm --filter @shape/bridge smoke:drift` | `computeDrift` against a frozen real graph — pure, no sockets | ~2s |
 | `pnpm --filter @shape/link selftest:omp` | the real omp extension against a real WebSocket server and a stub `pi` (runs under Bun when Bun is installed, Node otherwise) | ~5s |
 | `pnpm smoke:link-cli` | the link CLI and the omp extension produce indistinguishable canvas calls, each through its own real bridge | ~3s |
-| `pnpm --filter @shape/bridge smoke` | the real bridge against `fake-omp-tui.mjs` — a fake omp that dials the link on its own and shows up as an observed session — driven over WebSocket; also the automatic map (reality extraction + skeleton seeding) | ~20s |
+| `pnpm --filter @shape/bridge smoke` | the real bridge against `fake-omp-tui.mjs` — a fake omp that dials the link on its own and shows up as an observed session — driven over WebSocket; also the automatic map (reality extraction + skeleton seeding) and `set_project_status` closing and reopening a project's room | ~20s |
 
-All seven are what CI runs on every push and pull request. Four more are local-only by nature:
+All seven are what CI runs on every push and pull request. Five more are local-only by nature:
 
 | Command | Why it is not in CI |
 | --- | --- |
 | `pnpm smoke:remote` | runs `server-cli` and `agent-cli` as separate processes on real TCP ports |
 | `pnpm smoke:auth` | same, plus `login-cli`, two tenants and real token files |
-| `pnpm smoke:herdr` | models a herdr terminal tab over a unix socket (`fake-herdr.mjs`): the manager tab and `focus_terminal` |
-| `pnpm --filter @shape/bridge smoke:adopt` | scans the *real* agent sessions running on your machine, so its result depends on what you happen to have open |
+| `pnpm smoke:herdr` | models a herdr terminal tab over a unix socket (`fake-herdr.mjs`): the manager tab, found not opened, and `focus_terminal` |
+| `pnpm smoke:manager` | talks to your REAL herdr about a repo it makes in `/tmp`: the manager pass is FIND-only — an existing `manager` tab is recognised and configured, and nothing is ever opened — and it closes the workspace it made |
+| `pnpm --filter @shape/bridge smoke:projects` | runs against your REAL herdr: two temp repos, one with a fake `issue-1` agent; the registry upsert, marking a project inactive closing its room, and marking it active reopening it |
 
 Run `smoke:remote` and `smoke:auth` locally before a PR that touches split mode or auth;
-`smoke:herdr` before one that touches the herdr client; `smoke:adopt` before one that touches
-discovery or adopt. The full local set, on a laptop, is under two minutes.
+`smoke:herdr` and `smoke:manager` before one that touches the herdr client or the manager
+pass; `smoke:projects` before one that touches discovery or the registry. The full local set,
+on a laptop, is under two minutes.
 
 ## Code conventions
 

@@ -22,13 +22,13 @@ the manager beside it — and never from the browser.
   to get the right version.
 - **A coding harness that reports in**, one or both of:
   - `omp` — [oh-my-pi](https://github.com/can1357/oh-my-pi); the session loads Shape's own
-    extension, which every builder started from the project's manager tab is handed
-    automatically.
+    extension, which every builder the project's manager launches is handed automatically.
   - `claude` — Claude Code; the link ships the MCP server and the hooks it loads.
-- **herdr — optional, recommended.** A terminal multiplexer: with it, Shape finds (or opens)
-  the project's manager tab, every builder started there gets the link, and "go to the
-  terminal" on the canvas raises the tab a session is running in. Without it Shape still draws
-  whatever sessions report in — there is simply no terminal for the canvas to send you to.
+- **herdr — optional, recommended.** A terminal multiplexer: with it, Shape finds the
+  project's manager tab (it never opens one), the repo every herdr agent is working in becomes
+  a project on its own, and "go to the terminal" on the canvas raises the tab a session is
+  running in. Without herdr Shape still draws whatever sessions report in — there is simply no
+  terminal for the canvas to send you to.
 - **`gh`, authenticated — optional.** Used by manager mode (see below).
 
 ## Quick start
@@ -37,12 +37,15 @@ the manager beside it — and never from the browser.
 git clone https://github.com/orrgal1/shape.git
 cd shape
 pnpm install
-pnpm bridge -- --cwd <target-project>   # local mode: server + agent in one process
+pnpm bridge -- --cwd <target-project>   # local mode: server + agent in one process; --cwd optional
 pnpm web                                # canvas dev server
 ```
 
-Then open http://localhost:5173. The bridge points at one project at a time; `--cwd` may name
-any worktree of it. Two URL variants run the canvas with no bridge at all, which is the
+Then open http://localhost:5173. `--cwd` is only a seed — it puts one repo in the registry so
+a fresh machine has something to draw — and any worktree of a repo names it. Without it the
+bridge starts on whatever it already knows: the projects in its registry, the repos herdr's
+agents are working in, and any repo a session dials the link from (next section). Two URL
+variants run the canvas with no bridge at all, which is the
 quickest way to see what it looks like: `?mock=1` renders a hand-built graph that exercises
 every visual state, and `?mock=playground` renders
 `packages/web/src/fixtures/playground.json`, a real agent-written document from a mock
@@ -52,7 +55,31 @@ Canvas state is kept beside the harness, never in your repo: `~/.shape/shape.db`
 file holding every project's canvas, its revisions and the project registry (`SHAPE_HOME`
 moves the home directory, `--db <file>` names another database).
 
-An existing repo is better mapped through the `visualize` skill than by hand — next section.
+An existing repo is better mapped through the `visualize` skill than by hand — see **Map an
+existing repo** below.
+
+## Projects come to you
+
+You never open, create or pick a project. A project is a row in Shape's registry with a
+status, and a repo becomes one the first time Shape sees work in it: a herdr agent running
+there, a session dialing the loopback link from it, or the `--cwd` seed at startup. A repo is
+ONE project however many worktrees it has — they show up on its canvas as variations — and
+Shape rescans while a browser is watching (on connect, then every 30 s), so a repo you start
+working in appears without a reload.
+
+A project is **active** or **inactive**, and that is the only thing you change:
+
+- **active** — it has a canvas open and its sessions stream onto it. New projects arrive
+  active.
+- **inactive** — Shape stops watching it and closes its canvas, and it drops out of the
+  switcher's main list. Nothing is deleted: the graph, its revisions and the registry row
+  stay, so making it active again brings the canvas back exactly as it was.
+
+The header's project switcher is the whole interface: the active projects, each with a live
+dot and how many of its worktrees have a session running, the manager mark, and a **mark
+inactive** action; at the bottom, **show inactive (N)** reveals the rest, each with **make
+active**. Click or press Enter to switch; the arrow keys move. With nothing in the registry
+yet it says so — *No active projects — start an agent in a repo and it appears here.*
 
 ## Map an existing repo
 
@@ -63,7 +90,8 @@ ln -s "$PWD/skills/visualize" ~/.claude/skills/
 ```
 
 Then, from any repo, say "onboard this repo to Shape". The skill starts (or reuses) the bridge
-and web server, retargets the bridge at that repo, and hands back the canvas URL. The map
+and web server, seeds it with that repo — which is all it takes to make it a project — and
+hands back the canvas URL. The map
 starts itself: the bridge reads the checkout, and on a canvas with no bubbles it seeds one
 bubble per workspace package with the imports between them, so the picture is ground truth
 before any agent has said a word. The meaning on top of it — what each part promises, the
@@ -82,8 +110,9 @@ server half   packages/bridge/src/server/
    │  agent link: in-memory in local mode, ws://<host>:4400/agent when split
    ▼
 agent half    packages/bridge/src/agent/
-   │  tool detection, the project's manager tab under herdr, reality extraction,
-   │  worktrees, session discovery
+   │  AgentFleet: tool detection, the loopback endpoint, discovery,
+   │  one runtime per ACTIVE project — each doing reality extraction, worktrees
+   │  and the project's manager tab under herdr (found, never opened)
    ▼
 harness  — a real interactive session in a real terminal, started by you or by the
            manager, cwd = the worktree
@@ -101,13 +130,19 @@ one tool, `canvas`, and the agent only ever mutates the picture through it (`ups
 applies it, and broadcasts the whole document to every connected browser. Nothing travels the
 other way — there is no frame a browser can send that reaches an agent.
 
+A link caller also decides what Shape watches. A harness dialing in from a repo no runtime
+covers is answered with the reason and that repo is added to the registry as an active
+project, so its next dial lands on a real canvas; the same repos herdr's own agents are
+working in arrive the same way. Nothing in the browser opens or picks a project — it marks
+one active or inactive and switches between the active ones.
+
 Packages:
 
 - `packages/bridge` — the Node process: both halves above, plus the WebSocket server on
   127.0.0.1:4400 and the SQLite graph/revision store. Also ships the `server`, `agent` and
   `login` CLIs for split mode.
 - `packages/web` — Vite + React + React Flow canvas: layer policy, layout and motion, side
-  panel, project/worktree switcher, revisions and comparison.
+  panel, the project switcher, the variations filter, revisions and comparison.
 - `packages/shared` — the contract both sides import: types, `applyOps` validation, the
   `canvas` tool schema, the WebSocket and link message shapes, and revision diffing.
   `packages/shared/src/index.ts` is the machine-readable form of `CONTRACTS.md` and wins on
@@ -139,10 +174,10 @@ Intent, reality and drift are three different things, and keeping them apart is 
 
 Where state lives:
 
-- `~/.shape/shape.db` — every project's canvas, revisions and the project registry. Projects
-  are keyed per repo path, so a worktree keeps a canvas of its own.
-- `~/.shape/recents.json` — recently targeted projects; `~/.shape/servers.json` — tokens
-  saved by `pnpm login` (mode 0600).
+- `~/.shape/shape.db` — every project's canvas, revisions and the project registry, including
+  each project's active/inactive status. Canvases are keyed per repo path, so every worktree
+  keeps a canvas of its own under the one project.
+- `~/.shape/servers.json` — tokens saved by `pnpm login` (mode 0600).
 - `~/.shape/server/projects/<key>/shape-directive.md` — one file per project saying what Shape
   is, where this project's link is, and how to call the `canvas` tool; a session you started by
   hand is pointed at it.
@@ -156,9 +191,11 @@ Where state lives:
   server and its hooks. Any other session reports in through the link's one-shot CLI. Nothing
   is asked of a harness beyond dialing the loopback link — Shape never starts one.
 - **herdr — optional, recommended.** When herdr is installed and its socket answers, Shape
-  finds or opens the project's manager tab (`packages/bridge/src/agent/manager.ts`), so every
-  builder started from there is handed the link, and "go to the terminal" raises the tab a
-  session is running in (`packages/bridge/src/agent/launcher/herdr.ts`). Without herdr,
+  finds the project's manager tab (`packages/bridge/src/agent/manager.ts`) and configures it,
+  so every builder started from there is handed the link; the repos herdr's agents are working
+  in are also how projects find their way into the registry, and "go to the terminal" raises
+  the tab a session is running in (`packages/bridge/src/agent/launcher/herdr.ts`). Shape never
+  opens a tab of its own. Without herdr,
   sessions still report in from wherever you started them; the canvas simply has no terminal to
   send you to.
 - **The manager skill — optional adapter**, see below.
@@ -169,9 +206,12 @@ Shape is the picture beside the [manager skill](https://github.com/orrgal1/manag
 which uses GitHub issues as the board and runs one builder session per issue, each in its own
 herdr tab and its own git worktree. Every builder it starts is Shape-aware, so an issue you
 dispatch in the terminal shows up on the canvas as a session working in that variation. It
-needs `gh` installed and authenticated. Shape finds or opens the manager tab when a project
-opens ([#3](https://github.com/orrgal1/shape/issues/3), landed); making sessions that were
-already running Shape-aware ([#5](https://github.com/orrgal1/shape/issues/5)) and the manager
+needs `gh` installed and authenticated. Shape FINDS the manager tab of a project it watches and
+hands Shape down to the builders that manager launches
+([#3](https://github.com/orrgal1/shape/issues/3), landed — its "open a manager tab" half is
+gone since [#28](https://github.com/orrgal1/shape/issues/28): Shape starts nothing); making
+sessions that were already running Shape-aware
+([#5](https://github.com/orrgal1/shape/issues/5)) and the manager
 panel on the canvas — board, quota, priority and cap
 ([#8](https://github.com/orrgal1/shape/issues/8)) — are still open. Work is dispatched in the
 manager, never from the canvas.
@@ -182,7 +222,7 @@ The Shape server on one machine, an agent next to each harness and repo:
 
 ```bash
 pnpm server -- --port 4400                                   # browsers on /ws, agents on /agent
-pnpm agent -- --server ws://<server-host>:4400 --cwd <repo>  # reconnects, re-attaches; --link-port 4401 for MCP/hooks
+pnpm agent -- --server ws://<server-host>:4400 --cwd <repo>  # one repo, required here; reconnects, re-attaches; --link-port 4401 for MCP/hooks
 ```
 
 On-prem — anything but loopback needs tokens:
@@ -195,8 +235,10 @@ pnpm agent -- --server ws://<server-host>:4400 --cwd <repo>
 ```
 
 Browsers open `http://<web-host>:5173/?server=<server-host>:4400&token=<token>` once; the
-client keeps both in localStorage and strips them from the address bar. A project whose agent
-is away says "agent offline" and stops updating until it re-attaches.
+client keeps both in localStorage and strips them from the address bar. A remote agent watches
+exactly the repo it was given — `--cwd` is required there and nothing is discovered, so one
+agent process is one project — and a project whose agent is away says "agent offline" and
+stops updating until it re-attaches.
 `CONTRACTS.md` has the wire; the smoke tests that exercise these modes are listed in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
@@ -217,6 +259,9 @@ Early, and dogfooded daily. The v1 slice works end to end:
 - Sessions per variation: every session that reports in says what it is doing — its transcript,
   one line per tool call, the sentence being written right now — and under herdr "go to the
   terminal" takes you to the tab it runs in.
+- Projects that arrive on their own: a repo a session or a herdr agent is working in becomes an
+  active project with a canvas, and the switcher is where you mark one inactive and bring it
+  back later with its history intact.
 
 Known rough edges: drift UX has only been exercised on synthetic drift, the reality extractor
 covers pnpm/TypeScript monorepos (on other stacks the canvas starts empty and waits for an
