@@ -75,15 +75,11 @@ covers; each says what it asserts and why.
 | `pnpm smoke:shared` | `applyOps`, the layer walls, verification rules and symbol refs, in-process | ~2s |
 | `pnpm smoke:wire` | every wire frame in both directions, the SQLite store and its migrations, and the fakes themselves | ~3s |
 | `pnpm --filter @shape/bridge smoke:drift` | `computeDrift` against a frozen real graph — pure, no sockets | ~2s |
-| `pnpm --filter @shape/bridge smoke:claude` | the Claude Code path: hook events and canvas calls reaching the canvas over the link, with a real bridge driving `fake-claude.mjs`. No network, no model | ~3s |
 | `pnpm --filter @shape/link selftest:omp` | the real omp extension against a real WebSocket server and a stub `pi` (runs under Bun when Bun is installed, Node otherwise) | ~5s |
 | `pnpm smoke:link-cli` | the link CLI and the omp extension produce indistinguishable canvas calls, each through its own real bridge | ~3s |
-| `pnpm --filter @shape/bridge smoke` | the real bridge against `fake-omp-tui.mjs` — a fake omp that dials the link on its own and shows up as an observed session — driven over WebSocket | ~60s |
+| `pnpm --filter @shape/bridge smoke` | the real bridge against `fake-omp-tui.mjs` — a fake omp that dials the link on its own and shows up as an observed session — driven over WebSocket; also the automatic map (reality extraction + skeleton seeding) | ~20s |
 
-The first seven are what CI runs on every push and pull request. The bridge smoke is hermetic
-too, but one of its assertions fails on Linux ([#13](https://github.com/orrgal1/shape/issues/13)),
-so until that is fixed it runs locally only — before any PR that touches the bridge. Four more
-are local-only by nature:
+All seven are what CI runs on every push and pull request. Four more are local-only by nature:
 
 | Command | Why it is not in CI |
 | --- | --- |
