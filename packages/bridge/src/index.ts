@@ -96,7 +96,7 @@ try {
     seeds: cli.cwd === null ? [] : [cli.cwd],
     registry: {
       activeProjects: () => server.activeProjects(),
-      discovered: (repos) => server.discovered(LOCAL_TENANT, repos),
+      discovered: (repos, complete) => server.discovered(LOCAL_TENANT, repos, complete),
     },
     // one link per runtime: the server end is this process's business, so it
     // is attached here and the agent end handed back

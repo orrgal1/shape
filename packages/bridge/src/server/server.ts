@@ -234,42 +234,63 @@ export class ShapeServer {
    * here becomes an ACTIVE row with a synthesized project (no graph derived
    * yet, no harness known), its room opens agentless, and `onActivated` starts
    * the runtime that fills the rest in.
+   *
+   * A `complete` scan saw the whole machine, so every project of the tenant it
+   * does not mention has nothing live in it and its count goes to zero — a
+   * session that ended must not be shown running until the next one starts.
+   * One caller reporting in (`complete` false) says nothing about the rest.
    */
-  discovered(tenant: string, repos: SeenRepo[]): Promise<void> {
+  discovered(tenant: string, repos: SeenRepo[], complete = false): Promise<void> {
     return this.#serialize(async () => {
       let changed = false;
+      const mentioned = new Set<string>();
       for (const repo of repos) {
         const key = `${tenant}/${repo.key}`;
+        mentioned.add(key);
         const row = this.#registry.get(key);
         if (row === undefined) {
           await this.#insert(tenant, key, repo);
           changed = true;
           continue;
         }
-        const known = new Set(row.worktrees.map((info) => info.id));
-        const same =
-          row.liveSessions === repo.live.length &&
-          repo.worktrees.length === known.size &&
-          repo.worktrees.every((info) => known.has(info.id));
-        row.worktrees = repo.worktrees;
-        row.liveSessions = repo.live.length;
-        const room = this.#rooms.get(key);
-        if (room === undefined) {
-          // an inactive project keeps its data current: the switcher shows what
-          // is running in it, and marking it active again finds it up to date
-          await this.#storage.saveProject(row).catch((err: unknown) => {
-            console.error(`[bridge] failed to save project registry: ${errText(err)}`);
-          });
-        } else {
-          // the room counts the sessions on its own link too, so it files the
-          // row itself: what the scan saw is only half of what is live
-          room.noteSeen(repo.worktrees, repo.live);
-          void room.saveProject();
+        if (await this.#seen(key, row, repo.worktrees, repo.live)) changed = true;
+      }
+      if (complete) {
+        for (const [key, row] of this.#registry) {
+          if (row.tenant !== tenant || mentioned.has(key)) continue;
+          if (await this.#seen(key, row, row.worktrees, [])) changed = true;
         }
-        if (!same) changed = true;
       }
       if (changed) this.#broadcastProjects(tenant);
     });
+  }
+
+  /**
+   * One known project as a scan saw it. Resolves with whether the switcher's
+   * picture of it (worktrees, live count) moved.
+   */
+  async #seen(key: string, row: StoredProject, worktrees: WorktreeInfo[], live: string[]): Promise<boolean> {
+    const known = new Set(row.worktrees.map((info) => info.id));
+    const same =
+      row.liveSessions === live.length && worktrees.length === known.size && worktrees.every((info) => known.has(info.id));
+    const room = this.#rooms.get(key);
+    // the room counts the sessions on its own link too, so what the scan saw
+    // is only half of what is live there and it keeps the scan's half itself
+    room?.noteSeen(worktrees, live);
+    // a scan that repeats the last one every 30 s must not rewrite every row
+    if (same) return false;
+    row.worktrees = worktrees;
+    row.liveSessions = live.length;
+    if (room === undefined) {
+      // an inactive project keeps its data current: the switcher shows what
+      // is running in it, and marking it active again finds it up to date
+      await this.#storage.saveProject(row).catch((err: unknown) => {
+        console.error(`[bridge] failed to save project registry: ${errText(err)}`);
+      });
+    } else {
+      void room.saveProject();
+    }
+    return true;
   }
 
   /**

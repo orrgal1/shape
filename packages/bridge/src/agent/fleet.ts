@@ -42,6 +42,9 @@ import { canonicalDir, listWorktrees, projectKey, repoIdentity, worktreeContaini
  * still looking at the canvas.
  */
 const SCAN_INTERVAL_MS = 30_000;
+/** how many refused caller directories are remembered before the stale ones are dropped */
+const MAX_REPORTED = 256;
+const EMPTY: ReadonlySet<string> = new Set();
 
 /** Failures arrive as Errors whose message is already user-facing. */
 function errText(err: unknown): string {
@@ -55,7 +58,12 @@ function errText(err: unknown): string {
  */
 export interface FleetRegistry {
   activeProjects(): ActiveProject[];
-  discovered(repos: SeenRepo[]): Promise<void>;
+  /**
+   * What was seen. `complete` means this was a whole-machine scan, so a
+   * project it does not mention has nothing live in it; a single caller
+   * reporting in says nothing about the others.
+   */
+  discovered(repos: SeenRepo[], complete: boolean): Promise<void>;
 }
 
 export interface AgentFleetOptions {
@@ -87,8 +95,13 @@ export class AgentFleet {
    * runtime, and `start()` is far too long to hold the map's word for it.
    */
   readonly #starting = new Map<string, Promise<void>>();
-  /** link caller cwds already being reported to the registry, so a retrying caller reports once */
-  readonly #ensuring = new Set<string>();
+  /**
+   * Link caller cwds reported to the registry and when. A caller the registry
+   * has already heard about and still not placed (its project is inactive, or
+   * outside git) retries on its own backoff, and every hook it fires names the
+   * same directory: one report per scan interval is all the registry needs.
+   */
+  readonly #reported = new Map<string, number>();
 
   #timer: NodeJS.Timeout | null = null;
   /** a scan in flight; a tick that lands on one is dropped rather than queued */
@@ -267,23 +280,30 @@ export class AgentFleet {
 
   /**
    * Report the repo a link caller runs in, so the registry can give it a row
-   * and (if it is new) a room. Deduped by the spelling the caller used: a hook
-   * that fires every few seconds must not queue one insert per frame.
+   * and (if it is new) a room. Deduped by the spelling the caller used, for one
+   * scan interval: a hook that fires every few seconds must not queue one
+   * insert per frame, and a caller in an inactive project must not have its row
+   * rewritten on every retry.
    */
   async #ensureProject(cwd: string): Promise<void> {
     const registry = this.#registry;
     // a remote agent watches the repos it was given and discovers nothing
-    if (registry === null || this.#stopped || this.#ensuring.has(cwd)) return;
-    this.#ensuring.add(cwd);
+    if (registry === null || this.#stopped) return;
+    const last = this.#reported.get(cwd);
+    const now = Date.now();
+    if (last !== undefined && now - last < SCAN_INTERVAL_MS) return;
+    this.#reported.set(cwd, now);
+    // the map must not grow with every path a caller invents
+    if (this.#reported.size > MAX_REPORTED) {
+      for (const [entry, at] of this.#reported) if (now - at >= SCAN_INTERVAL_MS) this.#reported.delete(entry);
+    }
     try {
-      // a caller that speaks IS a session, git repo or not: `cwd` counts as
-      // named here exactly as a `--cwd` seed does
-      const repo = await this.#seenRepo(cwd, new Set([cwd]));
-      if (repo !== null) await registry.discovered([repo]);
+      // a caller outside git is a session, but not a project: the scan judges
+      // it the same way, and only a `--cwd` seed makes a non-git directory one
+      const repo = await this.#seenRepo(cwd, EMPTY);
+      if (repo !== null) await registry.discovered([repo], false);
     } catch (err) {
       console.error(`[bridge] cannot place ${cwd}: ${errText(err)}`);
-    } finally {
-      this.#ensuring.delete(cwd);
     }
   }
 
@@ -336,7 +356,9 @@ export class AgentFleet {
       }
     }
     if (this.#stopped) return;
-    await registry.discovered([...repos.values()]);
+    // a scan sees every session on this machine, so a repo it stays silent
+    // about has nothing live in it: the registry zeroes those counts itself
+    await registry.discovered([...repos.values()], true);
   }
 
   /**
