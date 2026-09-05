@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # No version pin: pnpm/action-setup reads `packageManager` from package.json,
       # so the runner and a developer machine use the same pnpm.
