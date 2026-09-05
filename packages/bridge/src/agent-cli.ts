@@ -5,9 +5,12 @@
  * harness-side processes — hooks, the MCP sidecar, the omp extension — on
  * 127.0.0.1 only, so those never hold server credentials.
  *
- * One agent per REPO; `--cwd` may be any worktree of it. It starts no coding
- * session: the sessions it shows are the ones already running in the repo's
- * worktrees, which report in over that link.
+ * One repo, named by `--cwd` (any worktree of it will do). A remote agent
+ * discovers nothing: the registry deciding which projects are active lives on
+ * the other side of the wire, so the fleet here holds exactly the project it
+ * was pointed at. It starts no coding session either — the sessions it shows
+ * are the ones already running in the repo's worktrees, which report in over
+ * that link.
  *
  * Run: node src/agent-cli.ts --server ws://host:port
  *        [--token <t>] [--cwd <dir>] [--link-port <n>]
@@ -15,7 +18,7 @@
 
 import { resolve } from "node:path";
 import { AGENT_WS_PATH, LINK_WS_PATH } from "../../shared/src/index.ts";
-import { AgentRuntime } from "./agent/runtime.ts";
+import { AgentFleet } from "./agent/fleet.ts";
 import { serverOrigin, tokenForServer } from "./servers.ts";
 import { connectAgentEnd } from "./transport.ts";
 import { SocketServer } from "./wsserver.ts";
@@ -98,7 +101,7 @@ try {
     (envToken !== undefined && envToken.length > 0 ? envToken : await tokenForServer(serverOrigin(cli.server)));
   const sockets = new SocketServer({ port: cli.linkPort });
   // the end owns the reconnect loop and says `waiting for Shape server` itself
-  // when the first connect fails; the runtime is its only frame listener
+  // when the first connect fails; the project's runtime is its only listener
   const link = connectAgentEnd(cli.server, {
     ...(token === null ? {} : { token }),
     // The runtime owns `onClose`, so a refused token is reported here. It is
@@ -110,13 +113,13 @@ try {
     },
   });
 
-  const agent = new AgentRuntime({
-    cwd: cli.cwd,
+  const fleet = new AgentFleet({
     sockets,
-    link,
-    // a retarget that failed has left this process with nowhere to stand;
-    // the room has already been told why, so all that is left is to go
-    onExit: () => setTimeout(() => process.exit(1), 50),
+    seeds: [cli.cwd],
+    // the registry is the server's, on the far side of the link: this process
+    // watches the repo it was pointed at and discovers nothing else
+    registry: null,
+    link: () => link,
   });
 
   // Registered before start(): Ctrl-C must work while we are still waiting for
@@ -127,7 +130,7 @@ try {
     process.on(signal, () => {
       if (stopping) return;
       stopping = true;
-      void agent.stop().then(
+      void fleet.stop().then(
         () => process.exit(0),
         () => process.exit(0),
       );
@@ -139,7 +142,7 @@ try {
   // second of the TUI coming up) arrives over it, and a hook that finds nobody
   // listening exits silently.
   await sockets.listen();
-  await agent.start();
+  await fleet.start();
   // a stop or a refused token settles the same gate: we were never attached,
   // and the process is already on its way out
   if (!stopping && !link.closed) {

@@ -2,10 +2,11 @@
  * The herdr client: a direct client of herdr's socket API, so Shape can see
  * the user's own terminal multiplexer and show them the tab a session runs in.
  *
- * Shape starts no coding sessions. What it uses herdr for is threefold: the
- * project's MANAGER tab (`../manager.ts`), which Shape does open and prompt
- * once; looking at what is live (`tabs`, `agents`) so the manager can be found
- * again; and bringing a session's tab in front of the user (`focusCwd`).
+ * Shape starts no sessions at all, the project's manager included. What it
+ * uses herdr for is twofold: looking at what is live (`workspaceOf`, `tabs`,
+ * `agents`) so the project's manager tab can be recognized (`../manager.ts`)
+ * and so a repo somebody is working in is discovered at all; and bringing a
+ * session's tab in front of the user (`focusCwd`).
  *
  * Wire (agent://HerdrMap, re-verified against the real herdr 0.8.0, protocol
  * 19): newline-delimited JSON over a unix socket, `{id, method, params}` ->
@@ -18,26 +19,19 @@
  * comes back with `id: ""`, so the first response line on a connection
  * carrying one request is that request's answer.
  *
- * Opening the manager is two steps because herdr's is: `tab.create` makes a
- * tab whose root pane sits at an idle shell, then `agent.start` runs omp in
- * that pane and waits until herdr recognizes it. Placement is the other half:
- * a project gets ONE workspace, found (`workspace.list`) by the id Shape last
- * used for it, then by a workspace herdr says is a checkout of it, then by its
- * name; nothing matching means `workspace.create`, whose answer already
- * carries the first tab and root pane — so the manager can take that root tab
- * and asks for no tab of its own. The names `agent.start` is asked for are the
- * caller's in order (`manager` first), because a session Shape has to
- * recognize again after a restart is recognized by its name.
+ * A project gets ONE workspace and Shape never creates it: `workspace.list` is
+ * searched for one herdr says is a checkout of the project, then for one
+ * carrying its name. Nothing matching means the user has no workspace for that
+ * project, which is a real answer.
  *
- * Focusing is two steps for the same reason: `agent.focus` switches the tab
- * INSIDE herdr, but the terminal application hosting it is still behind the
- * browser, so from the user's chair nothing happened. On macOS the app bundle
- * is found by walking the herdr client's parent chain out to a `.app`
- * (`SHAPE_TERMINAL_APP` names it outright, for an operator or a test) and
- * raised with `open` (`SHAPE_OPEN` replaces that binary in a test). Where
- * nothing can be raised — another platform, a client over ssh or in a bare
- * console — the tab is still switched, and the failure to raise the window is
- * what the user is told.
+ * Focusing is two steps: `agent.focus` switches the tab INSIDE herdr, but the
+ * terminal application hosting it is still behind the browser, so from the
+ * user's chair nothing happened. On macOS the app bundle is found by walking
+ * the herdr client's parent chain out to a `.app` (`SHAPE_TERMINAL_APP` names
+ * it outright, for an operator or a test) and raised with `open` (`SHAPE_OPEN`
+ * replaces that binary in a test). Where nothing can be raised — another
+ * platform, a client over ssh or in a bare console — the tab is still
+ * switched, and the failure to raise the window is what the user is told.
  */
 
 import { execFile } from "node:child_process";
@@ -45,7 +39,6 @@ import { realpath } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { basename, join, resolve as resolvePath } from "node:path";
-import type { HarnessId } from "../../../../shared/src/index.ts";
 
 /** the protocol version this client was written against (herdr 0.8.x) */
 const PROTOCOL = 19;
@@ -55,21 +48,6 @@ const STATUS_TIMEOUT_MS = 10_000;
 
 /** a call herdr has not answered in this long is a call it will not answer */
 const CALL_TIMEOUT_MS = 30_000;
-
-/** `agent.start` waits for herdr to recognize the harness; its own ceiling */
-const START_TIMEOUT_MS = 60_000;
-
-/** names already taken on the server before an open gives up (see `#start`) */
-const MAX_NAME_ATTEMPTS = 20;
-
-/**
- * How long a prompt waits for a just-started agent to become addressable.
- * `agent.start` answering means herdr recognized the harness, not that it will
- * take a prompt yet, so the pane is polled until it stops saying it is still
- * launching.
- */
-const PROMPT_READY_MS = 15_000;
-const PROMPT_POLL_MS = 250;
 
 /** connecting to a socket nobody is listening on must not hang the startup */
 const CONNECT_TIMEOUT_MS = 3_000;
@@ -89,9 +67,6 @@ const OPEN_BINARY = process.env.SHAPE_OPEN ?? "open";
 /** the app bundle to raise, named by an operator (or a test) who knows better */
 const TERMINAL_APP_ENV = "SHAPE_TERMINAL_APP";
 
-/** herdr agent names: `[a-z][a-z0-9_-]{0,31}`, unique among live agents */
-const MAX_AGENT_NAME = 32;
-
 /** ids herdr sees in its own log: one per request this process ever sends */
 let requests = 0;
 
@@ -106,16 +81,11 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 /**
- * A refusal herdr named. The code is kept because a couple of them are not
- * failures but facts about the user's terminal — `workspace_not_found` means
- * they closed the project's workspace while Shape was not looking.
+ * A refusal herdr named. The code travels in the message because nothing acts
+ * on it: every call this client makes is one a project can simply do without.
  */
-class HerdrRefusal extends Error {
-  readonly code: string;
-  constructor(code: string, message: string) {
-    super(`herdr refused: ${code} (${message})`);
-    this.code = code;
-  }
+function refusal(code: string, message: string): Error {
+  return new Error(`herdr refused: ${code} (${message})`);
 }
 
 /** an id herdr actually gave us, as opposed to a field of the wrong shape */
@@ -135,20 +105,6 @@ async function canonical(path: string): Promise<string> {
   } catch {
     return resolvePath(path);
   }
-}
-
-/**
- * The tab and root pane out of a `tab.create` or `workspace.create` answer:
- * both carry the same pair, which is the whole reason a fresh workspace needs
- * no second call to be usable.
- */
-function tabAndPane(answer: Record<string, unknown>): { tabId: string; paneId: string } {
-  const tabId = asId(asRecord(answer.tab).tab_id);
-  const paneId = asId(asRecord(answer.root_pane).pane_id);
-  if (tabId === null || paneId === null) {
-    throw new Error("herdr created a tab without a pane id — cannot start a harness in it");
-  }
-  return { tabId, paneId };
 }
 
 /** Where herdr listens: the operator's own path, or herdr's default. */
@@ -401,22 +357,12 @@ class HerdrConnection {
         const error = asRecord(frame.error);
         const code = typeof error.code === "string" ? error.code : "error";
         const message = typeof error.message === "string" ? error.message : code;
-        entry.fail(new HerdrRefusal(code, message));
+        entry.fail(refusal(code, message));
         continue;
       }
       entry.settle(asRecord(frame.result));
     }
   }
-}
-
-/** the tab a session was given, and the project workspace holding it */
-interface Placed {
-  tabId: string;
-  paneId: string;
-  /** the workspace's name, for the log line a human reads */
-  workspace: string;
-  /** the workspace's id, for callers that go on talking to herdr about it */
-  workspaceId: string;
 }
 
 /** one tab of a project's workspace, as much of it as a caller needs to look */
@@ -434,34 +380,6 @@ export interface HerdrAgent {
   cwd: string | null;
 }
 
-/** what `open` needs to place a tab and start a harness in it */
-export interface HerdrOpenSpec {
-  /** where the harness runs */
-  cwd: string;
-  /** which harness this is; herdr needs it to recognize the pane */
-  kind: HarnessId;
-  /** the whole command line, argv[0] included (the executable) */
-  argv: string[];
-  /** added to the session's environment, never replacing it */
-  env: Record<string, string>;
-  /**
-   * The project this tab belongs to: its main worktree's realpath and the name
-   * a human calls it. herdr keeps every tab of one project in ONE workspace,
-   * so the workspace has to be findable (and namable) from the project.
-   */
-  project: { path: string; label: string };
-  /** what the tab is called where a human can see it */
-  label: string;
-}
-
-/** a harness started by `open`: a tab and a name, and nothing watching it */
-export interface HerdrOpened {
-  paneId: string;
-  tabId: string;
-  workspaceId: string;
-  agentName: string;
-}
-
 export class HerdrLauncher {
   readonly id = "herdr" as const;
   readonly label = "herdr";
@@ -470,9 +388,6 @@ export class HerdrLauncher {
   readonly #version: string;
   /** the app bundle to raise; a hint, re-probed when raising it fails */
   #terminalApp: string | null;
-  /** project main worktree -> the workspace hosting that project's tabs */
-  readonly #workspaces = new Map<string, string>();
-  #seq = 0;
 
   private constructor(opts: { path: string; version: string; terminalApp: string | null }) {
     this.#path = opts.path;
@@ -543,57 +458,6 @@ export class HerdrLauncher {
   }
 
   /**
-   * Start a harness in a tab of this project's workspace and hand back where
-   * it landed — Shape does not watch it afterwards.
-   *
-   * This is for the one session Shape opens rather than observes: the
-   * project's manager (`../manager.ts`). A project with no workspace yet gets
-   * one whose root tab becomes this tab, renamed to `spec.label`.
-   *
-   * The names are the caller's, in order, because a manager is known by name
-   * to whoever reads the tab strip (`manager` first); only once every one of
-   * them is taken does this fall back to numbering the last (`-2`, `-3`, …).
-   */
-  async open(spec: HerdrOpenSpec, names: readonly string[]): Promise<HerdrOpened> {
-    const candidates = names.filter((name) => name.length > 0);
-    if (candidates.length === 0) throw new Error("herdr cannot start an agent without a name to try");
-    const last = candidates[candidates.length - 1] as string;
-    const placed = await this.#place(spec);
-    const name = await this.#start(placed, spec, (attempt) => {
-      const candidate = candidates[attempt];
-      if (candidate !== undefined) return candidate;
-      const suffix = `-${String(attempt - candidates.length + 2)}`;
-      return `${last.slice(0, MAX_AGENT_NAME - suffix.length)}${suffix}`;
-    });
-    console.error(
-      `[bridge] herdr started ${spec.kind} as ${name} in pane ${placed.paneId} of workspace ${placed.workspace} (${spec.cwd})`,
-    );
-    return { paneId: placed.paneId, tabId: placed.tabId, workspaceId: placed.workspaceId, agentName: name };
-  }
-
-  /**
-   * Type a prompt into a pane, after the gap between `agent.start` answering
-   * and herdr treating that agent as addressable (see PROMPT_READY_MS). A pane
-   * with no agent left in it is not going to become ready: `agent.get`
-   * refusing, or the wait running out, is the caller's.
-   */
-  async prompt(paneId: string, text: string): Promise<void> {
-    const deadline = Date.now() + PROMPT_READY_MS;
-    for (;;) {
-      const got = await this.#call("agent.get", { target: paneId });
-      if (asRecord(got.agent).launch_pending !== true) break;
-      if (Date.now() >= deadline) {
-        throw new Error(`agent in pane ${paneId} was still starting after ${String(PROMPT_READY_MS)}ms`);
-      }
-      const { promise, resolve: settle } = Promise.withResolvers<void>();
-      // a wait for a session nobody is watching must not hold the process open
-      setTimeout(settle, PROMPT_POLL_MS).unref();
-      await promise;
-    }
-    await this.#call("agent.prompt", { target: paneId, text });
-  }
-
-  /**
    * Bring the session running in `cwd` in front of the user: switch herdr to
    * its tab, then raise the terminal application hosting it.
    *
@@ -630,9 +494,21 @@ export class HerdrLauncher {
    * The workspace hosting this project, if the user has one — find only. A
    * caller that is looking for something already in the user's terminal must
    * not bring a workspace into existence by asking.
+   *
+   * Matched by descending confidence: one herdr says is a checkout of the
+   * project, then one simply carrying the project's name — a workspace the
+   * user opened for this repo by hand is the right home too.
    */
   async workspaceOf(project: { path: string; label: string }): Promise<string | null> {
-    return (await this.#findWorkspace(project))?.id ?? null;
+    const listed = await this.#call("workspace.list", {});
+    const workspaces = (Array.isArray(listed.workspaces) ? listed.workspaces : []).map(asRecord);
+    const match =
+      workspaces.find((workspace) => {
+        // plain workspaces carry no worktree at all; asRecord makes that a miss
+        const worktree = asRecord(workspace.worktree);
+        return worktree.repo_root === project.path || worktree.checkout_path === project.path;
+      }) ?? workspaces.find((workspace) => workspace.label === project.label);
+    return match === undefined ? null : asId(match.workspace_id);
   }
 
   /** Every tab of one workspace, by the label a human reads in the tab strip. */
@@ -677,36 +553,6 @@ export class HerdrLauncher {
     await this.#call("workspace.close", { workspace_id: workspaceId });
   }
 
-  /**
-   * Run the harness in a placed tab, under the first name herdr accepts.
-   *
-   * Agent names are unique per herdr SERVER, and Shape's own numbering is per
-   * process: a bridge restarted under a tab its predecessor left running (the
-   * user's terminal outlives us) collides on the name it would pick first.
-   * herdr says so with `agent_name_taken`, so the next candidate is tried —
-   * the tab that was already created is the one the harness must start in.
-   * Every other refusal takes the tab down with it: a tab with a dead shell in
-   * it is litter in the user's terminal.
-   */
-  async #start(placed: Placed, spec: HerdrOpenSpec, nextName: (attempt: number) => string): Promise<string> {
-    for (let attempt = 0; ; attempt++) {
-      const name = nextName(attempt);
-      try {
-        await this.#call(
-          "agent.start",
-          // `AgentStartParams` in herdr's schema: `pane_id`, `timeout_ms` (3 000 < t ≤ 300 000)
-          { name, kind: spec.kind, pane_id: placed.paneId, args: spec.argv.slice(1), timeout_ms: START_TIMEOUT_MS },
-          START_TIMEOUT_MS + CALL_TIMEOUT_MS,
-        );
-        return name;
-      } catch (err) {
-        if (err instanceof HerdrRefusal && err.code === "agent_name_taken" && attempt < MAX_NAME_ATTEMPTS) continue;
-        await this.#call("tab.close", { tab_id: placed.tabId }).catch(() => undefined);
-        throw err;
-      }
-    }
-  }
-
   /** every plain method: one connection, one answer, gone (see the header) */
   #call(method: string, params: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, unknown>> {
     return HerdrConnection.call(this.#path, method, params, timeoutMs);
@@ -731,96 +577,5 @@ export class HerdrLauncher {
       return;
     }
     throw new Error(`herdr's tab is focused, but its terminal window could not be brought forward: ${retry}`);
-  }
-
-  /**
-   * Where this tab goes: the workspace that already hosts this project, or a
-   * new one named after it. The cache is only ever a hint — the user owns
-   * these workspaces and can close one between two opens — so every open
-   * re-lists and a stale entry is dropped rather than trusted.
-   */
-  async #place(spec: HerdrOpenSpec): Promise<Placed> {
-    const found = await this.#findWorkspace(spec.project);
-    if (found !== null) {
-      try {
-        const created = await this.#call("tab.create", {
-          workspace_id: found.id,
-          cwd: spec.cwd,
-          label: spec.label,
-          env: spec.env,
-          // a session Shape started must not steal the terminal the user is in
-          focus: false,
-        });
-        this.#workspaces.set(spec.project.path, found.id);
-        return { ...tabAndPane(created), workspace: found.label, workspaceId: found.id };
-      } catch (err) {
-        // the workspace went away between the list and the create: the user
-        // closed it, and this project needs a new one. Every other refusal is
-        // the caller's to hear about
-        if (!(err instanceof HerdrRefusal) || err.code !== "workspace_not_found") throw err;
-        this.#workspaces.delete(spec.project.path);
-      }
-    }
-    return await this.#createWorkspace(spec);
-  }
-
-  /**
-   * The workspace already hosting this project, by descending confidence: the
-   * one Shape opened for it (when the user still has it), one herdr says is a
-   * checkout of the project, then one simply carrying the project's name — a
-   * workspace the user opened for this repo by hand is the right home too.
-   */
-  async #findWorkspace(project: { path: string; label: string }): Promise<{ id: string; label: string } | null> {
-    const listed = await this.#call("workspace.list", {});
-    const workspaces = (Array.isArray(listed.workspaces) ? listed.workspaces : []).map(asRecord);
-    const cached = this.#workspaces.get(project.path);
-    const match =
-      (cached === undefined ? undefined : workspaces.find((workspace) => workspace.workspace_id === cached)) ??
-      workspaces.find((workspace) => {
-        // plain workspaces carry no worktree at all; asRecord makes that a miss
-        const worktree = asRecord(workspace.worktree);
-        return worktree.repo_root === project.path || worktree.checkout_path === project.path;
-      }) ??
-      workspaces.find((workspace) => workspace.label === project.label);
-    if (match === undefined) {
-      this.#workspaces.delete(project.path);
-      return null;
-    }
-    const id = asId(match.workspace_id);
-    if (id === null) return null;
-    return { id, label: typeof match.label === "string" ? match.label : project.label };
-  }
-
-  /**
-   * A workspace of this project's own, because nothing hosts it yet. herdr
-   * answers with the workspace AND its first tab and root pane, so this tab
-   * takes that root tab — renamed to say what it is — and the project's first
-   * tab costs one call instead of two. The workspace opens in the tab's own
-   * directory, which for the manager is the main worktree.
-   */
-  async #createWorkspace(spec: HerdrOpenSpec): Promise<Placed> {
-    const created = await this.#call("workspace.create", {
-      cwd: spec.cwd,
-      label: spec.project.label,
-      env: spec.env,
-      focus: false,
-    });
-    const workspaceId = asId(asRecord(created.workspace).workspace_id);
-    // the id is how everything after this addresses the workspace (which tabs
-    // are in it, which agent is the manager): an answer without one is not a
-    // workspace Shape can go on to use
-    if (workspaceId === null) throw new Error("herdr created a workspace without an id");
-    this.#workspaces.set(spec.project.path, workspaceId);
-    const placed = { ...tabAndPane(created), workspace: spec.project.label, workspaceId };
-    try {
-      await this.#call("tab.rename", { tab_id: placed.tabId, label: spec.label });
-    } catch (err) {
-      // the label is only what a human reads in their own tab strip: worth a
-      // line on stderr, never worth losing the session over
-      console.error(
-        `[bridge] herdr would not rename tab ${placed.tabId} to ${spec.label}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    return placed;
   }
 }

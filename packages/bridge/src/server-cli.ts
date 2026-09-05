@@ -93,9 +93,11 @@ try {
   // mounts both paths and needs no further handle beyond the restore below:
   // agents arrive on their own
   const server = new ShapeServer({ sockets, storage, auth });
-  // rooms are back — agentless — before the first browser or agent can arrive
+  // the registry is loaded and every ACTIVE project's room is back — agentless
+  // — before the first browser or agent can arrive; an inactive project stays
+  // a row until an operator marks it active again
   const restored = await server.restore();
-  if (restored > 0) console.error(`[bridge] restored ${restored} project(s) from ${cli.dataDir}`);
+  if (restored > 0) console.error(`[bridge] restored ${restored} active project(s) from ${cli.dataDir}`);
   await sockets.listen();
   console.error(`[bridge] server at ${sockets.url(BRIDGE_WS_PATH)} (agents at ${AGENT_WS_PATH})`);
 } catch (err) {

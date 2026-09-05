@@ -11,9 +11,10 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import type { WorktreeInfo } from "../../../shared/src/index.ts";
 
 const EXCLUDE_LINE = ".shape/";
@@ -95,6 +96,47 @@ export async function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
     branch: stanza.branch,
     head: stanza.head,
   }));
+}
+
+/**
+ * Canonical form of a directory somebody named, for prefix matching against
+ * worktree ids (which are always realpaths).
+ *
+ * The deepest EXISTING ancestor is what gets resolved: a caller may name a
+ * directory that no longer exists (a removed worktree, a path built by hand),
+ * and its ancestors still say which repo it was in. Matching stops at a
+ * worktree root anyway, so dropping the unresolvable tail cannot change the
+ * answer. Synchronous because it sits on the link's per-frame path, where the
+ * answers are memoized and one `realpathSync` beats scheduling a microtask.
+ */
+export function canonicalDir(cwd: string): string {
+  const asked = resolve(cwd);
+  let path = asked;
+  for (;;) {
+    try {
+      return realpathSync(path);
+    } catch {
+      const parent = dirname(path);
+      // nothing on the way to the root exists: judge it by its spelling
+      if (parent === path) return asked;
+      path = parent;
+    }
+  }
+}
+
+/**
+ * Which worktree a path belongs to: the deepest listed worktree that contains
+ * it, or null for a path outside them all. Compared as realpaths, which is
+ * what a worktree id is — `resolve()` alone would make `/tmp` and
+ * `/private/tmp` two different variations on macOS.
+ */
+export function worktreeContaining(worktrees: readonly WorktreeInfo[], realpathOfDir: string): string | null {
+  let best: string | null = null;
+  for (const { id } of worktrees) {
+    if (realpathOfDir !== id && !realpathOfDir.startsWith(`${id}${sep}`)) continue;
+    if (best === null || id.length > best.length) best = id;
+  }
+  return best;
 }
 
 /** What one repo is, whichever of its worktrees the agent was pointed at. */

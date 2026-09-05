@@ -9,6 +9,11 @@
  * that tenant: a socket is admitted as one at the upgrade and never learns
  * that another exists.
  *
+ * A socket is joined to a room, moved to another one (`join`), or left with
+ * none at all: a browser whose project was marked inactive, and one that
+ * connected before its tenant had a project, wait the same way and are
+ * greeted by the next room that opens (`leave`, `greetPending`).
+ *
  * A handler gets a `reply` alongside the message: frames a caller asked for by
  * id go back to the socket that asked, never to everyone. Link frames are not
  * this socket's business — they arrive on the link and are validated in
@@ -38,33 +43,28 @@ export function parseClientMsg(raw: string): ClientMsg | null {
   // the worktree every worktree-scoped frame below is checked against; read
   // once, because a frame that has none is rejected by each of them
   const worktree = "worktree" in parsed && typeof parsed.worktree === "string" && parsed.worktree.length > 0 ? parsed.worktree : null;
-  if (parsed.type === "switch_project") {
-    if (!("path" in parsed) || typeof parsed.path !== "string" || parsed.path.trim().length === 0) return null;
-    return { type: "switch_project", path: parsed.path.trim() };
-  }
+  // the project a project-scoped frame names; the same reasoning as `worktree`
+  const projectId = "projectId" in parsed && typeof parsed.projectId === "string" && parsed.projectId.length > 0 ? parsed.projectId : null;
   if (parsed.type === "select_project") {
-    if (!("projectId" in parsed) || typeof parsed.projectId !== "string" || parsed.projectId.length === 0) return null;
-    return { type: "select_project", projectId: parsed.projectId };
+    if (projectId === null) return null;
+    return { type: "select_project", projectId };
+  }
+  if (parsed.type === "set_project_status") {
+    if (projectId === null) return null;
+    // the only two statuses there are: anything else is a client that thinks
+    // Shape has more states than "we hold a room for it" and "we do not"
+    if (!("status" in parsed) || (parsed.status !== "active" && parsed.status !== "inactive")) return null;
+    return { type: "set_project_status", projectId, status: parsed.status };
   }
   if (parsed.type === "focus_terminal") {
     if (worktree === null) return null;
     return { type: "focus_terminal", worktree };
   }
-  if (parsed.type === "diff") {
-    if (worktree === null) return null;
-    if (!("revA" in parsed) || typeof parsed.revA !== "number" || !Number.isInteger(parsed.revA)) return null;
-    if (!("revB" in parsed) || typeof parsed.revB !== "number" || !Number.isInteger(parsed.revB)) return null;
-    return { type: "diff", worktree, revA: parsed.revA, revB: parsed.revB };
-  }
-  if (parsed.type === "discover") return { type: "discover" };
-  // no fields: which machine's chooser to open is the connection's project,
-  // and the answer goes back to this socket alone
-  if (parsed.type === "pick_folder") return { type: "pick_folder" };
-  if (parsed.type !== "adopt") return null;
-  if (!("pid" in parsed) || typeof parsed.pid !== "number" || !Number.isInteger(parsed.pid) || parsed.pid <= 0) {
-    return null;
-  }
-  return { type: "adopt", pid: parsed.pid };
+  if (parsed.type !== "diff") return null;
+  if (worktree === null) return null;
+  if (!("revA" in parsed) || typeof parsed.revA !== "number" || !Number.isInteger(parsed.revA)) return null;
+  if (!("revB" in parsed) || typeof parsed.revB !== "number" || !Number.isInteger(parsed.revB)) return null;
+  return { type: "diff", worktree, revA: parsed.revA, revB: parsed.revB };
 }
 
 export interface WsHubOptions {
@@ -89,6 +89,12 @@ export interface WsHubOptions {
   hello: (key: string) => Promise<ServerMsg | null>;
   /** `reply` reaches only the socket the message came from */
   onMessage: (msg: ClientMsg, socket: WebSocket, reply: (msg: ServerMsg) => void) => void;
+  /**
+   * The number of connected browsers, after every arrival and every drop. Zero
+   * means nobody is watching: local mode stops scanning the machine until
+   * somebody opens the canvas again.
+   */
+  onClients?: (count: number) => void;
 }
 
 export class WsHub {
@@ -101,11 +107,14 @@ export class WsHub {
   readonly #ungreeted = new Set<WebSocket>();
   /** the tenant each browser was admitted as, decided at the upgrade */
   readonly #tenants = new Map<WebSocket, string>();
+  readonly #onClients: ((count: number) => void) | null;
 
   constructor(opts: WsHubOptions) {
+    this.#onClients = opts.onClients ?? null;
     const mount: ConnectionHandler = (socket, _request, tenant) => {
       this.#clients.add(socket);
       this.#tenants.set(socket, tenant);
+      this.#onClients?.(this.#clients.size);
       // handlers first: hello is async, and a client may talk before it lands
       socket.on("message", (data) => {
         const msg = parseClientMsg(data.toString());
@@ -162,13 +171,21 @@ export class WsHub {
   }
 
   /**
-   * The agent that held `from` re-attached to `to`: its browsers asked for that
-   * switch, so they follow it instead of watching a project nothing runs in.
+   * That project has no room any more (it was marked inactive): its browsers
+   * are unjoined and owed a hello somewhere else, so they are handed back to
+   * the caller — and marked ungreeted, so one left with nowhere to go is
+   * greeted by the next room of its tenant like a socket that arrived early.
    */
-  move(from: string, to: string): void {
-    const members = this.#rooms.get(from);
-    if (members === undefined) return;
-    for (const socket of [...members]) this.join(socket, to);
+  leave(key: string): WebSocket[] {
+    const members = this.#rooms.get(key);
+    if (members === undefined) return [];
+    const sockets = [...members];
+    this.#rooms.delete(key);
+    for (const socket of sockets) {
+      this.#joined.delete(socket);
+      this.#ungreeted.add(socket);
+    }
+    return sockets;
   }
 
   /**
@@ -204,12 +221,16 @@ export class WsHub {
   }
 
   #drop(socket: WebSocket): void {
-    this.#clients.delete(socket);
+    // both `close` and `error` land here for the same socket; the count goes
+    // out for the first of them only
+    if (!this.#clients.delete(socket)) return;
     this.#ungreeted.delete(socket);
     this.#tenants.delete(socket);
     const key = this.#joined.get(socket);
-    if (key === undefined) return;
-    this.#joined.delete(socket);
-    this.#rooms.get(key)?.delete(socket);
+    if (key !== undefined) {
+      this.#joined.delete(socket);
+      this.#rooms.get(key)?.delete(socket);
+    }
+    this.#onClients?.(this.#clients.size);
   }
 }

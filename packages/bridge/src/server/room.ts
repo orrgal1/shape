@@ -16,9 +16,9 @@
  * the mechanical skeleton of a project whose canvas is still empty.
  *
  * The room never touches the target repo. Everything that needs a filesystem —
- * reality extraction, worktrees, session discovery, the mechanical skeleton —
- * is asked of the agent and awaited as a link answer, so a project on another
- * machine is served exactly like a local one.
+ * reality extraction, worktrees, the mechanical skeleton — is asked of the
+ * agent and awaited as a link answer, so a project on another machine is
+ * served exactly like a local one.
  */
 
 import { basename, isAbsolute, relative, resolve } from "node:path";
@@ -33,7 +33,6 @@ import type {
   BackendInfo,
   CanvasOp,
   ClientMsg,
-  DiscoveredSession,
   GraphDoc,
   ProjectSummary,
   ProjectTools,
@@ -52,11 +51,19 @@ import { SnapshotStore } from "./snapshots.ts";
 import { mainWorktreeOf, type AuditBody, type Storage, type StoredProject } from "./storage.ts";
 import { GraphStore } from "./store.ts";
 
-/** the frame that opens (or retargets) a room */
+/** the frame that opens a room, or re-binds the one its agent already holds */
 export type AttachMsg = Extract<AgentToServerMsg, { type: "attach" }>;
 
 /** everything else an agent sends; `attach` is the server's business, not a room's */
 export type AgentFrame = Exclude<AgentToServerMsg, { type: "attach" }>;
+
+/**
+ * The browser frames a room answers. The other two a client can send —
+ * `select_project` and `set_project_status` — are about which project, not
+ * about one project's canvases, and the server handles them before a room is
+ * ever consulted.
+ */
+export type RoomClientMsg = Extract<ClientMsg, { type: "focus_terminal" | "diff" }>;
 
 /**
  * One variation of the project: its canvas and everything that is true of that
@@ -141,23 +148,6 @@ export interface ProjectRoomOptions {
  * a busy agent: it falls back to what the last attach told us.
  */
 const REQUEST_TIMEOUT_MS = 3_000;
-
-/**
- * How long a folder chooser may stand open before the room stops waiting on
- * it. Generous on purpose: a person browsing for a project takes minutes, and
- * the dialog is modal on their machine. It only exists so an answer that never
- * comes — a tab closed mid-dialog, an agent that dropped — cannot leave the
- * menu refusing every later chooser.
- */
-const PICK_TIMEOUT_MS = 600_000;
-
-/**
- * An `agent_error` starting with one of these settles a switch attempt — the
- * agent refused or failed it, so the guard that serializes switches opens
- * again. Any other adapter error may well arrive mid-switch and says nothing
- * about it. (`scripts/ctl.mjs` reads the same prefixes as "switch over".)
- */
-const SWITCH_SETTLED_PREFIXES = ["switch_project", "adopt rejected"];
 
 /** Refusal for everything that needs the agent while none is attached. */
 const AGENT_GONE = "no agent is attached to this project — start `shape agent` in it";
@@ -249,16 +239,25 @@ export class ProjectRoom {
   #lastSeen = new Date().toISOString();
   /** last values the agent reported; a hello the agent does not answer uses these */
   #worktrees: WorktreeInfo[] = [];
-  #discovered: DiscoveredSession[] = [];
-  #recents: string[] = [];
-  #switching = false;
   /**
-   * The folder chooser standing open on the agent's machine: the socket that
-   * asked for it, and the timer that gives up on it. One at a time, because
-   * one machine can only have one modal dialog in front of the user — and the
-   * answer is that socket's alone, so it is kept rather than broadcast.
+   * Worktree ids the last discovery scan found a live session in — a herdr
+   * agent, or a caller on the loopback link. Those are the sessions only the
+   * scan can see: the ones reporting in over this room's own link are in the
+   * worktree states, and the live count is the union of the two.
    */
-  #picking: { reply: (msg: ServerMsg) => void; timer: NodeJS.Timeout } | null = null;
+  #seenLive = new Set<string>();
+  /**
+   * When this project's status was last set. A room only ever holds an ACTIVE
+   * project, so it carries the stamp it was restored with instead of deciding
+   * one: the row it files must not move a status the registry owns.
+   */
+  #statusChangedAt = new Date().toISOString();
+  /**
+   * The row this room filed on its way out. A closed room has dropped its
+   * canvases, so it can no longer count what was running in them: the row it
+   * last wrote is the answer for the registry that outlives it.
+   */
+  #closed: StoredProject | null = null;
   readonly #pending = new Map<string, PendingRequest>();
   #requestSeq = 0;
 
@@ -285,33 +284,49 @@ export class ProjectRoom {
     return this.#agentConnected && this.#link === end;
   }
 
-  /** what a picker shows for this project */
+  /** what the switcher shows for this project; a room means it is active */
   summary(): ProjectSummary {
     return {
       projectId: this.#project.key,
       label: this.#project.label,
       cwd: this.#project.cwd,
-      // a project whose harness was never resolved says so: the picker's row
-      // is honest about a project nobody has started a session in yet
-      harness: this.#project.backend?.id ?? "none",
-      agentConnected: this.#agentConnected,
+      status: "active",
+      liveSessions: this.#liveSessions(),
+      manager: this.#project.manager !== null,
+      // the room owes a project nothing else yet: the only thing it is still
+      // working through is a canvas whose code it has asked to have read to it
+      caughtUp: ![...this.#states.values()].some((state) => state.autoMapPending),
+      // #5 briefs sessions with the directive; until then nothing is injected
+      injected: 0,
       lastSeen: this.#lastSeen,
     };
   }
 
   /**
-   * Open the project the agent attached to — and, on a second `attach`, move
-   * the room onto the new one: the old canvases are flushed and dropped first,
-   * then every worktree of the new project is opened, with a session in it or
-   * not. `link` is the connection the attach arrived on: a reconnecting agent
-   * brings a fresh one to a room that kept its graphs while it was away. The
-   * `attached` answer goes out last, so nothing the agent sends next finds a
-   * half-loaded room.
+   * Worktrees with a live session right now: those reporting in on this room's
+   * link, plus those the last discovery scan saw a session in. A union, not a
+   * sum — one worktree with a herdr agent that also greeted on the link is one
+   * live session.
+   */
+  #liveSessions(): number {
+    const live = new Set(this.#seenLive);
+    for (const state of this.#states.values()) {
+      if (state.session !== null) live.add(state.id);
+    }
+    return live.size;
+  }
+
+  /**
+   * Open the project the agent attached to. A runtime observes one project for
+   * its whole life, so a second `attach` on a room is the same project coming
+   * back: the canvases are flushed and re-read, and every worktree is opened
+   * again, with a session in it or not. `link` is the connection the attach
+   * arrived on — a reconnecting agent brings a fresh one to a room that kept
+   * its graphs while it was away. The `attached` answer goes out last, so
+   * nothing the agent sends next finds a half-loaded room.
    */
   async retarget(attach: AttachMsg, link: ServerEnd): Promise<void> {
     if (this.#loaded) await this.#closeStates();
-    // the attach IS the answer to whichever switch was in flight
-    this.#switching = false;
 
     const project = attach.project;
     this.#project = project;
@@ -347,8 +362,6 @@ export class ProjectRoom {
     // canvas: the project's own directory, which is what its records are keyed by
     if (this.#states.size === 0) await this.#openState(mainWorktreeOf(project.cwd), null);
 
-    this.#discovered = attach.discovered;
-    this.#recents = attach.recentProjects;
     this.#loaded = true;
     this.#agentConnected = true;
     this.#lastSeen = new Date().toISOString();
@@ -379,6 +392,47 @@ export class ProjectRoom {
     if (this.#states.size === 0) await this.#openState(mainWorktreeOf(row.project.cwd), null);
     this.#loaded = true;
     this.#lastSeen = row.lastSeen;
+    this.#statusChangedAt = row.statusChangedAt;
+  }
+
+  /**
+   * What the last discovery scan found for this project: every worktree of the
+   * repo, and which of them a session was seen in. The scan is the only source
+   * for sessions this room has no link to (a herdr agent that never greeted),
+   * so its live ids are kept as they are. A worktree list that says something
+   * new is taken exactly like the agent's own re-listing — a variation that
+   * appeared gets its canvas, and the browsers hear the new session facts.
+   */
+  noteSeen(worktrees: WorktreeInfo[], live: string[]): void {
+    this.#seenLive = new Set(live);
+    const known = new Set(this.#worktrees.map((info) => info.id));
+    const same = worktrees.length === known.size && worktrees.every((info) => known.has(info.id));
+    if (same) return;
+    void this.#syncWorktrees(worktrees).then(() => this.#broadcastSession());
+  }
+
+  /**
+   * The registry row for this project as it stands: what a restarted server
+   * reopens the room from, and what the server's in-memory registry holds for
+   * it. `status` is always active — a room exists exactly while the project is
+   * — and the storage refuses to move the status of an existing row anyway, so
+   * this can never resurrect a project an operator has just parked. A closed
+   * room answers with the row it filed on its way out: its canvases are gone,
+   * so it cannot count what was running in them a second time.
+   */
+  row(): StoredProject {
+    const closed = this.#closed;
+    if (closed !== null) return closed;
+    return {
+      project: this.#project,
+      tenant: this.#tenant,
+      worktrees: this.#worktrees,
+      sessions: this.#runningSessions(),
+      liveSessions: this.#liveSessions(),
+      status: "active",
+      statusChangedAt: this.#statusChangedAt,
+      lastSeen: this.#lastSeen,
+    };
   }
 
   /**
@@ -388,33 +442,23 @@ export class ProjectRoom {
    * written costs the next restart a project, never this session a turn.
    */
   saveProject(): Promise<void> {
-    return this.#storage
-      .saveProject({
-        project: this.#project,
-        tenant: this.#tenant,
-        worktrees: this.#worktrees,
-        sessions: this.#runningSessions(),
-        lastSeen: this.#lastSeen,
-      })
-      .catch((err: unknown) => {
-        console.error(`[bridge] failed to save project registry: ${errText(err)}`);
-      });
+    return this.#storage.saveProject(this.row()).catch((err: unknown) => {
+      console.error(`[bridge] failed to save project registry: ${errText(err)}`);
+    });
   }
 
   /**
-   * Worktrees and the sessions on this machine are re-detected on every hello
-   * (connect and post-switch): discovery is a ~150 ms `ps` + session-store walk
-   * on the agent side, worth it to have the list of what is running correct the
-   * instant the pop-up opens. An agent too busy to answer in time does not hold
-   * the browser up — the hello goes out with the values from the last attach.
+   * The worktrees are re-detected on every hello: listing them is a cheap `git
+   * worktree list` on the agent side, worth it to have the variations right
+   * the instant a browser opens. An agent too busy to answer in time does not
+   * hold the browser up — the hello goes out with the values from the last
+   * attach.
    */
   async hello(): Promise<ServerMsg> {
-    const [worktrees, discovered] = await Promise.all([
-      this.#request<WorktreeInfo[]>((id) => ({ type: "list_worktrees", id })).catch(() => this.#worktrees),
-      this.#request<DiscoveredSession[]>((id) => ({ type: "discover", id })).catch(() => this.#discovered),
-    ]);
+    const worktrees = await this.#request<WorktreeInfo[]>((id) => ({ type: "list_worktrees", id })).catch(
+      () => this.#worktrees,
+    );
     await this.#syncWorktrees(worktrees);
-    this.#discovered = discovered;
 
     const states = [...this.#states.values()];
     const lists = await Promise.all(states.map((state) => state.snapshots.list()));
@@ -434,11 +478,9 @@ export class ProjectRoom {
       graphs,
       session: this.#sessionInfo(),
       agents,
-      recentProjects: this.#recents,
       projects: this.#projects(),
       projectId: this.#project.key,
       revisions,
-      sessions: discovered,
       // project-wide: one agent process, one PATH, one chosen launcher
       tools: toolsOf(this.#project),
     };
@@ -456,7 +498,6 @@ export class ProjectRoom {
     if (!this.#agentConnected) return;
     this.#agentConnected = false;
     this.#lastSeen = new Date().toISOString();
-    this.#switching = false;
     for (const state of this.#states.values()) {
       if (state.session !== null) {
         state.session = null;
@@ -478,6 +519,37 @@ export class ProjectRoom {
     this.#pending.clear();
     this.#onProjectsChanged();
     void this.saveProject();
+  }
+
+  /**
+   * The project was marked inactive: its records are flushed, the row is filed
+   * with this moment as `lastSeen`, and the agent behind it is told why its
+   * link is going away — an inactive project has no room, so the runtime that
+   * was feeding it has nothing to feed. Everything a browser was waiting on
+   * fails with a line it can show, and the timers this room armed are stopped:
+   * nothing may fire onto a room the server has let go of.
+   */
+  async close(): Promise<void> {
+    const line = `project ${this.#project.label} is inactive`;
+    // marking a project inactive is a detach, and `lastSeen` is what orders it
+    // among the inactive rows the switcher reveals
+    this.#lastSeen = new Date().toISOString();
+    // the row is taken while the canvases are still here: it names the
+    // sessions that were running and where, which is what a resume reads off
+    // an inactive row. It is also the row the server's registry keeps for this
+    // project from here on, so it is frozen rather than recomputed.
+    this.#closed = this.row();
+    await this.saveProject();
+    await this.#closeStates();
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timer);
+      pending.fail(new Error(line));
+    }
+    this.#pending.clear();
+    if (!this.#agentConnected) return;
+    this.#agentConnected = false;
+    this.#link.send({ type: "error", message: line });
+    this.#link.close("project marked inactive");
   }
 
   // -------------------------------------------------------------------------
@@ -566,7 +638,7 @@ export class ProjectRoom {
     }
   }
 
-  /** Flush and drop every canvas: the room is moving to another project. */
+  /** Flush and drop every canvas: the room is being re-read, or it is closing. */
   async #closeStates(): Promise<void> {
     // a load still in flight would otherwise re-add its state after the clear
     await Promise.all([...this.#pendingStates.values()]);
@@ -651,62 +723,22 @@ export class ProjectRoom {
   // -------------------------------------------------------------------------
 
   /**
-   * `reply` reaches only the socket the frame came from. Almost nothing is
-   * answered that way: a canvas is shared, so every result is broadcast and
-   * every client stays in sync with the graph the sessions are writing. The
-   * folder chooser is the exception — one person opened a dialog, and where it
-   * lands is nobody else's business.
+   * A browser frame about this project's canvases. There are two: where a
+   * session's terminal is, and a comparison of two revisions — the project's
+   * status and which project a socket watches are the server's business, not a
+   * room's. Nothing here is answered to one socket alone: a canvas is shared,
+   * so every result and every refusal is broadcast and every client stays in
+   * sync with the graph the sessions are writing.
    */
-  handleClient(msg: ClientMsg, reply: (msg: ServerMsg) => void): void {
+  handleClient(msg: RoomClientMsg): void {
+    // nothing can be asked of a machine nothing is attached to, and the user is
+    // owed a reason rather than silence. `diff` needs no agent at all: it is
+    // answered from the snapshots this room holds.
     if (!this.#agentConnected && msg.type !== "diff") {
-      // nothing can be asked of a machine nothing is attached to, and the user
-      // is owed a reason rather than silence. `diff` needs no agent at all: it
-      // is answered from the snapshots this room holds. The chooser is refused
-      // under its own prefix instead — the menu that asked is waiting for an
-      // answer that names the request it made.
-      if (msg.type === "pick_folder") {
-        reply({ type: "error", message: "pick_folder rejected: no agent is attached to this project" });
-        return;
-      }
       this.#error(AGENT_GONE);
       return;
     }
     switch (msg.type) {
-      case "switch_project":
-        if (this.#switching) {
-          this.#error("switch_project rejected: a project switch is already in progress");
-          return;
-        }
-        this.#switching = true;
-        this.#link.send({ type: "switch", path: msg.path });
-        return;
-      case "pick_folder": {
-        // The dialog is modal on the user's machine, so a second one is refused
-        // rather than queued: there is nothing to see behind the first.
-        if (this.#picking !== null) {
-          reply({ type: "error", message: "pick_folder rejected: a folder chooser is already open" });
-          return;
-        }
-        const timer = setTimeout(() => {
-          this.#picking = null;
-          reply({ type: "error", message: "pick_folder failed: the chooser did not answer" });
-        }, PICK_TIMEOUT_MS);
-        timer.unref?.();
-        this.#picking = { reply, timer };
-        this.#link.send({ type: "pick_folder" });
-        return;
-      }
-      case "adopt":
-        // an adopt ends in a switch onto the session's own repo, so it shares
-        // the guard: two in flight would leave the room pointing at whichever
-        // finished last
-        if (this.#switching) {
-          this.#error("adopt rejected: a project switch is already in progress");
-          return;
-        }
-        this.#switching = true;
-        this.#link.send({ type: "adopt", pid: msg.pid });
-        return;
       case "focus_terminal": {
         const state = this.#states.get(msg.worktree);
         if (state === undefined) {
@@ -740,11 +772,6 @@ export class ProjectRoom {
         void this.#diff(state, msg.revA, msg.revB);
         return;
       }
-      case "discover":
-        this.#request<DiscoveredSession[]>((id) => ({ type: "discover", id }))
-          .then((sessions) => this.#broadcast({ type: "sessions", sessions }))
-          .catch((err: unknown) => this.#error(errText(err)));
-        return;
     }
   }
 
@@ -901,47 +928,15 @@ export class ProjectRoom {
           this.#settle(msg.id, msg.worktrees);
           return;
         }
-        // unsolicited: the agent re-listed on its own — which is also how a
-        // switch onto a path inside this same repo ends, so whatever switch was
-        // in flight is over
-        this.#switching = false;
+        // unsolicited: the agent re-listed on its own
         void this.#syncWorktrees(msg.worktrees).then(() => this.#broadcastSession());
         return;
-      case "sessions":
-        this.#discovered = msg.sessions;
-        // unsolicited: the agent re-scanned on its own, so everyone hears it
-        if (msg.id === null) this.#broadcast({ type: "sessions", sessions: msg.sessions });
-        else this.#settle(msg.id, msg.sessions);
-        return;
-      case "recents":
-        this.#recents = msg.paths;
-        return;
-      case "folder_picked": {
-        // an answer nobody is waiting for — the timer gave up, or the browser
-        // that asked went away — has no socket to go to and is dropped
-        const picker = this.#settlePick();
-        picker?.({ type: "folder_picked", path: msg.path });
-        return;
-      }
       case "skeleton_result":
         this.#settle(msg.id, msg.ops);
         return;
-      case "agent_error": {
-        if (SWITCH_SETTLED_PREFIXES.some((prefix) => msg.message.startsWith(prefix))) this.#switching = false;
-        // The chooser could not be shown, or it failed: for the browser that
-        // asked, THIS is the answer — so it lands on that socket and the slot
-        // opens again for the next chooser.
-        if (msg.message.startsWith("pick_folder")) {
-          const picker = this.#settlePick();
-          if (picker !== null) {
-            console.error(`[bridge] ${msg.message}`);
-            picker({ type: "error", message: msg.message });
-            return;
-          }
-        }
+      case "agent_error":
         this.#error(msg.message);
         return;
-      }
       case "agent_exit":
         // whether the process dies with the harness is the agent's call
         console.error(`[bridge] ${msg.reason}`);
@@ -1165,19 +1160,6 @@ export class ProjectRoom {
     this.#pending.delete(id);
     clearTimeout(pending.timer);
     pending.settle(value);
-  }
-
-  /**
-   * The folder chooser is answered: the slot opens for the next one, and the
-   * socket that asked is handed back so the answer can go to it alone. Null
-   * when nothing was open — the timer had already given up on it.
-   */
-  #settlePick(): ((msg: ServerMsg) => void) | null {
-    const picking = this.#picking;
-    if (picking === null) return null;
-    clearTimeout(picking.timer);
-    this.#picking = null;
-    return picking.reply;
   }
 
   // -------------------------------------------------------------------------

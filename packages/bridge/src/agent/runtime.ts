@@ -1,9 +1,8 @@
 /**
- * The agent half of Shape: everything that needs the target repo's
- * filesystem, git, `ps` or the user's terminal. It watches the sessions
- * running in the repo's worktrees, extracts the reality layer, lists
- * worktrees and discoverable sessions, and terminates the loopback link; it
- * owns no canvas state at all.
+ * The agent half of Shape for ONE project: everything that needs the target
+ * repo's filesystem, git, `ps` or the user's terminal. It watches the sessions
+ * running in the repo's worktrees, extracts the reality layer and lists
+ * worktrees; it owns no canvas state at all.
  *
  * It talks to a Shape server over one `AgentEnd` (`transport.ts`) in Link v2
  * frames: `attach` first, then events and answers to the server's requests.
@@ -17,13 +16,14 @@
  * browser: nothing here launches a harness, types at one, aborts one or
  * changes how it approves its own work.
  *
- * ONE AGENT, ONE REPO, N WORKTREES. All the worktrees of a repo are one
- * project (one key, one canvas), and each of them may have a session
- * reporting in — `#sessions`, keyed by worktree id (the realpath of its
- * directory). Everything that is about one variation is stamped with that id
- * on the way out and routed by it on the way in: events, canvas calls,
- * reality. `switch` only ever means "another repo"; a path inside this one is
- * already on the canvas, so it only refreshes the worktree list.
+ * ONE RUNTIME, ONE REPO, N WORKTREES; the fleet owns the loopback link and
+ * hosts one runtime per active project. All the worktrees of a repo are one
+ * project (one key, one canvas), and each of them may have a session reporting
+ * in — `#sessions`, keyed by worktree id (the realpath of its directory).
+ * Everything that is about one variation is stamped with that id on the way
+ * out and routed by it on the way in: events, canvas calls, reality. A repo
+ * this runtime does not contain is another project with a runtime of its own,
+ * which is why `routeLink` answers null rather than retargeting.
  *
  * Two rules shape the code:
  * - ONE `AgentEvents` sink per worktree, for as long as a session reports in
@@ -36,20 +36,10 @@
  *   up, well before the room exists; those frames are not allowed to vanish.
  */
 
-import { execFile, type ChildProcess } from "node:child_process";
-import { realpathSync } from "node:fs";
-import { realpath, stat } from "node:fs/promises";
-import { homedir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { execFile } from "node:child_process";
+import { basename } from "node:path";
 import { LINK_WS_PATH } from "../../../shared/src/index.ts";
-import type {
-  AgentState,
-  BackendInfo,
-  DiscoveredSession,
-  ManagerHandle,
-  RealityLayer,
-  WorktreeInfo,
-} from "../../../shared/src/index.ts";
+import type { AgentState, BackendInfo, ManagerHandle, RealityLayer, WorktreeInfo } from "../../../shared/src/index.ts";
 import type {
   AgentSession,
   AgentToServerMsg,
@@ -58,18 +48,22 @@ import type {
 } from "../../../shared/src/link.ts";
 import type { AgentEnd } from "../transport.ts";
 import type { SocketServer } from "../wsserver.ts";
-import { detectTools, type DetectedTools } from "./detect.ts";
+import type { DetectedTools } from "./detect.ts";
 import { LINK_CLI, directivePath, renderDirective, writeDirective } from "./directive.ts";
-import { discoverSessions } from "./discover.ts";
 import type { AgentEvents, LinkHello, LinkTarget } from "./external.ts";
 import type { HerdrLauncher } from "./launcher/herdr.ts";
-import { chooseLauncher } from "./launcher/index.ts";
-import { mountLoopbackLink, type LoopbackLink } from "./link.ts";
 import { attachManager } from "./manager.ts";
 import { hasSourceCode, synthesizeSkeleton } from "./onboarding-fs.ts";
 import { extractReality } from "./reality.ts";
-import { pushRecent } from "./recents.ts";
-import { ensureGitExclude, legacyProjectKey, listWorktrees, projectKey, repoIdentity } from "./worktrees.ts";
+import {
+  canonicalDir,
+  ensureGitExclude,
+  legacyProjectKey,
+  listWorktrees,
+  projectKey,
+  repoIdentity,
+  worktreeContaining,
+} from "./worktrees.ts";
 
 /** an empty layer keeps `synthesizeSkeleton` honest before the first extraction */
 const NO_REALITY: RealityLayer = {
@@ -81,63 +75,6 @@ const NO_REALITY: RealityLayer = {
   extractedAt: null,
   head: null,
 };
-
-/**
- * The command that opens the folder chooser, when a smoke (or an operator on a
- * machine whose desktop Shape guesses wrong) names one: whitespace-split and
- * run without a shell, exactly like the platform commands below. Its stdout is
- * the chosen path and exit 1 is a cancel, so a smoke can stand in for a person.
- */
-const PICK_FOLDER_OVERRIDE = pickFolderOverride();
-
-function pickFolderOverride(): { command: string; args: string[] } | null {
-  const [command, ...args] = (process.env.SHAPE_PICK_FOLDER ?? "").split(/\s+/).filter((part) => part.length > 0);
-  return command === undefined ? null : { command, args };
-}
-
-/** the Windows chooser, as a one-liner PowerShell hands to a WinForms dialog */
-const PICK_FOLDER_PS =
-  "Add-Type -AssemblyName System.Windows.Forms; " +
-  "$d = New-Object System.Windows.Forms.FolderBrowserDialog; " +
-  "$d.Description = 'Open a project in Shape'; " +
-  "if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath } else { exit 1 }";
-
-/**
- * macOS: an `NSOpenPanel` driven from JXA. AppleScript's `choose folder` from a
- * background process opens its panel BEHIND every window — osascript is a
- * UIElement and `tell me to activate` cannot raise it (seen live: the panel sat
- * unseen for ten minutes). Going through Finder (`tell application "Finder"`)
- * would raise it, but needs an Automation permission grant, so the user meets
- * a system prompt before their chooser. Becoming a regular app for the
- * duration and `activateIgnoringOtherApps` needs nothing and comes to the
- * front. Cancel exits 1 and prints nothing; the path is the only output.
- */
-const PICK_FOLDER_JXA = [
-  'ObjC.import("Cocoa"); ObjC.import("stdlib");',
-  "const app = $.NSApplication.sharedApplication;",
-  "app.setActivationPolicy($.NSApplicationActivationPolicyRegular);",
-  "app.activateIgnoringOtherApps(true);",
-  "const panel = $.NSOpenPanel.openPanel;",
-  "panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false;",
-  'panel.message = "Open a project in Shape"; panel.prompt = "Open";',
-  'panel.directoryURL = $.NSURL.fileURLWithPath($("~").stringByExpandingTildeInPath);',
-  "if (panel.runModal() !== $.NSModalResponseOK) $.exit(1);",
-  "ObjC.unwrap(panel.URLs.objectAtIndex(0).path);",
-].join(" ");
-
-/**
- * How each desktop asks a person for a folder. The dialog belongs on THIS side
- * of the wire: no browser API yields an absolute path, and a path chosen on any
- * other machine would name nothing here.
- */
-function folderChooser(platform: string): { command: string; args: string[] } | null {
-  if (platform === "darwin") return { command: "osascript", args: ["-l", "JavaScript", "-e", PICK_FOLDER_JXA] };
-  if (platform === "linux") {
-    return { command: "zenity", args: ["--file-selection", "--directory", "--title=Open a project in Shape"] };
-  }
-  if (platform === "win32") return { command: "powershell", args: ["-NoProfile", "-Command", PICK_FOLDER_PS] };
-  return null;
-}
 
 /**
  * What a canvas call in flight when the link drops resolves to. The harness
@@ -154,14 +91,19 @@ const MAX_LINK_ROUTES = 256;
 
 export interface AgentRuntimeOptions {
   /**
-   * The directory to open. Any worktree of the repo will do: the project is
-   * the repo, and this is the variation the agent stands in.
+   * The directory this project was seen at. Any worktree of the repo will do:
+   * the project is the repo, and this is the variation the fleet found first.
    */
   cwd: string;
-  /** the runtime mounts the loopback link (`/link`) here in start() */
+  /** for the link URL alone (the directive and the manager's config carry it) */
   sockets: SocketServer;
   link: AgentEnd;
-  /** a retarget failed and there is nowhere to stand; the caller decides what the process does */
+  /** what is installed on this machine; the fleet detects it once for every runtime */
+  tools: DetectedTools;
+  launcher: HerdrLauncher | null;
+  /** whether a loopback caller from `cwd` is currently greeted (the fleet owns the link) */
+  isLinked: (cwd: string) => boolean;
+  /** the server closed this runtime's link (project marked inactive, attach refused): the fleet drops it */
   onExit: (reason: string) => void;
 }
 
@@ -193,21 +135,14 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-async function isDirectory(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
 export class AgentRuntime {
   readonly #sockets: SocketServer;
   readonly #link: AgentEnd;
+  readonly #isLinked: (cwd: string) => boolean;
   readonly #onExit: (reason: string) => void;
 
-  /** the directory the agent was pointed at; changed by a retarget */
-  #cwd: string;
+  /** the directory this project was seen at; any worktree of the repo */
+  readonly #cwd: string;
   /** the MAIN worktree — the project's cwd, label and storage anchor */
   #projectCwd = "";
   /** sha256 of machine + the repo's common dir: every worktree shares it */
@@ -215,16 +150,16 @@ export class AgentRuntime {
   /** the worktree `#cwd` sits in */
   #primary = "";
   /**
-   * What is installed here, detected once at startup and again on `discover`.
-   * Project-wide: one agent process sees one PATH.
+   * What is installed here, as the fleet detected it. Machine-wide: one agent
+   * process sees one PATH, so every runtime is handed the same answer.
    */
-  #tools: DetectedTools = { launchers: [], harnesses: [] };
+  readonly #tools: DetectedTools;
   /**
    * The user's terminal multiplexer, when there is one. It is how a session's
    * tab is brought forward and where the project's manager lives; null means
    * no session here has a terminal Shape can reach.
    */
-  #launcher: HerdrLauncher | null = null;
+  readonly #launcher: HerdrLauncher | null;
 
   /** one record per worktree with a session reporting in, keyed by worktree id */
   readonly #sessions = new Map<string, Observed>();
@@ -240,10 +175,7 @@ export class AgentRuntime {
    */
   readonly #linkRoutes = new Map<string, string | null>();
 
-  #loopback: LoopbackLink | null = null;
   #targetHasCode = false;
-  #discovered: DiscoveredSession[] = [];
-  #recents: string[] = [];
   /**
    * Where this project's directive was written, so a session Shape has no
    * integration with can still find the canvas. Null when the write failed.
@@ -256,28 +188,14 @@ export class AgentRuntime {
    */
   #manager: ManagerHandle | null = null;
 
-  /**
-   * Retargeting is serialized: two switches racing would leave the agent
-   * standing in one repo while everything it has told the room describes the
-   * other.
-   */
-  #retargeting: Promise<void> = Promise.resolve();
-  /**
-   * The folder chooser standing in front of the user right now. Deliberately
-   * NOT on `#retargeting`: a dialog is open for as long as a person browses,
-   * and nothing else may queue behind that. One at a time — one machine has
-   * one user in front of it.
-   */
-  #picking: ChildProcess | null = null;
-
   /** false while frames wait for `attached`; see the file header */
   #outboxOpen = false;
   #queue: AgentToServerMsg[] = [];
   /**
    * One-shot: resolved by the first `attached` (or by a stop, so a signal
    * handler firing while we still wait for a server that never comes is not a
-   * hang). Re-attaches after a retarget or a reconnect do not reopen it —
-   * nothing awaits it once start() has returned.
+   * hang). A re-attach after a reconnect does not reopen it — nothing awaits
+   * it once start() has returned.
    */
   readonly #attachGate = Promise.withResolvers<void>();
 
@@ -289,16 +207,21 @@ export class AgentRuntime {
   constructor(opts: AgentRuntimeOptions) {
     this.#sockets = opts.sockets;
     this.#link = opts.link;
+    this.#tools = opts.tools;
+    this.#launcher = opts.launcher;
+    this.#isLinked = opts.isLinked;
     this.#onExit = opts.onExit;
     this.#cwd = opts.cwd;
   }
 
+  /** The project's main worktree: its cwd on the wire and the fleet's key path. */
+  get cwd(): string {
+    return this.#projectCwd;
+  }
+
   /**
-   * Bring the agent up: link endpoint, what is installed, the user's terminal
-   * multiplexer, the project's facts, then `attach`.
+   * Bring this project up: link listeners, the project's facts, then `attach`.
    *
-   * The order matters — the loopback link is mounted first so a session that
-   * greets (or a hook that fires) during startup finds somebody listening, and
    * `attach` goes last so the hello it triggers already carries whatever has
    * reported in. A startup opens no session at all: the project is attached
    * with the sessions that happen to be there, which is usually none, and the
@@ -306,15 +229,11 @@ export class AgentRuntime {
    */
   async start(): Promise<void> {
     this.#link.onMessage((msg) => this.#onServerMsg(msg));
-    this.#link.onClose(() => void this.#teardown());
+    // the only way a runtime ends other than a stop: the server closed this
+    // link, which is how being marked inactive reaches this side
+    this.#link.onClose((reason) => this.#teardown(reason));
     this.#link.onDisconnect((reason) => this.#onLinkGap(reason));
     this.#link.onReconnect(() => this.#onLinkBack());
-    this.#loopback = mountLoopbackLink(this.#sockets, { route: (cwd) => this.#routeLink(cwd) });
-    this.#tools = await detectTools();
-    this.#launcher = await chooseLauncher(this.#tools);
-    console.error(
-      `[bridge] terminal: ${this.#launcher === null ? "none" : "herdr"}; harnesses here: ${this.#tools.harnesses.map((tool) => tool.id).join(", ") || "none"}`,
-    );
     await this.#openProject();
     // the config the manager pass writes is what every builder the manager
     // launches later comes up with, so it is written before anything reports in
@@ -323,14 +242,17 @@ export class AgentRuntime {
     await this.#attachGate.promise;
   }
 
-  async stop(): Promise<void> {
-    if (this.#stopped) return;
+  stop(): Promise<void> {
+    if (this.#stopped) return Promise.resolve();
     // the room goes agentless on this frame, so it leaves before the sockets do
     this.#link.send({ type: "detached", reason: "agent stopped" });
-    await this.#teardown();
+    // a stop is the fleet's own doing: it already knows this runtime is gone,
+    // so the teardown reports no exit
+    this.#teardown(null);
     // a socket-backed end would otherwise keep reconnecting to a server that
     // has nothing left to talk to
     this.#link.close("agent stopped");
+    return Promise.resolve();
   }
 
   /**
@@ -363,7 +285,7 @@ export class AgentRuntime {
    * Everything about the repo `#cwd` sits in that the server cannot see for
    * itself. The project is the REPO: the key comes from the common dir, so
    * every worktree lands on one canvas, and the project's cwd is the main
-   * worktree whichever variation the agent was pointed at.
+   * worktree whichever variation the fleet found this project through.
    */
   async #openProject(): Promise<void> {
     const identity = await repoIdentity(this.#cwd);
@@ -375,27 +297,24 @@ export class AgentRuntime {
     // session running in a worktree the browser has never heard of
     this.#worktrees =
       worktrees.length > 0 ? worktrees : [{ id: identity.main, path: identity.main, branch: null, head: null }];
-    this.#primary = this.#worktreeFor(await this.#realpath(this.#cwd)) ?? identity.main;
-
-    // both are answers about the OLD project
-    this.#realities.clear();
+    this.#primary = worktreeContaining(this.#worktrees, canonicalDir(this.#cwd)) ?? identity.main;
+    // the fleet registers a runtime before it starts, so a caller may already
+    // have been told this repo does not contain it — that answer was about a
+    // runtime with no worktree list yet, and it must not outlive one
     this.#linkRoutes.clear();
+
     const hasPackages = await this.#startupReality(this.#primary);
     this.#targetHasCode = hasPackages || (await hasSourceCode(this.#primary));
     await ensureGitExclude(this.#cwd);
-    this.#recents = await pushRecent(this.#projectCwd);
-    this.#discovered = await this.#discoverSessions();
     await this.#writeDirective();
   }
 
   /**
    * Drop this project's directive on disk, so a session Shape never registered
-   * a tool in can still find the canvas. Called from every `#openProject` —
-   * startup and every `switch` — which is also how it keeps up with the link
-   * URL: the URL is fixed for this process (the socket server's port is set at
-   * construction), so the only way it changes is a new agent, whose first
-   * `#openProject` rewrites the file. `writeDirective` skips an identical
-   * write, so re-opening the same project costs a read.
+   * a tool in can still find the canvas. The link URL in it is fixed for this
+   * process (the socket server's port is set at construction), so one write per
+   * project open is all it ever needs; `writeDirective` skips an identical
+   * write, so a project that comes back costs a read.
    * Never fatal: without the file the tool-bearing sessions are unaffected.
    */
   async #writeDirective(): Promise<void> {
@@ -417,13 +336,13 @@ export class AgentRuntime {
   }
 
   /**
-   * Find or open this project's manager (issue #3, `./manager.ts`). Runs after
+   * Find this project's manager (issue #3, `./manager.ts`). Runs after
    * `#openProject`, because the directive it points the manager's builders at
    * is written there.
    *
-   * This is the ONE session Shape opens rather than observes, and it is a
-   * manager, not a worker: it reads the manager skill and dispatches builders
-   * into their own worktrees, each of which reports in on its own.
+   * Shape opens no session: the manager is one the user (or a previous Shape)
+   * already has in their herdr, and all this pass does is recognize it and
+   * hand Shape's integration down to the builders it launches.
    *
    * `attachManager` reports every failure itself and answers null, so there is
    * nothing to catch: a project without a manager still has a canvas.
@@ -432,12 +351,7 @@ export class AgentRuntime {
     this.#manager = await attachManager({ path: this.#projectCwd, label: basename(this.#projectCwd) }, this.#launcher, {
       linkUrl: this.#sockets.url(LINK_WS_PATH),
       directivePath: this.#directivePath,
-      // the link's callers spell their cwd however they were started; only the
-      // runtime knows how to compare a spelling with a directory
-      isLinked: (cwd) => {
-        const wanted = this.#canonicalDir(cwd);
-        return (this.#loopback?.greeted() ?? []).some((entry) => this.#canonicalDir(entry) === wanted);
-      },
+      isLinked: this.#isLinked,
     });
   }
 
@@ -530,22 +444,8 @@ export class AgentRuntime {
   }
 
   /**
-   * Forget every session Shape was watching. A retarget tells the room about
-   * each one — the browsers are still looking at the project being left, and a
-   * session on it is no longer being watched — while a teardown says nothing,
-   * because the room is going away with us.
-   */
-  #dropSessions(reason: string | null): void {
-    const observed = [...this.#sessions.values()];
-    this.#sessions.clear();
-    if (reason === null) return;
-    for (const entry of observed) this.#post({ type: "session_stopped", worktree: entry.worktree, reason });
-  }
-
-  /**
-   * Announce the current project. A second `attach` on the same link is a
-   * retarget: the server replaces the room's project and re-hellos its
-   * browsers, which is how a switch reaches the canvas.
+   * Announce this project. Sent again only when the link came back after a
+   * gap: the room's project never changes under a runtime.
    */
   #sendAttach(): void {
     this.#outboxOpen = false;
@@ -570,7 +470,7 @@ export class AgentRuntime {
         key: this.#projectKey,
         label: basename(this.#projectCwd),
         cwd: this.#projectCwd,
-        // the project's harness as a picker names it: the first session that
+        // the project's harness as the canvas names it: the first session that
         // reported in. Null while none has — which is the ordinary state of a
         // project nobody is working in right now
         backend: sessions[0]?.backend ?? null,
@@ -583,49 +483,27 @@ export class AgentRuntime {
       worktrees: this.#worktrees,
       sessions,
       realities,
-      discovered: this.#discovered,
-      recentProjects: this.#recents,
     });
   }
 
-  async #teardown(): Promise<void> {
+  /**
+   * The runtime is over: either the fleet stopped it, or the server closed the
+   * link (`reason`), which is how a project marked inactive reaches this side.
+   * The sessions are simply forgotten — the room going away takes their
+   * drawings with it, and there is nobody left to tell.
+   */
+  #teardown(reason: string | null): void {
     if (this.#stopped) return;
     this.#stopped = true;
     // start() may still be waiting for an `attached` that will never come now
     this.#attachGate.resolve();
-    // a dialog must not outlive the agent that opened it: nothing is left to
-    // answer, and the user would be staring at a chooser nobody reads
-    this.#picking?.kill();
-    this.#dropSessions(null);
-    this.#loopback?.close();
+    this.#sessions.clear();
+    if (reason !== null) this.#onExit(reason);
   }
 
   // -------------------------------------------------------------------------
   // worktree identity
   // -------------------------------------------------------------------------
-
-  async #realpath(path: string): Promise<string> {
-    try {
-      return await realpath(path);
-    } catch {
-      return resolve(path);
-    }
-  }
-
-  /**
-   * Which worktree a path belongs to: the deepest known worktree that contains
-   * it, or null for a path outside the repo. Compared as realpaths, which is
-   * what a worktree id is — `resolve()` alone would make `/tmp` and
-   * `/private/tmp` two different variations on macOS.
-   */
-  #worktreeFor(realpathOfDir: string): string | null {
-    let best: string | null = null;
-    for (const { id } of this.#worktrees) {
-      if (realpathOfDir !== id && !realpathOfDir.startsWith(`${id}${sep}`)) continue;
-      if (best === null || id.length > best.length) best = id;
-    }
-    return best;
-  }
 
   /** How a variation is named to a human: its branch, or its directory. */
   #label(worktree: string): string {
@@ -732,36 +610,13 @@ export class AgentRuntime {
   }
 
   /**
-   * Canonical form of a directory a caller named, for prefix matching against
-   * worktree ids (which are always realpaths).
-   *
-   * The deepest EXISTING ancestor is what gets resolved: a caller may name a
-   * directory that no longer exists (a removed worktree, a path built by hand),
-   * and its ancestors still say which repo it was in. Matching stops at a
-   * worktree root anyway, so dropping the unresolvable tail cannot change the
-   * answer.
-   */
-  #canonicalDir(cwd: string): string {
-    const asked = resolve(cwd);
-    let path = asked;
-    for (;;) {
-      try {
-        return realpathSync(path);
-      } catch {
-        const parent = dirname(path);
-        // nothing on the way to the root exists: judge it by its spelling
-        if (parent === path) return asked;
-        path = parent;
-      }
-    }
-  }
-
-  /**
    * Route a loopback caller (the harness's own extension, a hook, an MCP
    * sidecar) to the worktree it belongs to, by the directory it reports
    * running in: the deepest worktree containing it wins. A worktree of this
    * repo with nothing on record yet GAINS a session here — a caller speaking
-   * from it is the only evidence Shape ever gets that one exists.
+   * from it is the only evidence Shape ever gets that one exists. A cwd
+   * outside this repo is null, not a refusal: the fleet asks every runtime in
+   * turn, and only it knows whether some other project claims that directory.
    *
    * The cwd is canonicalized first and that is not optional. A worktree id is
    * a realpath, but a caller's spelling need not be one: `process.cwd()` is
@@ -773,17 +628,15 @@ export class AgentRuntime {
    * the worktree list changes, since a path that resolved to nothing may now
    * be a variation.
    */
-  #routeLink(cwd: string): LinkTarget | { error: string } {
+  routeLink(cwd: string): LinkTarget | null {
     let resolved = this.#linkRoutes.get(cwd);
     if (resolved === undefined) {
-      resolved = this.#worktreeFor(this.#canonicalDir(cwd));
+      resolved = worktreeContaining(this.#worktrees, canonicalDir(cwd));
       // a caller inventing paths must not grow this without bound
       if (this.#linkRoutes.size >= MAX_LINK_ROUTES) this.#linkRoutes.clear();
       this.#linkRoutes.set(cwd, resolved);
     }
-    if (resolved === null) {
-      return { error: `${cwd} is not part of ${basename(this.#projectCwd)} — this Shape agent is on ${this.#projectCwd}` };
-    }
+    if (resolved === null) return null;
     const worktree = resolved;
     const observed = this.#sessions.get(worktree) ?? this.#observe(worktree);
     return {
@@ -800,16 +653,6 @@ export class AgentRuntime {
       onHello: (hello) => this.#onHello(worktree, hello),
       onBye: (reason) => this.#onBye(worktree, reason),
     };
-  }
-
-  /** Agent sessions running on this machine, for the adopt picker. */
-  async #discoverSessions(): Promise<DiscoveredSession[]> {
-    try {
-      return await discoverSessions();
-    } catch (err) {
-      console.error(`[bridge] session discovery failed: ${errText(err)}`);
-      return [];
-    }
   }
 
   // -------------------------------------------------------------------------
@@ -833,39 +676,8 @@ export class AgentRuntime {
         return;
       }
       case "focus_terminal":
-        // showing a terminal must not queue behind a retarget: the user is
-        // asking to LOOK at something
         void this.#focusTerminal(msg.worktree);
         return;
-      case "switch": {
-        const { path } = msg;
-        this.#retargeting = this.#retargeting.then(() => this.#switchProject(path));
-        return;
-      }
-      case "adopt": {
-        const { pid } = msg;
-        this.#retargeting = this.#retargeting.then(() => this.#adopt(pid));
-        return;
-      }
-      case "pick_folder":
-        // a dialog waits on a person, so it is never put on the retarget
-        // chain: nothing may queue behind somebody browsing folders
-        this.#pickFolder();
-        return;
-      case "discover": {
-        // read-only scan: must not queue behind a retarget. The tools are
-        // re-detected with it — a harness installed since startup is exactly
-        // what somebody hitting "look again" is hoping to find.
-        const { id } = msg;
-        void detectTools().then((tools) => {
-          this.#tools = tools;
-        });
-        void this.#discoverSessions().then((sessions) => {
-          this.#discovered = sessions;
-          this.#post({ type: "sessions", id, sessions });
-        });
-        return;
-      }
       case "list_worktrees": {
         const { id } = msg;
         void this.#refreshWorktrees(id);
@@ -876,7 +688,7 @@ export class AgentRuntime {
         return;
       case "synthesize_skeleton": {
         const { worktree, id } = msg;
-        if (this.#worktreeFor(worktree) === null) return;
+        if (worktreeContaining(this.#worktrees, worktree) === null) return;
         const reality = this.#realities.get(worktree)?.layer ?? NO_REALITY;
         void synthesizeSkeleton(worktree, reality).then((ops) =>
           this.#post({ type: "skeleton_result", worktree, id, ops }),
@@ -887,7 +699,7 @@ export class AgentRuntime {
   }
 
   // -------------------------------------------------------------------------
-  // terminal and retargeting
+  // terminal
   // -------------------------------------------------------------------------
 
   /**
@@ -915,148 +727,6 @@ export class AgentRuntime {
     } catch (err) {
       this.#error(`could not bring the terminal forward: ${errText(err)}`);
     }
-  }
-
-  /**
-   * A path the user pointed Shape at. Inside the current repo it is a
-   * VARIATION, not another project: the canvas already holds it and its
-   * session (if any) is already being watched, so the only thing that can be
-   * out of date is the worktree list. Another repo is the real switch — every
-   * observed session is forgotten, the new project is opened and re-`attach`ed.
-   *
-   * Nothing is started either way. A repo Shape retargets onto shows the
-   * sessions that report in from it, which may be none until somebody starts
-   * one themselves.
-   */
-  async #switchProject(rawPath: string): Promise<void> {
-    const expanded = rawPath.startsWith("~") ? join(homedir(), rawPath.slice(1)) : rawPath;
-    const target = resolve(expanded);
-    if (!(await isDirectory(target))) {
-      this.#error(`switch_project rejected: "${rawPath}" is not an existing directory`);
-      return;
-    }
-    const inRepo = this.#worktreeFor(await this.#realpath(target));
-    if (inRepo !== null) {
-      // a variation the user reaches for may be brand new (a worktree added
-      // since the last scan), and the room's list has to catch up
-      await this.#refreshWorktrees(null);
-      return;
-    }
-
-    try {
-      this.#dropSessions("agent retargeted");
-      this.#cwd = target;
-      // frames from the new project belong to a room the server has not opened
-      // yet: they wait for the `attached` that answers the attach below
-      this.#outboxOpen = false;
-
-      await this.#openProject();
-      await this.#attachManager();
-      this.#sendAttach();
-      console.error(`[bridge] switched target to ${target}`);
-    } catch (err) {
-      // no `attached` is coming for a switch that died: the queued frames
-      // belong to a project that never attached, and the only thing worth
-      // saying is why
-      this.#queue = [];
-      this.#outboxOpen = true;
-      const reason = `switch_project failed: ${String(err)}`;
-      this.#error(reason);
-      this.#onExit(reason);
-    }
-  }
-
-  /**
-   * Adopt a session someone else started: point Shape at the repo it runs in.
-   * The pid is resolved in a FRESH scan (the server's list is as old as its
-   * last discover), and the switch is the whole of it — Shape does not touch
-   * that session. If it is shape-aware it appears on the canvas by itself, the
-   * moment it speaks on this agent's link; if it is not, the project is still
-   * attached and the directive on disk says how to join.
-   */
-  async #adopt(pid: number): Promise<void> {
-    const session = (await this.#discoverSessions()).find((candidate) => candidate.pid === pid);
-    if (session === undefined) {
-      this.#error(`adopt rejected: no running agent session with pid ${pid}`);
-      return;
-    }
-    if (session.cwd === null) {
-      this.#error(`adopt rejected: the working directory of pid ${pid} could not be read`);
-      return;
-    }
-    console.error(`[bridge] adopting the ${session.harness} session of pid ${pid}: switching to ${session.cwd}`);
-    await this.#switchProject(session.cwd);
-  }
-
-  /**
-   * Put the machine's own folder chooser in front of the user and post where
-   * it landed. This is the agent's job and not the browser's because no web
-   * API hands a page an absolute path — and in local mode this process is on
-   * the user's machine, which is the one whose folders they mean.
-   *
-   * The chooser gets no timeout of its own: a person may browse for minutes,
-   * and the room's own timer is the bound. What it does get is a teardown that
-   * kills it, so a dialog cannot outlive the agent that opened it. Nothing is
-   * retargeted here: the answer goes back and the BROWSER decides what to do
-   * with it (it sends `switch_project`, exactly as if the path were typed).
-   *
-   * A second ask only reaches here once the room gave up on the first (it
-   * refuses while its slot is held) — so the dialog still up is one nobody is
-   * waiting for, and the newest click is what the user means: the old panel
-   * is killed and answers nobody, a fresh one is put up.
-   */
-  #pickFolder(): void {
-    this.#picking?.kill();
-    const chooser = PICK_FOLDER_OVERRIDE ?? folderChooser(process.platform);
-    if (chooser === null) {
-      this.#picking = null;
-      this.#error(`pick_folder failed: no folder chooser on ${process.platform} — type the path instead`);
-      return;
-    }
-    const child = execFile(chooser.command, chooser.args, (err, stdout, stderr) => {
-      // a chooser killed by the teardown, or replaced by a newer ask, answers
-      // nobody
-      if (this.#stopped || this.#picking !== child) return;
-      this.#picking = null;
-      if (err !== null) {
-        // Exit 1 with nothing on stderr is how every chooser here says "closed
-        // without choosing" — zenity, the PowerShell dialog, the JXA panel and
-        // the command a smoke stands in with. osascript exits 1 for a broken
-        // script too, but then it says so on stderr, and that is a failure.
-        if (err.code === 1 && stderr.trim().length === 0) {
-          this.#post({ type: "folder_picked", path: null });
-          return;
-        }
-        if (err.code === "ENOENT") {
-          // linux is the one platform whose chooser is not part of the desktop
-          this.#error(
-            process.platform === "linux" && PICK_FOLDER_OVERRIDE === null
-              ? "pick_folder failed: no folder chooser found (install zenity)"
-              : `pick_folder failed: ${chooser.command} could not be run`,
-          );
-          return;
-        }
-        // a panel somebody killed from outside was closed for the user, not by
-        // them: nobody wants an answer, and the browser must not get one
-        if (err.signal !== undefined && err.signal !== null) return;
-        // node's own message is the whole command line; the user wants the
-        // chooser's words, or failing those, how it left
-        const said = stderr.trim().split("\n")[0]?.trim() ?? "";
-        this.#error(`pick_folder failed: ${said.length > 0 ? said : `the chooser exited with code ${String(err.code)}`}`);
-        return;
-      }
-      // a chooser may end a folder in a slash (AppleScript's `POSIX path of`
-      // does); every path Shape carries is written without one. Root is the
-      // one path that IS its slash.
-      const chosen = stdout.trim();
-      const path = chosen.length > 1 && chosen.endsWith("/") ? chosen.slice(0, -1) : chosen;
-      if (path.length === 0) {
-        this.#error("pick_folder failed: the chooser named no folder");
-        return;
-      }
-      this.#post({ type: "folder_picked", path });
-    });
-    this.#picking = child;
   }
 
   // -------------------------------------------------------------------------
@@ -1115,7 +785,7 @@ export class AgentRuntime {
    * its reality to draw drift on a canvas nobody is working in.
    */
   async #extractRealityNow(worktree: string): Promise<void> {
-    if (this.#worktreeFor(worktree) === null) {
+    if (worktreeContaining(this.#worktrees, worktree) === null) {
       this.#error(`extract_reality rejected: ${worktree} is not a variation of ${basename(this.#projectCwd)}`);
       return;
     }

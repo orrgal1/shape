@@ -1,8 +1,14 @@
 /**
  * The loopback link endpoint (`ws://127.0.0.1:<port>/link`): harness-side
  * processes — the MCP server (`packages/link/src/mcp.ts`), a Claude Code hook
- * (`packages/link/src/hook.ts`), the omp extension — talking to the agent
- * runtime that watches their worktree.
+ * (`packages/link/src/hook.ts`), the omp extension — talking to the fleet,
+ * which routes each of them to the runtime hosting their repo.
+ *
+ * One mount for the whole process, not one per project: a caller names the
+ * directory it runs in and nothing else, so which project it belongs to is an
+ * answer only the fleet has. A caller no project claims is refused and
+ * remembered — activating its project is what gets it hung up on, so its own
+ * reconnect delivers it to the runtime that now exists.
  *
  * It terminates on the AGENT half by design: those callers are children of the
  * harness, they hold no server credentials, and everything they say is how
@@ -31,23 +37,32 @@ const REFUSAL = JSON.stringify({ type: "error", message: "unparseable client mes
 
 export interface LoopbackLinkOptions {
   /**
-   * Which harness a caller belongs to, by the cwd it reports. The runtime owns
-   * the answer: it is the only thing that knows the repo's worktrees and which
-   * of them have a harness running.
+   * Which session a caller belongs to, by the cwd it reports. The fleet owns
+   * the answer: only its runtimes know their repos' worktrees, and only it
+   * knows which projects are active at all.
    */
   route: ExternalIoOptions["route"];
 }
 
 export interface LoopbackLink {
-  /** drop every connected caller (runtime stop, link teardown) */
+  /** drop every connected caller (fleet stop, link teardown) */
   close(): void;
   /**
-   * The cwds of callers that greeted and have not gone away: which sessions
-   * have a Shape-aware harness on the link RIGHT NOW. Raw as they said them —
-   * canonicalizing a directory is the runtime's job, and only it knows the
-   * repo's worktrees.
+   * The cwds of callers that greeted and have not gone away: which directories
+   * have a session on the link RIGHT NOW. Raw as they said them —
+   * canonicalizing a directory is the fleet's job, and only its runtimes know
+   * the repos' worktrees.
    */
   greeted(): string[];
+  /**
+   * Hang up on every caller whose latest `hello` was refused, because a
+   * project that now exists may be the one it belongs to. The client re-dials
+   * and re-greets by itself — the omp extension backs off 1–8 s, the MCP
+   * sidecar reconnects per call, and a hook is one-shot anyway — which is why
+   * closing the socket is the whole of it: nothing here has a way to reach a
+   * caller that is not asking.
+   */
+  kickRefused(): void;
 }
 
 export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptions): LoopbackLink {
@@ -68,6 +83,13 @@ export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptio
     if (left > 0) linked.set(cwd, left);
     else linked.delete(cwd);
   };
+
+  /**
+   * Sockets whose latest `hello` named a directory no project claims. They are
+   * held so `kickRefused` can hang up once a project for them exists: the
+   * caller has already spoken, and only a fresh `hello` gets it a session.
+   */
+  const refused = new Set<WebSocket>();
 
   sockets.mount(LINK_WS_PATH, (socket) => {
     clients.add(socket);
@@ -98,12 +120,18 @@ export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptio
         leave(greeted);
         greeted = null;
       }
-      io.handle(msg, (out) => {
+      const routed = io.handle(msg, (out) => {
         if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(out));
       });
+      // only a hello asks for a session; the verdict on the others is this
+      // one's, and re-dialling would not change it
+      if (msg.type !== "hello") return;
+      if (routed) refused.delete(socket);
+      else refused.add(socket);
     });
     const gone = (reason: string): void => {
       clients.delete(socket);
+      refused.delete(socket);
       const cwd = greeted;
       greeted = null;
       if (cwd === null) return;
@@ -118,9 +146,15 @@ export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptio
     close(): void {
       for (const socket of clients) socket.close();
       clients.clear();
+      refused.clear();
     },
     greeted(): string[] {
       return [...linked.keys()];
+    },
+    kickRefused(): void {
+      const kicked = [...refused];
+      refused.clear();
+      for (const socket of kicked) socket.close();
     },
   };
 }

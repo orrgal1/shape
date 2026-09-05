@@ -3,7 +3,7 @@
  * server origin, written by `shape login` (src/login-cli.ts) and read by
  * `shape agent` (src/agent-cli.ts) when neither `--token` nor `SHAPE_TOKEN`
  * says otherwise. `SHAPE_HOME` overrides the home dir (tests), as in
- * agent/recents.ts.
+ * agent/directive.ts.
  *
  * File shape: `{ "ws://host:port": { "token": "…" } }`. The file is a secret,
  * so it is mode 0600 — nothing in Shape reads it but the operator's own agent.

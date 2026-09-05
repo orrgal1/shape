@@ -1,13 +1,20 @@
 /**
- * Shape in local mode: the canvas server and the agent that watches the
- * machine's coding sessions, in one process, joined by the in-memory link.
- * Same frames and the same records as remote mode — only the transport is
- * shorter and the database is the user's own (`~/.shape/shape.db`, or
+ * Shape in local mode: the canvas server and the fleet of agent runtimes that
+ * watch this machine's coding sessions, in one process, joined by in-memory
+ * links. Same frames and the same records as remote mode — only the transport
+ * is shorter and the database is the user's own (`~/.shape/shape.db`, or
  * `$SHAPE_HOME`).
  *
- * `--cwd` may be ANY worktree of the repo: the project is the repo, all of its
- * worktrees share one canvas, and each of them shows whatever session is
- * reporting in from it.
+ * Nothing here opens a project. The registry in that database IS the list of
+ * projects, and a repo is in it because a session reported in from it: a herdr
+ * agent the fleet's scan found, a caller that greeted on the loopback link, or
+ * `--cwd` — a seed treated exactly like a repo the scan saw. Every ACTIVE
+ * project has a room on the server and a runtime in the fleet; marking one
+ * inactive closes both and keeps every record it has.
+ *
+ * `--cwd` is optional and may be ANY worktree of a repo: the project is the
+ * repo, all of its worktrees share one canvas, and each of them shows whatever
+ * session is reporting in from it.
  *
  * Run: node src/index.ts [--cwd <dir>] [--port <n>] [--db <file>]
  */
@@ -15,15 +22,20 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { BRIDGE_PORT, BRIDGE_WS_PATH } from "../../shared/src/index.ts";
-import { AgentRuntime } from "./agent/runtime.ts";
+import { AgentFleet } from "./agent/fleet.ts";
+import { LOCAL_TENANT } from "./server/auth.ts";
 import { ShapeServer } from "./server/server.ts";
 import { openSqliteStorage } from "./server/sqlite.ts";
 import { memoryLinkPair } from "./transport.ts";
 import { SocketServer } from "./wsserver.ts";
 
 interface Cli {
-  /** `--cwd <dir>`: any worktree of the repo to watch; the project is the repo */
-  cwd: string;
+  /**
+   * `--cwd <dir>`: a repo to treat as seen at startup — any worktree of it, the
+   * project is the repo. Null without the flag: the registry and what the scan
+   * finds are then the whole fleet, which is the ordinary case.
+   */
+  cwd: string | null;
   port: number;
   /** `--db <file>`: the database every project's canvas is kept in */
   db: string;
@@ -31,7 +43,7 @@ interface Cli {
 
 function parseArgv(argv: string[]): Cli {
   const cli: Cli = {
-    cwd: process.cwd(),
+    cwd: null,
     port: BRIDGE_PORT,
     db: join(process.env.SHAPE_HOME ?? homedir(), ".shape", "shape.db"),
   };
@@ -67,23 +79,32 @@ try {
   // worktree, so every variation of a repo keeps its own canvas on the one
   // canvas they are merged onto
   const storage = openSqliteStorage(cli.db);
-  // and this is the machine those repos are on, so a canvas drawn before Shape
-  // kept state here is still there to be taken over
-  const server = new ShapeServer({ sockets, storage, importLegacy: true });
-  const link = memoryLinkPair();
-  server.attachAgent(link.server);
-  const agent = new AgentRuntime({
-    cwd: cli.cwd,
+  // The two halves close over each other, and neither does anything until it
+  // is started below: the server tells the fleet which projects are active and
+  // when a browser is watching, the fleet tells the server which repos it saw
+  // a session in. `importLegacy` because these repos are on this machine, so a
+  // canvas drawn before Shape kept state here is still there to be taken over.
+  const server = new ShapeServer({
     sockets,
-    link: link.agent,
-    // a retarget that failed has left this process with nowhere to stand:
-    // the browsers have already been told why, so all that is left is to
-    // flush and go
-    onExit: () =>
-      setTimeout(() => {
-        storage.close();
-        process.exit(1);
-      }, 50),
+    storage,
+    importLegacy: true,
+    onBrowsers: (count) => fleet.browsers(count),
+    onActivated: (project) => fleet.activated(project),
+  });
+  const fleet = new AgentFleet({
+    sockets,
+    seeds: cli.cwd === null ? [] : [cli.cwd],
+    registry: {
+      activeProjects: () => server.activeProjects(),
+      discovered: (repos) => server.discovered(LOCAL_TENANT, repos),
+    },
+    // one link per runtime: the server end is this process's business, so it
+    // is attached here and the agent end handed back
+    link: () => {
+      const pair = memoryLinkPair();
+      server.attachAgent(pair.server);
+      return pair.agent;
+    },
   });
 
   // Sessions live in the user's own terminal and outlive this process: a
@@ -95,7 +116,7 @@ try {
     process.on(signal, () => {
       if (stopping) return;
       stopping = true;
-      void agent.stop().then(
+      void fleet.stop().then(
         () => {
           storage.close();
           process.exit(0);
@@ -105,14 +126,19 @@ try {
     });
   }
 
-  // The socket listens BEFORE the agent attaches, and that order matters: a
-  // session's first event (Claude Code fires SessionStart within a second of
-  // the TUI coming up) arrives over the link, and a hook that finds nobody
-  // listening exits silently — the agent would never learn the session id. The
-  // banner is still printed last, so "canvas at ..." means fully up.
+  // The registry is loaded before anything can reach the server: the projects
+  // this machine had are the projects it has, and their rooms are open before
+  // the first browser or session arrives. The socket then listens BEFORE the
+  // fleet starts, and that order matters: a session's first event (Claude Code
+  // fires SessionStart within a second of the TUI coming up) arrives over the
+  // link, and a hook that finds nobody listening exits silently — the agent
+  // would never learn the session id. The banner is printed last, so "canvas
+  // at ..." means fully up.
+  await server.restore();
   await sockets.listen();
-  await agent.start();
-  console.error(`[bridge] canvas at ${sockets.url(BRIDGE_WS_PATH)} (target ${cli.cwd})`);
+  await fleet.start();
+  const seed = cli.cwd === null ? "" : ` (seed ${cli.cwd})`;
+  console.error(`[bridge] canvas at ${sockets.url(BRIDGE_WS_PATH)}${seed}`);
 } catch (err) {
   console.error(`[bridge] startup failed: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);

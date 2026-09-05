@@ -20,8 +20,6 @@ import type {
   BackendCapabilities,
   BackendInfo,
   CanvasOp,
-  DiscoveredSession,
-  Harness,
   ManagerHandle,
   ProjectTools,
   RealityEdge,
@@ -220,23 +218,25 @@ function parseLegacyKeys(value: unknown): Record<string, string> {
 }
 
 /**
- * The manager Shape found or opened in the project's herdr workspace. Absent
- * (an older agent, a stored row, or a project with no herdr) reads as "no
- * manager", which is a real state — so is a value that does not describe a
- * live pane, because the only thing downstream does with it is show it.
+ * The manager Shape found in the project's herdr workspace. Absent (an older
+ * agent, a stored row, or a project with no herdr) reads as "no manager",
+ * which is a real state — so is a value that does not describe a live pane,
+ * because the only thing downstream does with it is show it. `origin` is the
+ * literal `"found"`: Shape opens no session, and a row written by a Shape that
+ * did is not a manager this one may claim.
  */
 function parseManager(value: unknown): ManagerHandle | null {
   if (value === null || value === undefined || typeof value !== "object") return null;
   const m = value as Record<string, unknown>;
   if (!isId(m.paneId) || !isId(m.tabId) || !isId(m.workspaceId) || !isId(m.agentName)) return null;
-  if (m.origin !== "found" && m.origin !== "opened") return null;
+  if (m.origin !== "found") return null;
   if (typeof m.shapeAware !== "boolean") return null;
   return {
     paneId: m.paneId,
     tabId: m.tabId,
     workspaceId: m.workspaceId,
     agentName: m.agentName,
-    origin: m.origin,
+    origin: "found",
     shapeAware: m.shapeAware,
   };
 }
@@ -439,51 +439,6 @@ function parseRealities(value: unknown): Record<string, RealityLayer> | null {
   return out;
 }
 
-function parseSessions(value: unknown): DiscoveredSession[] | null {
-  if (!Array.isArray(value)) return null;
-  const rows: unknown[] = value;
-  const out: DiscoveredSession[] = [];
-  for (const row of rows) {
-    if (row === null || typeof row !== "object") return null;
-    const s = row as Record<string, unknown>;
-    // a harness id with no meaning to this Shape is still a session somebody
-    // is running: what to do about it is decided where it is used, not here
-    if (typeof s.harness !== "string" || typeof s.pid !== "number" || !Number.isInteger(s.pid)) {
-      return null;
-    }
-    const cwd = s.cwd ?? null;
-    const sessionId = s.sessionId ?? null;
-    if (!isNullableString(cwd) || !isNullableString(sessionId)) return null;
-    // the rest are labels: absent is empty, present must be the declared type
-    const command = s.command ?? "";
-    if (typeof command !== "string") return null;
-    const sessionFile = s.sessionFile ?? null;
-    const startedAt = s.startedAt ?? null;
-    if (!isNullableString(sessionFile) || !isNullableString(startedAt)) return null;
-    const attach = s.attach ?? "none";
-    if (attach !== "socket" && attach !== "daemon" && attach !== "http" && attach !== "none") {
-      return null;
-    }
-    let resumeCommand: string[] | null = null;
-    if (s.resumeCommand !== null && s.resumeCommand !== undefined) {
-      resumeCommand = parseStringArray(s.resumeCommand);
-      if (resumeCommand === null) return null;
-    }
-    out.push({
-      harness: s.harness as Harness,
-      pid: s.pid,
-      command,
-      cwd,
-      sessionId,
-      sessionFile,
-      startedAt,
-      resumeCommand,
-      attach,
-    });
-  }
-  return out;
-}
-
 /** Boundary validator for everything an agent sends over the agent link. */
 export function parseAgentToServerMsg(raw: string): AgentToServerMsg | null {
   let parsed: unknown;
@@ -506,11 +461,7 @@ export function parseAgentToServerMsg(raw: string): AgentToServerMsg | null {
       if (sessions === null) return null;
       const realities = parseRealities(m.realities);
       if (realities === null) return null;
-      const discovered = parseSessions(m.discovered);
-      if (discovered === null) return null;
-      const recentProjects = parseStringArray(m.recentProjects);
-      if (recentProjects === null) return null;
-      return { type: "attach", project, worktrees, sessions, realities, discovered, recentProjects };
+      return { type: "attach", project, worktrees, sessions, realities };
     }
     case "session_started": {
       if (!isWorktree(m.worktree)) return null;
@@ -548,24 +499,6 @@ export function parseAgentToServerMsg(raw: string): AgentToServerMsg | null {
       if (worktrees === null) return null;
       return { type: "worktrees", id, worktrees };
     }
-    case "sessions": {
-      const id = m.id ?? null;
-      if (!isNullableString(id)) return null;
-      const sessions = parseSessions(m.sessions);
-      if (sessions === null) return null;
-      return { type: "sessions", id, sessions };
-    }
-    case "recents": {
-      const paths = parseStringArray(m.paths);
-      if (paths === null) return null;
-      return { type: "recents", paths };
-    }
-    case "folder_picked":
-      // `null` IS the answer — the user closed the chooser — but an empty
-      // string is neither an answer nor a path anybody could open
-      if (m.path === null) return { type: "folder_picked", path: null };
-      if (!isId(m.path)) return null;
-      return { type: "folder_picked", path: m.path };
     case "skeleton_result":
       if (!isWorktree(m.worktree) || !isId(m.id) || !Array.isArray(m.ops)) return null;
       // every op is validated by `applyOps`; a non-array is what it cannot survive
@@ -605,21 +538,9 @@ export function parseServerToAgentMsg(raw: string): ServerToAgentMsg | null {
     case "focus_terminal":
       if (!isWorktree(m.worktree)) return null;
       return { type: "focus_terminal", worktree: m.worktree };
-    case "switch":
-      // a repo is retargeted onto BY PATH: nothing is started, so there is
-      // nothing else to say about it
-      if (typeof m.path !== "string" || m.path.trim().length === 0) return null;
-      return { type: "switch", path: m.path.trim() };
-    case "adopt":
-      if (typeof m.pid !== "number" || !Number.isInteger(m.pid) || m.pid <= 0) return null;
-      return { type: "adopt", pid: m.pid };
-    case "pick_folder":
-      // nothing to carry: the agent's machine is the one with the dialog
-      return { type: "pick_folder" };
-    case "discover":
     case "list_worktrees":
       if (!isId(m.id)) return null;
-      return { type: m.type, id: m.id };
+      return { type: "list_worktrees", id: m.id };
     case "synthesize_skeleton":
       if (!isWorktree(m.worktree) || !isId(m.id)) return null;
       return { type: "synthesize_skeleton", worktree: m.worktree, id: m.id };

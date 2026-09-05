@@ -89,15 +89,26 @@ export class ExternalIo {
     this.#route = opts.route;
   }
 
-  handle(msg: LinkClientMsg, reply: (msg: LinkServerMsg) => void): void {
+  /**
+   * Deliver one frame. Answers false when `route` refused the caller's cwd: no
+   * project this process hosts contains it. The mount remembers that verdict,
+   * because a project that appears later has to reach a caller that has
+   * already spoken (`kickRefused` in `link.ts`).
+   */
+  handle(msg: LinkClientMsg, reply: (msg: LinkServerMsg) => void): boolean {
     const target = this.#route(msg.cwd);
     if ("error" in target) {
       // a canvas call is a tool the harness is BLOCKED on: it hears the refusal
       // as a failed tool result, not as an `error` frame it does not read
       if (msg.type === "canvas_call") reply({ type: "canvas_result", id: msg.id, text: target.error, isError: true });
       else reply({ type: "error", message: target.error });
-      return;
+      return false;
     }
+    this.#deliver(msg, target, reply);
+    return true;
+  }
+
+  #deliver(msg: LinkClientMsg, target: LinkTarget, reply: (msg: LinkServerMsg) => void): void {
     if (msg.type === "canvas_call") {
       const { id } = msg;
       // a canvas result belongs to the caller alone; the graph broadcast is the

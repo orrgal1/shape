@@ -3,10 +3,10 @@
  * they ask for into issues and dispatches a builder per issue, each in its own
  * tab and worktree. Shape does not manage anything itself — the
  * `@orrgal1/manager-skill` does, in an omp of its own — so this file is only
- * about making sure that session exists, is Shape-aware, and hands Shape's
- * integration down to every builder it launches.
+ * about recognizing that session and handing Shape's integration down to every
+ * builder it launches.
  *
- * Three steps, in this order, on every project open and every switch:
+ * Two steps, in this order, on every project open:
  *
  *   FIND. A `manager` tab in this project's herdr workspace whose live agent
  *   runs in the project's main checkout IS the manager, whoever started it —
@@ -17,18 +17,15 @@
  *   session that ended; it is closed, so the workspace never accumulates two
  *   tabs by that name. A `manager` tab whose agent lives somewhere else
  *   belongs to another project sharing the workspace: left alone, and not
- *   counted as found.
- *
- *   OPEN. Nothing found means `mgr paths` (for the skill file to point the
- *   session at) and then one omp with Shape's extension loaded, in a tab
- *   labelled `manager`, prompted to read the skill and take the job.
+ *   counted as found. Nothing found is a real answer: SHAPE OPENS NOTHING, and
+ *   a project without a manager still has a canvas.
  *
  *   CONFIG. `mgr config` is what the manager applies to the builders it
- *   launches LATER, so both origins get it: Shape's extension in `omp-arg` and
- *   its link URL in `env` mean every builder comes up on the canvas, and
- *   `brief-extra` points them at the project's directive. `mgr config add`
- *   appends without deduping, so reconciliation is Shape's job: the desired
- *   list is computed, and only a difference costs an `unset` + re-add.
+ *   launches LATER: Shape's extension in `omp-arg` and its link URL in `env`
+ *   mean every builder comes up on the canvas, and `brief-extra` points them
+ *   at the project's directive. `mgr config add` appends without deduping, so
+ *   reconciliation is Shape's job: the desired list is computed, and only a
+ *   difference costs an `unset` + re-add.
  *
  * Every failure here degrades to `null` and one line on stderr, never an
  * exception, because this runs INSIDE opening a project: a herdr that refused,
@@ -54,9 +51,8 @@ export const MANAGER_LABEL = "manager";
  * package. `OMP_EXTENSION` is the omp extension's PATH rather than its import,
  * because the bridge must run against a checkout where packages/link is
  * present but not built or importable from here, and omp loads a `.ts` file
- * directly. That extension is Shape's whole integration with an omp: the
- * manager is launched with it, and `mgr config` hands the same path down to
- * every builder the manager launches. One path, one truth.
+ * directly. That extension is Shape's whole integration with an omp, and
+ * `mgr config` hands the path down to every builder the manager launches.
  */
 const BRIDGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const MGR = join(BRIDGE_ROOT, "node_modules", ".bin", "mgr");
@@ -68,9 +64,6 @@ export const OMP_EXTENSION = resolve(BRIDGE_ROOT, "..", "link", "src", "omp-exte
  * without a manager rather than wait on it.
  */
 const MGR_TIMEOUT_MS = 30_000;
-
-/** herdr agent names: `[a-z][a-z0-9_-]{0,31}` */
-const MAX_AGENT_NAME = 32;
 
 /** how Shape's own `omp-arg` pair is recognized in a config it did not write */
 const EXTENSION_SUFFIX = "/omp-extension.ts";
@@ -156,11 +149,6 @@ async function canonical(path: string): Promise<string> {
   }
 }
 
-/** a project label as a herdr agent name may spell it (`[a-z][a-z0-9_-]{0,31}`) */
-function slug(label: string): string {
-  return label.toLowerCase().replaceAll(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
-}
-
 /**
  * The `omp-arg` list the manager should hand its builders, or null when it
  * already says that. Shape owns exactly one pair in there — `--extension
@@ -198,9 +186,10 @@ export function planEnv(existing: readonly string[], linkUrl: string): string[] 
 }
 
 /**
- * Find or open this project's manager, and make sure it passes Shape on to the
- * builders it launches. `null` is a normal answer: no herdr, no `mgr`, or a
- * herdr that would not cooperate — the canvas then simply shows no manager.
+ * Find this project's manager, and make sure it passes Shape on to the
+ * builders it launches. `null` is a normal answer: no herdr, no manager tab in
+ * the user's workspace, or a herdr that would not cooperate — the canvas then
+ * simply shows no manager, and Shape opens nothing to fill the gap.
  */
 export async function attachManager(
   project: { path: string; label: string },
@@ -214,39 +203,23 @@ export async function attachManager(
     console.error("[bridge] manager: disabled by SHAPE_MANAGER=0");
     return null;
   }
-  const mgr = env.mgr ?? MGR;
 
   try {
-    const handle = await attach(project, launcher, env, mgr);
-    if (handle === null) return null;
-    await configure(project, handle, env, mgr);
-    return handle;
+    const workspaceId = await launcher.workspaceOf(project);
+    if (workspaceId === null) return null;
+    const found = await findManager(project, launcher, workspaceId, env);
+    if (found === null) return null;
+    console.error(
+      `[bridge] manager: found ${found.agentName} in pane ${found.paneId} of workspace ${found.workspaceId} (shape-aware: ${found.shapeAware ? "yes" : "no"})`,
+    );
+    await configure(project, found, env, env.mgr ?? MGR);
+    return found;
   } catch (err) {
     // every herdr call in there can be refused (a workspace the user closed
     // mid-flight, a socket that dropped) and none of it is worth a project
     console.error(`[bridge] manager: none (${errText(err)})`);
     return null;
   }
-}
-
-/** FIND then OPEN; whichever answers, the caller configures it. */
-async function attach(
-  project: { path: string; label: string },
-  launcher: HerdrLauncher,
-  env: ManagerEnvironment,
-  mgr: string,
-): Promise<ManagerHandle | null> {
-  const workspaceId = await launcher.workspaceOf(project);
-  if (workspaceId !== null) {
-    const found = await findManager(project, launcher, workspaceId, env);
-    if (found !== null) {
-      console.error(
-        `[bridge] manager: found ${found.agentName} in pane ${found.paneId} of workspace ${found.workspaceId} (shape-aware: ${found.shapeAware ? "yes" : "no"})`,
-      );
-      return found;
-    }
-  }
-  return await openManager(project, launcher, workspaceId, env, mgr);
 }
 
 /**
@@ -301,63 +274,6 @@ async function findManager(
     };
   }
   return null;
-}
-
-/** No manager yet: one omp with Shape's extension, told to read the skill. */
-async function openManager(
-  project: { path: string; label: string },
-  launcher: HerdrLauncher,
-  workspaceId: string | null,
-  env: ManagerEnvironment,
-  mgr: string,
-): Promise<ManagerHandle | null> {
-  const paths = await run(mgr, ["paths"], project.path, mgrEnv(workspaceId));
-  const skill = paths.ok ? parseJson(paths.stdout) : null;
-  const skillMd = typeof skill?.skill_md === "string" ? skill.skill_md : null;
-  if (skillMd === null) {
-    // an omp with no skill to read is not a manager, it is a stray session in
-    // the user's terminal: better to open nothing at all
-    console.error(`[bridge] manager: none (mgr paths: ${paths.ok ? "unreadable output" : paths.stderr})`);
-    return null;
-  }
-
-  const named = `${MANAGER_LABEL}-${slug(project.label)}`.slice(0, MAX_AGENT_NAME);
-  const opened = await launcher.open(
-    {
-      // the manager works in the main checkout: it writes issues and launches
-      // builders, and never edits the tree itself
-      cwd: project.path,
-      kind: "omp",
-      argv: ["omp", "--extension", OMP_EXTENSION],
-      env: { [LINK_ENV]: env.linkUrl },
-      project,
-      label: MANAGER_LABEL,
-    },
-    [MANAGER_LABEL, named],
-  );
-  try {
-    await launcher.prompt(opened.paneId, `Read ${skillMd} and act as the manager for this project.`);
-  } catch (err) {
-    // an omp that was never told the job is not a manager, and the next pass
-    // would FIND it (a `manager` tab with a live agent in the right tree) and
-    // never prompt it either — so it goes, and opening is retried from scratch
-    console.error(`[bridge] manager: none (${opened.agentName} would not take the prompt: ${errText(err)})`);
-    try {
-      await launcher.closeTab(opened.tabId);
-    } catch (nested) {
-      console.error(`[bridge] manager: tab ${opened.tabId} would not close: ${errText(nested)}`);
-    }
-    return null;
-  }
-  console.error(
-    `[bridge] manager: opened ${opened.agentName} in pane ${opened.paneId} of workspace ${opened.workspaceId} (shape-aware: yes)`,
-  );
-  return { ...opened, origin: "opened", shapeAware: true };
-}
-
-/** `mgr` reads the workspace out of the environment when herdr placed us in one */
-function mgrEnv(workspaceId: string | null): NodeJS.ProcessEnv {
-  return workspaceId === null ? process.env : { ...process.env, HERDR_WORKSPACE_ID: workspaceId };
 }
 
 /**

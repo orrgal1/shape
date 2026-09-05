@@ -15,7 +15,6 @@
     "agent": "node src/agent-cli.ts",
     "login": "node src/login-cli.ts",
     "smoke": "node scripts/smoke.mjs",
-    "smoke:adopt": "node scripts/smoke-adopt.mjs",
     "smoke:herdr": "node scripts/smoke-herdr.mjs",
     "smoke:manager": "node scripts/smoke-manager.mjs",
     "smoke:drift": "node scripts/smoke-drift.mjs",

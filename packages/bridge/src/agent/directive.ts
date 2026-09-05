@@ -10,7 +10,7 @@
  *
  * Written by the agent runtime, because the agent is where builders run and
  * the only place the link URL is known. `SHAPE_HOME` overrides the home dir
- * (tests), exactly like `recents.ts`.
+ * (tests), exactly like `../servers.ts`.
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
