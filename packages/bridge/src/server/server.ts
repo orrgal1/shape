@@ -508,6 +508,10 @@ export class ShapeServer {
   async #deactivate(tenant: string, key: string): Promise<void> {
     const room = this.#rooms.get(key);
     this.#rooms.delete(key);
+    // unjoined before the close, in the same tick the room left the map: a
+    // frame a watcher sends meanwhile must find "no room" the way an early
+    // socket does, not a room that is halfway through filing its records
+    const watchers = this.#hub.leave(key);
     if (room !== undefined) {
       // its records are flushed and filed, and the link feeding it is closed;
       // the registry then keeps what the room knew — the sessions that were
@@ -515,7 +519,6 @@ export class ShapeServer {
       await room.close();
       this.#remember(key, room.row());
     }
-    const watchers = this.#hub.leave(key);
     const next = this.#newestActiveKey(tenant);
     // a tenant whose default room was this one takes its newest remaining
     // project, or none at all: the next browser then waits like an early one

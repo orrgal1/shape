@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 /**
  * Herdr smoke test. herdr is not how Shape starts sessions — Shape starts
- * none — it is how Shape can SEE the user's own terminal: a session running in
- * a herdr tab has a terminal that can be brought forward, and one running
- * anywhere else does not. This drives that, with `scripts/fake-herdr.mjs` in
- * place of the user's herdr server and `scripts/fake-omp-tui.mjs` as the
- * session inside the tab:
+ * none — it is how Shape SEES the user's machine: every session in a herdr tab
+ * is a project Shape can list and a terminal it can bring forward, and a
+ * session running anywhere else is neither. This drives that, with
+ * `scripts/fake-herdr.mjs` in place of the user's herdr server and
+ * `scripts/fake-omp-tui.mjs` as the session inside a tab:
  *
  *   probe           — the bridge finds herdr on HERDR_SOCKET_PATH and says so
+ *   the seed        — `--cwd` is a repo treated as seen: one ACTIVE project,
+ *                     with the manager tab the user already has in their herdr
+ *                     FOUND in it (`origin: "found"`), and not one tab, pane or
+ *                     prompt created by Shape to get it — the fake's call log
+ *                     is read to prove that
  *   a builder tab   — a tab created in a worktree with a harness started in it
  *                     (what a manager-launched builder looks like) reports in
  *                     over the loopback link as a session with terminal
@@ -21,10 +26,21 @@
  *   no session      — focus_terminal for a variation nothing reports in from is
  *                     refused with the reason
  *   tab.close       — the harness dies with its tab and the session is gone
+ *   discovery       — a herdr agent in a repo Shape was never told about is a
+ *                     new ACTIVE project with one live session, found by the
+ *                     scan the first browser to connect triggers. Switching to
+ *                     it answers a hello with NO manager, because no workspace
+ *                     of the user's belongs to that repo
+ *   gone quiet      — that agent's tab closes and nobody says so: the next
+ *                     scan sees the whole machine, so the project it no longer
+ *                     mentions drops to no live sessions and stays active
  *
- * The project's manager tab is the one thing Shape still OPENS in herdr; that
- * pass has its own smoke (`smoke-manager.mjs`) and is switched off here with
- * SHAPE_MANAGER=0, so what this file drives is only the observing side.
+ * Shape OPENS nothing in herdr any more (#28): the manager is a tab the user
+ * (or a previous Shape) started, so the fake here hosts one BEFORE the bridge
+ * comes up, in a workspace named after the project, with an agent in the
+ * project's main checkout and no link of its own — the user's own session, seen
+ * in herdr and nowhere else. `smoke-manager.mjs` drives the same pass against
+ * the real herdr on this machine.
  *
  * Not in CI (it models a terminal): run it locally, against the fake by
  * default. Usage (from packages/bridge): node scripts/smoke-herdr.mjs
@@ -80,6 +96,15 @@ function jsonl(path) {
 /** the calls herdr was asked for, in order, with the connection each came on */
 const calls = (method) => jsonl(herdrLog).filter((f) => f.type === "__call" && f.method === method);
 
+/**
+ * The same, minus this smoke's own calls. The smoke plays the user's terminal
+ * here — it creates the workspaces, tabs and agents that a manager or a person
+ * would — and its request ids all start with `smoke-`, so what is left is
+ * exactly what the BRIDGE asked herdr for. Shape opens nothing, and this is
+ * how a run says so.
+ */
+const bridgeCalls = (method) => calls(method).filter((f) => !String(f.id).startsWith("smoke-"));
+
 let callSeq = 0;
 
 /**
@@ -107,6 +132,14 @@ function herdrCall(method, params = {}) {
   return promise;
 }
 
+/** a committed repo: not `main`, because this machine's hook refuses commits there */
+function commitAll(dir) {
+  const git = (...args) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+  git("init", "-q", "-b", "smoke");
+  git("add", "-A");
+  git("-c", "user.email=smoke@example.com", "-c", "user.name=smoke", "commit", "-q", "-m", "init");
+}
+
 /** a committed one-package workspace: enough for reality extraction to succeed */
 async function seedTarget(dir) {
   await mkdir(join(dir, "packages", "solo", "src"), { recursive: true });
@@ -114,30 +147,63 @@ async function seedTarget(dir) {
   await writeFile(join(dir, "package.json"), JSON.stringify({ name: "herdr-smoke", private: true }, null, 2));
   await writeFile(join(dir, "packages", "solo", "package.json"), JSON.stringify({ name: "@herdr/solo", version: "0.0.1" }, null, 2));
   await writeFile(join(dir, "packages", "solo", "src", "index.ts"), "export const solo = 1;\n");
-  const git = (...args) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
-  // not `main`: this machine's global pre-commit hook refuses commits there,
-  // and a throwaway repo in /tmp is nobody's trunk
-  git("init", "-q", "-b", "smoke");
-  git("add", "-A");
-  git("-c", "user.email=smoke@example.com", "-c", "user.name=smoke", "commit", "-q", "-m", "init");
+  commitAll(dir);
 }
 
 const target = await mkdtemp(join(tmpdir(), "vh-herdr-target-"));
+/**
+ * A repo Shape is never told about: only a herdr agent running in it puts it
+ * on the picture, which is the whole of how a project comes into being.
+ */
+const stranger = await mkdtemp(join(tmpdir(), "vh-herdr-stranger-"));
 const fakeHome = await mkdtemp(join(tmpdir(), "vh-herdr-home-"));
 const socketPath = join(fakeHome, "herdr.sock");
 const herdrLog = join(fakeHome, "fake-herdr.log");
 await seedTarget(target);
+await writeFile(join(stranger, "README.md"), "# a repo nobody told Shape about\n");
+commitAll(stranger);
 /** the variation a builder works in: its own worktree, as the manager makes one */
 const worktree = join(tmpdir(), `vh-herdr-wt-${process.pid}`);
 execFileSync("git", ["worktree", "add", "-q", "-b", "variation", worktree], { cwd: target, stdio: "ignore" });
 
 const wtMain = realpathSync(target);
 const wtVariation = realpathSync(worktree);
+const wtStranger = realpathSync(stranger);
 
 const frames = [];
 let herdr = null;
 let bridge = null;
 let socket = null;
+
+/**
+ * A browser watching the canvas. The scan runs only while one is connected, so
+ * cycling this socket is also the only way a smoke gets a fresh scan out of
+ * the bridge: the standing timer is 30 s, which is longer than this whole run.
+ */
+async function openBrowser() {
+  const ws = new WebSocket(`ws://127.0.0.1:${String(PORT)}/ws`);
+  ws.on("message", (data) => frames.push(JSON.parse(data.toString())));
+  const opened = Promise.withResolvers();
+  ws.once("open", opened.resolve);
+  ws.once("error", opened.reject);
+  await opened.promise;
+  return ws;
+}
+
+/**
+ * Ask the bridge to look at the machine again, and say where the frames that
+ * answer begin. A scan happens when the browser count goes from none to one,
+ * so cycling the socket is the whole trick — with the close given time to
+ * land, or the count never reaches zero and nothing is triggered.
+ */
+async function rescan() {
+  socket.close();
+  socket = null;
+  await sleep(300);
+  const from = frames.length;
+  socket = await openBrowser();
+  return from;
+}
 
 try {
   // --- the herdr server the bridge talks to ---------------------------------
@@ -155,6 +221,22 @@ try {
   herdr.stderr.on("data", (d) => process.stderr.write(`[herdr] ${d}`));
   await waitFor("the fake herdr server listening", () => herdrOut.includes('"ready"'));
 
+  // --- the manager the user already has, before Shape is even up -----------
+  // A workspace of the project's own with a `manager` tab in it, whose agent
+  // runs in the project's main checkout and has no link: exactly what a
+  // manager the user (or a previous Shape) started looks like from outside.
+  // Shape must recognize THIS rather than open one of its own.
+  const managerWorkspace = await herdrCall("workspace.create", { label: basename(wtMain), cwd: wtMain, focus: false });
+  const managerWorkspaceId = String(managerWorkspace.workspace.workspace_id);
+  const managerTab = await herdrCall("tab.create", { workspace_id: managerWorkspaceId, cwd: wtMain, label: "manager" });
+  await herdrCall("agent.start", {
+    name: "manager-herdr-smoke",
+    kind: "omp",
+    pane_id: String(managerTab.root_pane.pane_id),
+    args: [],
+    timeout_ms: 10_000,
+  });
+
   // --- the bridge, with that herdr as the machine's terminal ----------------
   bridge = spawn(process.execPath, ["src/index.ts", "--cwd", target, "--port", String(PORT)], {
     cwd: process.cwd(),
@@ -163,11 +245,11 @@ try {
     // it runs on; SHAPE_OPEN replaces `open` with `true`, so nothing real is
     // ever brought forward under a smoke. SHAPE_AUTO_MAP=0 keeps the room from
     // mapping this seeded project by itself — the terminal is what this file is
-    // about. SHAPE_MANAGER=0: the manager pass has its own smoke.
+    // about. The manager pass is left ON: it is find-only now, so what it does
+    // to a fake herdr is read a workspace's tabs.
     env: {
       ...process.env,
       SHAPE_AUTO_MAP: "0",
-      SHAPE_MANAGER: "0",
       HERDR_SOCKET_PATH: socketPath,
       SHAPE_HOME: fakeHome,
       HOME: fakeHome,
@@ -192,14 +274,7 @@ try {
     stderr.split("\n").find((line) => line.includes("herdr")) ?? "(herdr never mentioned)",
   );
 
-  socket = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
-  socket.on("message", (data) => frames.push(JSON.parse(data.toString())));
-  {
-    const opened = Promise.withResolvers();
-    socket.once("open", opened.resolve);
-    socket.once("error", opened.reject);
-    await opened.promise;
-  }
+  socket = await openBrowser();
   const hello = await waitFor("hello", () => frames.find((f) => f.type === "hello"));
   check("hello names herdr as the project's launcher", hello.tools?.launcher === "herdr", JSON.stringify(hello.tools ?? null));
   check(
@@ -208,15 +283,47 @@ try {
     JSON.stringify(hello.session.sessions),
   );
 
+  // --- the seed is a project, and its manager was already there -------------
+  // `--cwd` is a repo treated as seen: one ACTIVE project, and the herdr agent
+  // in the manager tab is a live session in its main checkout — the scan is
+  // the only thing that knows about that one, because it never spoke on the
+  // link.
+  check(
+    "the --cwd seed is the one project, and it is active",
+    hello.projects.length === 1 && hello.projects[0]?.status === "active" && hello.projects[0]?.projectId === hello.projectId,
+    JSON.stringify(hello.projects.map((p) => ({ id: p.projectId, status: p.status }))),
+  );
+  check(
+    "with the session herdr is hosting counted as live in it",
+    hello.projects[0]?.liveSessions === 1,
+    String(hello.projects[0]?.liveSessions),
+  );
+  check(
+    "the manager tab the user already had is FOUND, in the pane and workspace herdr says",
+    hello.session.manager?.origin === "found" &&
+      hello.session.manager.tabId === String(managerTab.tab.tab_id) &&
+      hello.session.manager.workspaceId === managerWorkspaceId,
+    JSON.stringify(hello.session.manager),
+  );
+  check(
+    "it is not shape-aware: a session that never dialled the link cannot reach the canvas",
+    hello.session.manager?.shapeAware === false,
+    String(hello.session.manager?.shapeAware),
+  );
+  check("and the project says it has one", hello.projects[0]?.manager === true, String(hello.projects[0]?.manager));
+  check(
+    "nothing was opened to get it: Shape created no tab, started no agent and typed nothing",
+    bridgeCalls("tab.create").length === 0 && bridgeCalls("agent.start").length === 0 && bridgeCalls("agent.prompt").length === 0,
+    `${bridgeCalls("tab.create").length} tab.create, ${bridgeCalls("agent.start").length} agent.start, ${bridgeCalls("agent.prompt").length} agent.prompt`,
+  );
+
   // --- a builder in a tab of its own, the way the manager launches one -------
-  // The workspace, the tab and the harness inside it are all somebody else's
-  // doing: Shape only ever learns about this session because it dials the
-  // loopback link from a directory Shape knows.
+  // The tab and the harness inside it are somebody else's doing: Shape only
+  // ever learns about this session because it dials the loopback link from a
+  // directory Shape knows.
   const startedAt = frames.length;
-  const workspace = await herdrCall("workspace.create", { label: basename(wtMain), cwd: wtMain, focus: false });
-  const workspaceId = String(workspace.workspace.workspace_id);
   const created = await herdrCall("tab.create", {
-    workspace_id: workspaceId,
+    workspace_id: managerWorkspaceId,
     cwd: wtVariation,
     label: "variation",
     env: {
@@ -334,6 +441,88 @@ try {
     after.session.worktrees.some((w) => w.id === wtVariation),
     JSON.stringify(after.session.worktrees.map((w) => w.id)),
   );
+
+  // --- a repo Shape was never told about ------------------------------------
+  // Nobody opens a project. A herdr agent running in a repo IS the project
+  // appearing, and the scan that notices it runs when a browser connects —
+  // never with nobody watching, which is why the socket is cycled here rather
+  // than waiting out the 30 s tick.
+  const strangerTab = await herdrCall("tab.create", {
+    workspace_id: managerWorkspaceId,
+    cwd: wtStranger,
+    label: "a stranger's work",
+  });
+  await herdrCall("agent.start", {
+    name: "issue-1",
+    kind: "omp",
+    pane_id: String(strangerTab.root_pane.pane_id),
+    args: [],
+    timeout_ms: 10_000,
+  });
+  const rescanned = await rescan();
+  const listed = await waitFor("a projects broadcast naming the stranger's repo", () =>
+    frames
+      .slice(rescanned)
+      .find((f) => f.type === "projects" && f.projects.some((p) => p.cwd === wtStranger)),
+  );
+  const strangerProject = listed.projects.find((p) => p.cwd === wtStranger);
+  check(
+    "a herdr agent in a repo nobody named is a new ACTIVE project, with that session live in it",
+    strangerProject.status === "active" && strangerProject.liveSessions === 1,
+    JSON.stringify(strangerProject),
+  );
+  check(
+    "and it has no manager: no workspace of the user's belongs to that repo",
+    strangerProject.manager === false,
+    String(strangerProject.manager),
+  );
+  check(
+    "the project it was discovered alongside is still there, still active",
+    listed.projects.some((p) => p.cwd === wtMain && p.status === "active"),
+    JSON.stringify(listed.projects.map((p) => `${p.label}:${p.status}`)),
+  );
+  check(
+    "and discovering it opened nothing in the user's terminal either",
+    bridgeCalls("tab.create").length === 0 && bridgeCalls("agent.start").length === 0 && bridgeCalls("agent.prompt").length === 0,
+    `${bridgeCalls("tab.create").length} tab.create, ${bridgeCalls("agent.start").length} agent.start, ${bridgeCalls("agent.prompt").length} agent.prompt`,
+  );
+
+  // A project no workspace of the user's belongs to has no manager, and the
+  // canvas is told exactly that instead of being handed one: opening the tab
+  // is the user's business, and Shape only ever reports what it found.
+  const switched = frames.length;
+  socket.send(JSON.stringify({ type: "select_project", projectId: strangerProject.projectId }));
+  const strangerHello = await waitFor("a hello for the stranger's project", () =>
+    frames.slice(switched).find((f) => f.type === "hello" && f.projectId === strangerProject.projectId),
+  );
+  check(
+    "switching to a project with no manager tab in it answers a hello carrying no manager",
+    strangerHello.session.manager === null,
+    JSON.stringify(strangerHello.session.manager),
+  );
+
+  // --- the stranger's session ends ------------------------------------------
+  // The tab closes, so herdr stops listing that agent — and nothing tells the
+  // bridge. A scan sees the WHOLE machine, so a repo it stays silent about has
+  // nothing live in it: the count has to fall by itself, and the project stays
+  // in the registry with everything it knows.
+  await herdrCall("tab.close", { tab_id: String(strangerTab.tab.tab_id) });
+  const emptied = await rescan();
+  const quiet = await waitFor("a projects broadcast with nothing live in the stranger's repo", () =>
+    frames
+      .slice(emptied)
+      .find((f) => f.type === "projects" && f.projects.some((p) => p.cwd === wtStranger && p.liveSessions === 0)),
+  );
+  check(
+    "the last session leaving a repo leaves the project itself active, with nothing live in it",
+    quiet.projects.find((p) => p.cwd === wtStranger)?.status === "active",
+    JSON.stringify(quiet.projects.find((p) => p.cwd === wtStranger)),
+  );
+  check(
+    "and the project whose session is still running still counts it",
+    quiet.projects.find((p) => p.cwd === wtMain)?.liveSessions === 1,
+    JSON.stringify(quiet.projects.find((p) => p.cwd === wtMain)),
+  );
 } catch (err) {
   check("the herdr smoke ran to completion", false, err instanceof Error ? err.message : String(err));
 } finally {
@@ -348,6 +537,7 @@ try {
   }
   await rm(worktree, { recursive: true, force: true });
   await rm(target, { recursive: true, force: true });
+  await rm(stranger, { recursive: true, force: true });
   await rm(fakeHome, { recursive: true, force: true });
 }
 

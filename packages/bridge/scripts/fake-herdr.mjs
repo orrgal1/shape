@@ -30,12 +30,18 @@
  *   `agent.start`  spawns `node scripts/fake-omp-tui.mjs` in the tab's cwd with
  *                  the tab's env plus the call's `args`, and waits for the fake
  *                  to say it is ready — so the agent under test sees a real
- *                  session appear on its loopback link.
+ *                  session appear on its loopback link. A tab with NO
+ *                  `SHAPE_LINK` in its env instead gets a process that only
+ *                  occupies the pane: a live agent herdr can see and Shape's
+ *                  link never hears from, which is what the user's own
+ *                  sessions (their manager tab above all) look like.
  *   `agent.prompt` types the text into that child (`{"type":"typed",…}` on its
  *                  stdin), the way herdr submits into a pane.
  *   `agent.list`   every pane with a live harness in it, with the cwd it runs
- *                  in: how Shape finds a session it did not start, both to
- *                  focus its terminal and to find the manager's tab again.
+ *                  in: the whole of what Shape's discovery scan can see of
+ *                  this machine, and how it finds a session it did not start —
+ *                  to name the repo as a project, to focus its terminal, and
+ *                  to recognize the manager's tab.
  *   `tab.list`     one workspace's tabs by the label a human reads.
  *   `agent.focus`, `tab.focus`  recorded, nothing to focus.
  *   `tab.close`    terminates the child (which says `bye` on its way out).
@@ -238,12 +244,24 @@ function statusChanged(tab, status) {
 }
 
 /**
- * Start the fake harness in a tab's pane and wait for it to say it is up. The
+ * Start whatever stands in for a harness in this tab's pane, and wait for it
+ * to be up.
+ *
+ * A tab carrying `SHAPE_LINK` gets the omp stub: a session that reports in on
+ * Shape's loopback link, which is what a builder launched into a tab is. The
  * real server waits for its detector to recognize the agent; here the child
  * says so itself on stdout, which is also where its session file comes from.
+ *
+ * A tab WITHOUT a link gets a process that only occupies the pane. herdr
+ * lists it as a live agent all the same, and Shape's link never hears a word
+ * from it — which is what the user's own sessions look like, the manager tab
+ * they opened by hand above all. Shape has to find those in herdr or not at
+ * all, so there is nothing to wait for: the pane is taken the moment the
+ * child is spawned.
  */
 function startAgent(tab, name, kind, args, timeoutMs) {
-  const child = spawn(process.execPath, [FAKE_OMP_TUI, ...args], {
+  const linked = typeof tab.env.SHAPE_LINK === "string" && tab.env.SHAPE_LINK.length > 0;
+  const child = spawn(process.execPath, linked ? [FAKE_OMP_TUI, ...args] : ["-e", "process.stdin.resume()"], {
     cwd: tab.cwd,
     env: { ...process.env, ...tab.env },
     stdio: ["pipe", "pipe", "pipe"],
@@ -253,6 +271,13 @@ function startAgent(tab, name, kind, args, timeoutMs) {
 
   const { promise, resolve, reject } = Promise.withResolvers();
   const timer = setTimeout(() => reject(new Error("agent_start_timeout")), timeoutMs);
+  // nothing to wait for: an unlinked pane is taken as soon as it has a child
+  if (!linked) {
+    child.once("spawn", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  }
   let buf = "";
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {

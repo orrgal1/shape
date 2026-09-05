@@ -206,9 +206,18 @@ export async function attachManager(
 
   try {
     const workspaceId = await launcher.workspaceOf(project);
-    if (workspaceId === null) return null;
+    // the two ways finding turns up nothing are the ordinary ones, and each is
+    // the answer to a different question the reader of a log is asking: was
+    // this project's workspace even open, or was it open with no manager in it
+    if (workspaceId === null) {
+      console.error(`[bridge] manager: none (no workspace of ${project.label} is open in the user's herdr)`);
+      return null;
+    }
     const found = await findManager(project, launcher, workspaceId, env);
-    if (found === null) return null;
+    if (found === null) {
+      console.error(`[bridge] manager: none (no manager tab in workspace ${workspaceId})`);
+      return null;
+    }
     console.error(
       `[bridge] manager: found ${found.agentName} in pane ${found.paneId} of workspace ${found.workspaceId} (shape-aware: ${found.shapeAware ? "yes" : "no"})`,
     );

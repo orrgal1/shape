@@ -17,6 +17,7 @@
     "smoke": "node scripts/smoke.mjs",
     "smoke:herdr": "node scripts/smoke-herdr.mjs",
     "smoke:manager": "node scripts/smoke-manager.mjs",
+    "smoke:projects": "node scripts/smoke-projects.mjs",
     "smoke:drift": "node scripts/smoke-drift.mjs",
     "smoke:remote": "node scripts/smoke-remote.mjs",
     "smoke:auth": "node scripts/smoke-auth.mjs",
