@@ -366,6 +366,7 @@ const PLAYGROUND_TOOLS: ProjectTools = {
   launcher: "herdr",
   launchers: [{ id: "herdr", label: "herdr", path: "/usr/local/bin/herdr", version: "0.9.2" }],
   harnesses: [{ id: "omp", label: "omp", path: "/usr/local/bin/omp", version: "2.1.0" }],
+  directoryPicker: false,
 };
 
 const PLAYGROUND_MODEL = { provider: "anthropic", id: "claude-fable-5" };

@@ -12,12 +12,10 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, resolve, sep } from "node:path";
 import type { WorktreeInfo } from "../../../shared/src/index.ts";
-
-const EXCLUDE_LINE = ".shape/";
 
 /** Run git, resolving to null on any failure (missing git, not a repo, ...). */
 function git(cwd: string, args: string[]): Promise<string | null> {
@@ -194,32 +192,4 @@ export function projectKey(identity: RepoIdentity): string {
  */
 export function legacyProjectKey(path: string): string {
   return createHash("sha256").update(`${hostname()}:${path}`).digest("hex");
-}
-
-/**
- * Keep per-worktree canvas state out of every branch: `.shape/` goes in
- * the repo's shared `info/exclude` (common dir → covers every worktree). Silent
- * no-op outside a repo or when the file cannot be written.
- */
-export async function ensureGitExclude(cwd: string): Promise<void> {
-  const stdout = await git(cwd, ["rev-parse", "--git-common-dir"]);
-  if (stdout === null) return;
-  const commonDir = stdout.trim();
-  if (commonDir.length === 0) return;
-
-  const infoDir = join(resolve(cwd, commonDir), "info");
-  const excludeFile = join(infoDir, "exclude");
-  try {
-    let existing = "";
-    try {
-      existing = await readFile(excludeFile, "utf8");
-    } catch {
-      await mkdir(infoDir, { recursive: true });
-    }
-    if (existing.split("\n").some((line) => line.trim() === EXCLUDE_LINE)) return;
-    const prefix = existing.length === 0 || existing.endsWith("\n") ? existing : `${existing}\n`;
-    await writeFile(excludeFile, `${prefix}${EXCLUDE_LINE}\n`, "utf8");
-  } catch {
-    // exclude hygiene is best effort; never block startup on it
-  }
 }

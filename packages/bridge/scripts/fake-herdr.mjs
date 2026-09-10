@@ -59,6 +59,9 @@
  *   FAKE_HERDR_LOG     JSONL log of every call and its answer, every event
  *                      and the lifecycle markers;
  *                      default <cwd>/fake-herdr.log
+ *   FAKE_HERDR_REFUSE_SHAPE_MUTATIONS=1 rejects Shape (`shape-*`) requests
+ *                      for agent.start/prompt/focus and tab.focus while still
+ *                      allowing a smoke's own setup requests.
  * stdout: one line `{ "type": "ready", "pid", "socket" }` once listening.
  */
 
@@ -77,6 +80,8 @@ const PROTOCOL = 19;
 const VERSION = "0.8.0-fake";
 /** herdr's own default readiness wait for `agent.start` */
 const START_TIMEOUT_MS = 30_000;
+const REFUSE_SHAPE_MUTATIONS = process.env.FAKE_HERDR_REFUSE_SHAPE_MUTATIONS === "1";
+const MUTATING_METHODS = new Set(["agent.start", "agent.prompt", "agent.focus", "tab.focus"]);
 
 function record(entry) {
   appendFileSync(LOG, `${JSON.stringify(entry)}\n`);
@@ -535,7 +540,11 @@ const server = createServer((socket) => {
         continue;
       }
       answered = true;
-      dispatch(method, params ?? {}).then(
+      const request =
+        REFUSE_SHAPE_MUTATIONS && String(id).startsWith("shape-") && MUTATING_METHODS.has(method)
+          ? Promise.reject(Object.assign(new Error(`forbidden Shape launcher mutation: ${method}`), { code: "forbidden" }))
+          : dispatch(method, params ?? {});
+      request.then(
         (result) => {
           // the answer, not only the question: a test that has to know WHICH
           // workspace or tab herdr handed out reads it here rather than

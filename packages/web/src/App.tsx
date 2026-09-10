@@ -94,19 +94,22 @@ function basename(path: string): string {
 }
 
 /**
- * The projects a session has reported in from, and which of them are the ones
- * being watched. Nothing here opens, creates or finds a project: a project is
- * in this list because an agent turned up in it, and the only input Shape
- * takes is its status — active means a room is open and its state is
- * streaming, inactive means that room is closed and everything it knows kept.
+ * The projects this server watches, with one explicit way to add another by
+ * asking the connected local agent for a directory. Existing rows only switch
+ * or change watch status; choosing a directory never creates or writes to a
+ * repository.
  */
 function ProjectSwitcher() {
   const session = useApp((state) => state.session);
+  const tools = useApp((state) => state.tools);
   const projects = useApp((state) => state.projects);
   const projectId = useApp((state) => state.projectId);
   const current = useApp(selectCurrentProject);
-  const errors = useApp((state) => state.errors);
+  const watchedProjectAddError = useApp((state) => state.watchedProjectAddError);
   const markProjectStatus = useApp((state) => state.markProjectStatus);
+  const addingWatchedProject = useApp((state) => state.addingWatchedProject);
+  const beginWatchedProjectAdd = useApp((state) => state.beginWatchedProjectAdd);
+  const failWatchedProjectAdd = useApp((state) => state.failWatchedProjectAdd);
   const [open, setOpen] = useState(isSwitcherVariant);
   // the inactive ones are folded away by default: they are the ones nobody
   // asked to watch, and the fold is what makes reviving one possible at all
@@ -116,6 +119,7 @@ function ProjectSwitcher() {
   const active = useMemo(() => projects.filter((entry) => entry.status === "active"), [projects]);
   const inactive = useMemo(() => projects.filter((entry) => entry.status === "inactive"), [projects]);
   const cwd = session?.cwd ?? null;
+  const canAddWatchedProject = session?.agentConnected === true && tools?.directoryPicker === true;
 
   // A switch is answered with a fresh `hello`, so the project arriving is what
   // closes the menu. Arriving at the FIRST project is not that: nobody asked
@@ -128,8 +132,6 @@ function ProjectSwitcher() {
     if (was === null || projectId === null || was === projectId) return;
     setOpen(false);
   }, [projectId]);
-
-  const latestError = errors.length === 0 ? null : errors[errors.length - 1];
 
   const switchTo = (entry: ProjectSummary): void => {
     // the one you are already watching is not a switch: the click is a person
@@ -147,6 +149,14 @@ function ProjectSwitcher() {
   const mark = (entry: ProjectSummary, status: ProjectStatus): void => {
     send({ type: "set_project_status", projectId: entry.projectId, status });
     markProjectStatus(entry.projectId, status);
+  };
+
+  const addWatchedProject = (): void => {
+    if (!canAddWatchedProject || addingWatchedProject) return;
+    beginWatchedProjectAdd();
+    if (!send({ type: "add_watched_project" })) {
+      failWatchedProjectAdd("Shape is reconnecting; the folder picker was not opened.");
+    }
   };
 
   /** how much is alive in a project — the reason to switch to one at all */
@@ -193,7 +203,7 @@ function ProjectSwitcher() {
         <div className="project-menu">
           <p className="project-menu-title">projects being watched</p>
           {active.length === 0 ? (
-            <p className="tl-empty">No active projects — start an agent in a repo and it appears here.</p>
+            <p className="tl-empty">No active projects — add one here or start an agent in a repo.</p>
           ) : (
             <ul className="project-recents">
               {active.map((entry, index) => (
@@ -278,8 +288,30 @@ function ProjectSwitcher() {
             </ul>
           ) : null}
 
-          {latestError === undefined || latestError === null ? null : (
-            <p className="project-error">{latestError.message}</p>
+          <div className="project-add">
+            <button
+              type="button"
+              className="project-add-button"
+              aria-busy={addingWatchedProject}
+              aria-describedby={canAddWatchedProject ? undefined : "project-add-unavailable"}
+              disabled={!canAddWatchedProject || addingWatchedProject}
+              onClick={addWatchedProject}
+            >
+              Add watched project…
+            </button>
+            {addingWatchedProject ? (
+              <span className="project-pending" role="status">
+                Choosing folder…
+              </span>
+            ) : null}
+          </div>
+          {canAddWatchedProject ? null : (
+            <p id="project-add-unavailable" className="project-add-unavailable">
+              No connected local Shape agent can browse folders.
+            </p>
+          )}
+          {watchedProjectAddError === null ? null : (
+            <p className="project-error">{watchedProjectAddError}</p>
           )}
         </div>
       ) : null}

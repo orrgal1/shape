@@ -342,11 +342,20 @@ function asProjectTools(value: unknown): ProjectTools | null {
   if (!isRecord(value)) return null;
   const launchers = mapAll(value.launchers, asToolInfo);
   const harnesses = mapAll(value.harnesses, asToolInfo);
+  const directoryPicker = value.directoryPicker;
   if (launchers === null || harnesses === null) return null;
+  if (directoryPicker !== undefined && typeof directoryPicker !== "boolean") return null;
   // `null` is a machine with no herdr: the one launcher Shape can reach a
   // terminal through, so its absence is what hides the "go to terminal" button
   if (value.launcher !== "herdr" && value.launcher !== null) return null;
-  return { launcher: value.launcher, launchers, harnesses };
+  return {
+    launcher: value.launcher,
+    launchers,
+    harnesses,
+    // Older agents omitted this capability; absence means they cannot open a
+    // native picker. A present non-boolean is still a malformed hello.
+    directoryPicker: directoryPicker ?? false,
+  };
 }
 
 function asBackendInfo(value: unknown): BackendInfo | null {
@@ -538,6 +547,8 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
       const projects = mapAll(raw.projects, asProjectSummary);
       return projects === null ? null : { type: "projects", projects };
     }
+    case "watched_project_add_cancelled":
+      return { type: "watched_project_add_cancelled" };
     case "graph": {
       const worktree = asWorktreeId(raw.worktree);
       const graph = asGraphDoc(raw.graph);

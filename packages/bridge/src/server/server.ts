@@ -5,14 +5,12 @@
  * link is carried.
  *
  * Projects live in a registry: one row per (tenant, project key), with a
- * status. Nothing here opens, creates or picks a project — a project is in the
- * registry because a session reported in, either as an agent that attached or
- * as a repo a discovery scan saw one in (`discovered`). ACTIVE means the
- * server holds a ROOM for it: its canvases are loaded, its sessions stream and
- * a browser can watch it. INACTIVE means every record is kept and nothing runs
- * — no room, and the agent link that was feeding it is closed. Which of the
- * two a project is, is the one thing a browser decides (`set_project_status`);
- * which of the active ones it watches is the other (`select_project`).
+ * status. A project arrives from discovery or from `add_watched_project`
+ * after the current connected agent validates a native directory-picker
+ * result. ACTIVE means the server holds a ROOM for it;
+ * INACTIVE keeps every record while nothing runs. A browser may change that
+ * status, select an active room, or add one watched existing Git project. It
+ * never creates a repo, adopts a session or launches a harness.
  *
  * A room is kept after its agent leaves: the graph, the revisions and the
  * transcript are the project's, not the agent's, and a browser watching an
@@ -38,6 +36,7 @@ import {
   type ProjectSummary,
   type ServerMsg,
   type WorktreeInfo,
+  type WatchedProjectCandidate,
 } from "../../../shared/src/index.ts";
 import { socketServerEnd, type ServerEnd } from "../transport.ts";
 import type { SocketServer } from "../wsserver.ts";
@@ -52,12 +51,13 @@ export interface ActiveProject {
   /** the repo's main worktree */
   cwd: string;
   tenant: string;
+  observationOnly: boolean;
+  watcherKey: string | null;
 }
 
 /**
- * One repo a discovery scan found a session in — a herdr agent, a caller on
- * the loopback link, or a directory the operator seeded. This is how a project
- * enters the registry: nobody picks one.
+ * One repository identity and worktree snapshot entering the registry, from a
+ * discovery scan or a validated watched-project picker result.
  */
 export interface SeenRepo {
   /** the project key the agent side derived for the repo */
@@ -68,6 +68,9 @@ export interface SeenRepo {
   worktrees: WorktreeInfo[];
   /** worktree ids with a live session in them right now */
   live: string[];
+  /** picker-created rows keep an observation-only runtime and their originating project */
+  observationOnly: boolean;
+  watcherKey: string | null;
 }
 
 export interface ShapeServerOptions {
@@ -113,6 +116,8 @@ export class ShapeServer {
   readonly #rooms = new Map<string, ProjectRoom>();
   /** the room key each open agent link is bound to */
   readonly #links = new Map<ServerEnd, string>();
+  /** watched rooms whose originating agent is already starting their runtime */
+  readonly #watchStarts = new Map<string, Promise<void>>();
   /** per tenant, the room a new browser of that tenant joins: its newest project */
   readonly #defaultKeys = new Map<string, string>();
   /**
@@ -158,6 +163,12 @@ export class ShapeServer {
             },
             (err: unknown) => reply({ type: "error", message: errText(err) }),
           );
+          return;
+        }
+        if (msg.type === "add_watched_project") {
+          void this.#addWatchedProject(socket, reply).catch((err: unknown) => {
+            reply({ type: "error", message: errText(err) });
+          });
           return;
         }
         const key = this.#hub.roomOf(socket);
@@ -213,15 +224,21 @@ export class ShapeServer {
   }
 
   /**
-   * The projects a room is open for: what local mode starts an agent runtime
-   * per. Every one of them is a repo on this machine that a session reported
-   * in from at some point, and none of them was picked by hand.
+   * The projects a room is open for: what local mode starts one runtime per.
+   * Provenance is part of the handoff so discovered projects retain manager
+   * behavior while directory-picker projects remain observation-only.
    */
   activeProjects(tenant: string = LOCAL_TENANT): ActiveProject[] {
     const projects: ActiveProject[] = [];
     for (const row of this.#registry.values()) {
       if (row.tenant !== tenant || row.status !== "active") continue;
-      projects.push({ key: row.project.key, cwd: row.project.cwd, tenant });
+      projects.push({
+        key: row.project.key,
+        cwd: row.project.cwd,
+        tenant,
+        observationOnly: row.project.observationOnly,
+        watcherKey: row.project.watcherKey,
+      });
     }
     return projects;
   }
@@ -291,6 +308,146 @@ export class ShapeServer {
       void room.saveProject();
     }
     return true;
+  }
+
+  /**
+   * Choose a repository through the agent attached to the requester's current
+   * room, then register and select it. The dialog itself is outside the
+   * registry queue; only its validated answer enters the serialized mutation.
+   */
+  async #addWatchedProject(socket: WebSocket, reply: (msg: ServerMsg) => void): Promise<void> {
+    const tenant = this.#hub.tenantOf(socket);
+    const currentKey = this.#hub.roomOf(socket);
+    const current = currentKey === null ? undefined : this.#rooms.get(currentKey);
+    if (current === undefined) throw new Error("no connected local Shape agent can browse folders");
+
+    const controller = new AbortController();
+    const stoppedWaiting = (): void => controller.abort();
+    socket.once("close", stoppedWaiting);
+    let candidate: WatchedProjectCandidate | null;
+    try {
+      candidate = await current.pickDirectory(controller.signal);
+    } finally {
+      socket.off("close", stoppedWaiting);
+    }
+    if (candidate === null) {
+      reply({ type: "watched_project_add_cancelled" });
+      return;
+    }
+
+    const row = await this.#serialize(() =>
+      this.#registerWatchedProject(tenant, candidate, current.projectId),
+    );
+    if (row.project.observationOnly) await this.#startWatchedProject(current, row);
+
+    await this.#serialize(async () => {
+      const key = `${tenant}/${candidate.key}`;
+      const room = this.#rooms.get(key);
+      if (room === undefined) throw new Error(`could not open watched project ${candidate.label}`);
+      if (socket.readyState === socket.OPEN) {
+        this.#hub.join(socket, key);
+        reply(await room.hello());
+      }
+      this.#broadcastProjects(room.tenant);
+    });
+  }
+
+  /** Insert, refresh or reactivate one agent-validated picker result. */
+  async #registerWatchedProject(
+    tenant: string,
+    candidate: WatchedProjectCandidate,
+    watcherKey: string,
+  ): Promise<StoredProject> {
+    const key = `${tenant}/${candidate.key}`;
+    const worktrees = [...new Map(candidate.worktrees.map((worktree) => [worktree.id, worktree])).values()];
+    const known = this.#registry.get(key);
+    if (known === undefined) {
+      await this.#insert(tenant, key, {
+        ...candidate,
+        worktrees,
+        live: [],
+        observationOnly: true,
+        watcherKey,
+      });
+      const inserted = this.#registry.get(key);
+      if (inserted === undefined) throw new Error(`could not register watched project ${candidate.label}`);
+      return inserted;
+    }
+
+    known.project = {
+      ...known.project,
+      key: candidate.key,
+      label: candidate.label,
+      cwd: candidate.cwd,
+      ...(known.project.observationOnly && candidate.key !== watcherKey ? { watcherKey } : {}),
+    };
+    known.worktrees = worktrees;
+    await this.#storage.saveProject(known);
+    if (known.status === "inactive") {
+      const stored = await this.#storage.setProjectStatus(tenant, candidate.key, "active");
+      if (!stored) throw new Error(`unknown project ${candidate.key}`);
+      known.status = "active";
+      known.statusChangedAt = new Date().toISOString();
+      await this.#activate(tenant, key, known);
+      return known;
+    }
+
+    const room = this.#rooms.get(key);
+    if (room === undefined) await this.#activate(tenant, key, known);
+    else {
+      room.updateWorktrees(worktrees);
+      this.#onActivated?.({
+        key: candidate.key,
+        cwd: candidate.cwd,
+        tenant,
+        observationOnly: known.project.observationOnly,
+        watcherKey: known.project.watcherKey,
+      });
+    }
+    return known;
+  }
+
+  /** Start one picker-created room on the same agent that made the selection. */
+  #startWatchedProject(origin: ProjectRoom, row: StoredProject): Promise<void> {
+    const key = `${row.tenant}/${row.project.key}`;
+    const room = this.#rooms.get(key);
+    if (room?.agentConnected) return Promise.resolve();
+    const running = this.#watchStarts.get(key);
+    if (running !== undefined) return running;
+    const project: WatchedProjectCandidate = {
+      key: row.project.key,
+      label: row.project.label,
+      cwd: row.project.cwd,
+      worktrees: row.worktrees,
+    };
+    const starting = origin.watchProject(project).finally(() => {
+      if (this.#watchStarts.get(key) === starting) this.#watchStarts.delete(key);
+    });
+    this.#watchStarts.set(key, starting);
+    return starting;
+  }
+
+  /**
+   * Recreate picker-created runtimes after either process restarts. The
+   * persisted watcher key routes each path back only to the agent that
+   * originally validated it; children restore when their watcher attaches.
+   */
+  async #restoreWatchedFrom(origin: ProjectRoom): Promise<void> {
+    for (const row of this.#registry.values()) {
+      if (
+        row.tenant !== origin.tenant ||
+        row.status !== "active" ||
+        !row.project.observationOnly ||
+        row.project.watcherKey !== origin.projectId
+      ) {
+        continue;
+      }
+      try {
+        await this.#startWatchedProject(origin, row);
+      } catch (err) {
+        console.error(`[bridge] could not restore watched project ${row.project.label}: ${errText(err)}`);
+      }
+    }
   }
 
   /**
@@ -386,6 +543,20 @@ export class ShapeServer {
     // and they must not meet: the tenant is what keeps those rooms apart
     const key = `${tenant}/${msg.project.key}`;
     const known = this.#registry.get(key);
+    // A picker-created row is authoritative about provenance. An older or
+    // compromised agent cannot turn its read-only runtime back into a normal
+    // manager-aware one merely by reconnecting.
+    const attach: AttachMsg =
+      known?.project.observationOnly === true
+        ? {
+            ...msg,
+            project: {
+              ...msg.project,
+              observationOnly: true,
+              watcherKey: known.project.watcherKey,
+            },
+          }
+        : msg;
     // an inactive project has no room and nothing running for it, so the
     // runtime that just reported in is told why and its link goes away. Only
     // marking the project active again brings it back.
@@ -409,7 +580,7 @@ export class ShapeServer {
     // loaded before it is reachable: nothing may see a half-open room. The
     // link is bound right after, because the hello below asks the agent
     // questions whose answers must find their room.
-    await room.retarget(msg, end);
+    await room.retarget(attach, end);
     this.#rooms.set(key, room);
     this.#links.set(end, key);
     this.#defaultKeys.set(tenant, key);
@@ -425,7 +596,7 @@ export class ShapeServer {
     // closing it would file the canvases it no longer owns back under the key
     // they were adopted from.
     const orphaned: WebSocket[] = [];
-    for (const legacy of Object.values(msg.project.legacyKeys)) {
+    for (const legacy of Object.values(attach.project.legacyKeys)) {
       const stale = `${tenant}/${legacy}`;
       if (stale === key) continue;
       // the storage drops the legacy row whether or not it had a room (a parked
@@ -450,6 +621,10 @@ export class ShapeServer {
     // the sockets that beat the first attach are joined here and greeted once
     this.#hub.greetPending(tenant, key, hello);
     this.#broadcastProjects(tenant);
+    // This attach may be the watcher of picker-created children restored
+    // agentless from storage. Do not await: their new attach frames serialize
+    // behind this one.
+    void this.#restoreWatchedFrom(room);
   }
 
   /**
@@ -490,8 +665,10 @@ export class ShapeServer {
         key: repo.key,
         label: repo.label,
         cwd: repo.cwd,
+        observationOnly: repo.observationOnly,
+        watcherKey: repo.watcherKey,
         backend: null,
-        tools: { launcher: null, launchers: [], harnesses: [] },
+        tools: { launcher: null, launchers: [], harnesses: [], directoryPicker: false },
         targetHasCode: false,
         directivePath: null,
         manager: null,
@@ -513,7 +690,13 @@ export class ShapeServer {
     room.noteSeen(repo.worktrees, repo.live);
     void room.saveProject();
     await this.#opened(tenant, key, room);
-    this.#onActivated?.({ key: repo.key, cwd: repo.cwd, tenant });
+    this.#onActivated?.({
+      key: repo.key,
+      cwd: repo.cwd,
+      tenant,
+      observationOnly: repo.observationOnly,
+      watcherKey: repo.watcherKey,
+    });
   }
 
   /**
@@ -523,7 +706,22 @@ export class ShapeServer {
   async #activate(tenant: string, key: string, row: StoredProject): Promise<void> {
     const room = await this.#openRoom(key, row);
     await this.#opened(tenant, key, room);
-    this.#onActivated?.({ key: row.project.key, cwd: row.project.cwd, tenant });
+    this.#onActivated?.({
+      key: row.project.key,
+      cwd: row.project.cwd,
+      tenant,
+      observationOnly: row.project.observationOnly,
+      watcherKey: row.project.watcherKey,
+    });
+    const watcherKey = row.project.watcherKey;
+    if (row.project.observationOnly && watcherKey !== null) {
+      const origin = this.#rooms.get(`${tenant}/${watcherKey}`);
+      if (origin?.agentConnected) {
+        void this.#startWatchedProject(origin, row).catch((err: unknown) => {
+          console.error(`[bridge] could not reactivate watched project ${row.project.label}: ${errText(err)}`);
+        });
+      }
+    }
   }
 
   /**
@@ -581,9 +779,19 @@ export class ShapeServer {
    */
   #remember(key: string, row: StoredProject): void {
     const known = this.#registry.get(key);
+    const project =
+      known?.project.observationOnly === true
+        ? {
+            ...row.project,
+            observationOnly: true,
+            watcherKey: known.project.watcherKey,
+          }
+        : row.project;
     this.#registry.set(
       key,
-      known === undefined ? row : { ...row, status: known.status, statusChangedAt: known.statusChangedAt },
+      known === undefined
+        ? { ...row, project }
+        : { ...row, project, status: known.status, statusChangedAt: known.statusChangedAt },
     );
   }
 

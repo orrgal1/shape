@@ -42,6 +42,7 @@ import type {
   ServerToAgentMsg,
   SessionInfo,
   WorktreeInfo,
+  WatchedProjectCandidate,
   WorktreeSession,
 } from "../../../shared/src/index.ts";
 import type { ServerEnd } from "../transport.ts";
@@ -56,12 +57,9 @@ export type AttachMsg = Extract<AgentToServerMsg, { type: "attach" }>;
 
 /** everything else an agent sends; `attach` is the server's business, not a room's */
 export type AgentFrame = Exclude<AgentToServerMsg, { type: "attach" }>;
-
 /**
- * The browser frames a room answers. The other two a client can send —
- * `select_project` and `set_project_status` — are about which project, not
- * about one project's canvases, and the server handles them before a room is
- * ever consulted.
+ * Browser frames one room answers directly. Project selection, status and
+ * watched-project registration belong to the server that owns every room.
  */
 export type RoomClientMsg = Extract<ClientMsg, { type: "focus_terminal" | "diff" }>;
 
@@ -148,6 +146,10 @@ export interface ProjectRoomOptions {
  * a busy agent: it falls back to what the last attach told us.
  */
 const REQUEST_TIMEOUT_MS = 3_000;
+/** A native chooser may stay open while a person browses. */
+const PICK_DIRECTORY_TIMEOUT_MS = 600_000;
+
+const DIRECTORY_PICKER_UNAVAILABLE = "no connected local Shape agent can browse folders";
 
 /** Refusal for everything that needs the agent while none is attached. */
 const AGENT_GONE = "no agent is attached to this project — start `shape agent` in it";
@@ -182,12 +184,14 @@ const NOW_TAIL = 120;
  * detected is exactly what such a machine could be, and the browser shows no
  * card it cannot honour.
  */
-const NO_TOOLS: ProjectTools = { launcher: null, launchers: [], harnesses: [] };
+const NO_TOOLS: ProjectTools = { launcher: null, launchers: [], harnesses: [], directoryPicker: false };
 
 interface PendingRequest {
+  type: ServerToAgentMsg["type"];
   settle: (value: unknown) => void;
   fail: (err: Error) => void;
   timer: NodeJS.Timeout;
+  stopListening: (() => void) | null;
 }
 
 /** Agent failures arrive as Errors whose message is already user-facing. */
@@ -272,6 +276,11 @@ export class ProjectRoom {
 
   get agentConnected(): boolean {
     return this.#agentConnected;
+  }
+
+  /** stable project key, without the tenant prefix */
+  get projectId(): string {
+    return this.#project.key;
   }
 
   /** the tenant whose project list, default room and storage tree this room is in */
@@ -404,8 +413,23 @@ export class ProjectRoom {
    */
   noteSeen(worktrees: WorktreeInfo[], live: string[]): void {
     this.#seenLive = new Set(live);
-    const known = new Set(this.#worktrees.map((info) => info.id));
-    const same = worktrees.length === known.size && worktrees.every((info) => known.has(info.id));
+    this.updateWorktrees(worktrees);
+  }
+
+  /** Refresh picker/discovery worktree facts without changing live-session evidence. */
+  updateWorktrees(worktrees: WorktreeInfo[]): void {
+    const known = new Map(this.#worktrees.map((info) => [info.id, info]));
+    const same =
+      worktrees.length === known.size &&
+      worktrees.every((info) => {
+        const previous = known.get(info.id);
+        return (
+          previous !== undefined &&
+          previous.path === info.path &&
+          previous.branch === info.branch &&
+          previous.head === info.head
+        );
+      });
     if (same) return;
     void this.#syncWorktrees(worktrees).then(() => this.#broadcastSession());
   }
@@ -444,6 +468,41 @@ export class ProjectRoom {
     return this.#storage.saveProject(this.row()).catch((err: unknown) => {
       console.error(`[bridge] failed to save project registry: ${errText(err)}`);
     });
+  }
+
+  /**
+   * Ask this room's attached agent to choose a repository. The room owns the
+   * correlation because the link is scoped to this project; the server owns
+   * registration because only it can mutate the tenant registry.
+   */
+  pickDirectory(signal?: AbortSignal): Promise<WatchedProjectCandidate | null> {
+    if (!this.#agentConnected || !toolsOf(this.#project).directoryPicker) {
+      return Promise.reject(new Error(DIRECTORY_PICKER_UNAVAILABLE));
+    }
+    if ([...this.#pending.values()].some((pending) => pending.type === "pick_directory")) {
+      return Promise.reject(new Error("a directory picker is already open"));
+    }
+    return this.#request<WatchedProjectCandidate | null>(
+      (id) => ({ type: "pick_directory", id }),
+      PICK_DIRECTORY_TIMEOUT_MS,
+      signal,
+    );
+  }
+
+  /**
+   * Ask the originating agent to open a separate observation-only runtime for
+   * the selected repository. The acknowledgement means that runtime attached
+   * to its own room; it never retargets this one.
+   */
+  async watchProject(project: WatchedProjectCandidate): Promise<void> {
+    if (!this.#agentConnected || !toolsOf(this.#project).directoryPicker) {
+      throw new Error(DIRECTORY_PICKER_UNAVAILABLE);
+    }
+    if ([...this.#pending.values()].some((pending) => pending.type === "watch_project")) {
+      throw new Error("the agent is already activating a watched project");
+    }
+    const key = await this.#request<string>((id) => ({ type: "watch_project", id, project }), PICK_DIRECTORY_TIMEOUT_MS);
+    if (key !== project.key) throw new Error(`agent activated unexpected project ${key}`);
   }
 
   /**
@@ -511,11 +570,9 @@ export class ProjectRoom {
       state.autoMapPending = false;
     }
     this.#broadcastSession();
-    for (const pending of this.#pending.values()) {
-      clearTimeout(pending.timer);
-      pending.fail(new Error(AGENT_GONE));
+    for (const id of [...this.#pending.keys()]) {
+      this.#cancelRequest(id, new Error(AGENT_GONE), false);
     }
-    this.#pending.clear();
     this.#onProjectsChanged();
     void this.saveProject();
   }
@@ -540,11 +597,9 @@ export class ProjectRoom {
     this.#closed = this.row();
     await this.saveProject();
     await this.#closeStates();
-    for (const pending of this.#pending.values()) {
-      clearTimeout(pending.timer);
-      pending.fail(new Error(line));
+    for (const id of [...this.#pending.keys()]) {
+      this.#cancelRequest(id, new Error(line), true);
     }
-    this.#pending.clear();
     if (!this.#agentConnected) return;
     this.#agentConnected = false;
     this.#link.send({ type: "error", message: line });
@@ -744,6 +799,10 @@ export class ProjectRoom {
           this.#error(`${msg.worktree} is not a variation of this project`);
           return;
         }
+        if (this.#project.observationOnly) {
+          this.#error(`there is no terminal to go to on ${this.#labelOf(state)}`);
+          return;
+        }
         // taking the user to a session's own terminal is the one thing the
         // browser may still ask Shape to do, and only a session that is
         // actually reporting in has one
@@ -930,10 +989,18 @@ export class ProjectRoom {
         // unsolicited: the agent re-listed on its own
         void this.#syncWorktrees(msg.worktrees).then(() => this.#broadcastSession());
         return;
+      case "picked_directory":
+        this.#settle(msg.id, msg.project);
+        return;
+      case "watched_project_started":
+        this.#settle(msg.id, msg.key);
+        return;
       case "skeleton_result":
         this.#settle(msg.id, msg.ops);
         return;
       case "agent_error":
+        if (msg.message.startsWith("pick_directory failed:") && this.#failRequest("pick_directory", msg.message)) return;
+        if (msg.message.startsWith("watch_project failed:") && this.#failRequest("watch_project", msg.message)) return;
         this.#error(msg.message);
         return;
       case "injected":
@@ -1149,16 +1216,30 @@ export class ProjectRoom {
    * once: a hello for a project whose agent is gone must not sit out the
    * timeout before falling back to what the last attach told us.
    */
-  #request<T>(make: (id: string) => ServerToAgentMsg): Promise<T> {
+  #request<T>(
+    make: (id: string) => ServerToAgentMsg,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+    signal?: AbortSignal,
+  ): Promise<T> {
     if (!this.#agentConnected) return Promise.reject(new Error(AGENT_GONE));
+    if (signal?.aborted) return Promise.reject(new Error("the browser stopped waiting for the directory picker"));
     const id = `req-${++this.#requestSeq}`;
     const frame = make(id);
     const { promise, resolve: settle, reject } = Promise.withResolvers<unknown>();
     const timer = setTimeout(() => {
-      this.#pending.delete(id);
-      reject(new Error(`the agent did not answer ${frame.type} within ${REQUEST_TIMEOUT_MS} ms`));
-    }, REQUEST_TIMEOUT_MS);
-    this.#pending.set(id, { settle, fail: reject, timer });
+      this.#cancelRequest(id, new Error(`the agent did not answer ${frame.type} within ${timeoutMs} ms`), true);
+    }, timeoutMs);
+    const abort = (): void => {
+      this.#cancelRequest(id, new Error("the browser stopped waiting for the directory picker"), true);
+    };
+    if (signal !== undefined) signal.addEventListener("abort", abort, { once: true });
+    this.#pending.set(id, {
+      type: frame.type,
+      settle,
+      fail: reject,
+      timer,
+      stopListening: signal === undefined ? null : () => signal.removeEventListener("abort", abort),
+    });
     this.#link.send(frame);
     return promise as Promise<T>;
   }
@@ -1168,7 +1249,32 @@ export class ProjectRoom {
     if (pending === undefined) return;
     this.#pending.delete(id);
     clearTimeout(pending.timer);
+    pending.stopListening?.();
     pending.settle(value);
+  }
+
+  /** Fail the one request of `type`; picker requests are single-flight. */
+  #failRequest(type: ServerToAgentMsg["type"], message: string): boolean {
+    for (const [id, pending] of this.#pending) {
+      if (pending.type !== type) continue;
+      this.#pending.delete(id);
+      clearTimeout(pending.timer);
+      pending.stopListening?.();
+      pending.fail(new Error(message));
+      return true;
+    }
+    return false;
+  }
+
+  /** Cancel one correlated request and, while its link exists, its agent-side work. */
+  #cancelRequest(id: string, error: Error, notifyAgent: boolean): void {
+    const pending = this.#pending.get(id);
+    if (pending === undefined) return;
+    this.#pending.delete(id);
+    clearTimeout(pending.timer);
+    pending.stopListening?.();
+    if (notifyAgent && this.#agentConnected) this.#link.send({ type: "cancel_request", id });
+    pending.fail(error);
   }
 
   // -------------------------------------------------------------------------

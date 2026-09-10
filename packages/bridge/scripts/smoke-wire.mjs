@@ -9,10 +9,10 @@
  *   1. every agent-link frame, both directions, round-tripped through
  *      `parseAgentToServerMsg` / `parseServerToAgentMsg` — accepted whole, and
  *      rejected when the worktree it is about is missing or empty
- *   2. every browser frame through `parseClientMsg` — the four a canvas has
- *      left, one of them the active/inactive mark — the same way, plus the
- *      frames a steering, launching Shape used to send and this one cannot
- *      parse at all
+ *   2. every browser frame through `parseClientMsg` — the five a canvas has
+ *      left, including watched-project registration and active/inactive status
+ *      — plus the removed steering, launching and old picker frames, which
+ *      still do not parse
  *   3. `openSqliteStorage`: worktree-keyed graphs, revisions and audit lines,
  *      the v1 → v2 → v3 migrations (a v1 database walks both steps, a v2 one
  *      only the second) that put a pre-worktree canvas on the main worktree of
@@ -98,11 +98,14 @@ const TOOLS = {
     { id: "omp", label: "omp", path: "/usr/local/bin/omp", version: "1.2.3" },
     { id: "claude", label: "Claude Code", path: "/usr/local/bin/claude", version: null },
   ],
+  directoryPicker: true,
 };
 const PROJECT = {
   key: "k-1",
   label: "repo",
   cwd: WT,
+  observationOnly: false,
+  watcherKey: null,
   backend: BACKEND,
   tools: TOOLS,
   targetHasCode: true,
@@ -209,6 +212,34 @@ const WORKTREES = [
     noLauncher !== null && noLauncher.project.tools.launcher === null,
     JSON.stringify(noLauncher?.project.tools.launcher),
   );
+  const olderTools = parseAgentToServerMsg(
+    JSON.stringify({ ...attach, project: { ...PROJECT, tools: { launcher: null, launchers: [], harnesses: [] } } }),
+  );
+  check(
+    "attach: a pre-picker agent defaults directoryPicker to false",
+    olderTools?.project.tools.directoryPicker === false,
+    JSON.stringify(olderTools?.project.tools),
+  );
+  const olderProvenance = parseAgentToServerMsg(
+    JSON.stringify({
+      ...attach,
+      project: { ...PROJECT, observationOnly: undefined, watcherKey: undefined },
+    }),
+  );
+  check(
+    "attach: a project from before watched-project provenance stays a normal discovered project",
+    olderProvenance?.project.observationOnly === false && olderProvenance.project.watcherKey === null,
+    JSON.stringify(olderProvenance?.project),
+  );
+  check(
+    "attach: watched provenance is paired and malformed values are refused",
+    parseAgentToServerMsg(
+      JSON.stringify({ ...attach, project: { ...PROJECT, observationOnly: "yes", watcherKey: "k-root" } }),
+    ) === null &&
+      parseAgentToServerMsg(
+        JSON.stringify({ ...attach, project: { ...PROJECT, observationOnly: true, watcherKey: null } }),
+      ) === null,
+  );
   check(
     "attach: a session whose terminal is a kind Shape cannot show is refused",
     parseAgentToServerMsg(
@@ -244,6 +275,35 @@ roundTrip(parseAgentToServerMsg, "reality", { type: "reality", worktree: WT2, re
 roundTrip(parseAgentToServerMsg, "skeleton_result", { type: "skeleton_result", worktree: WT, id: "s-1", ops: [] });
 // project-wide answers stay project-wide: they are about the agent, not one harness
 roundTrip(parseAgentToServerMsg, "worktrees", { type: "worktrees", id: "w-1", worktrees: WORKTREES }, { worktreeScoped: false });
+roundTrip(
+  parseAgentToServerMsg,
+  "picked_directory",
+  { type: "picked_directory", id: "p-1", project: { key: "k-2", label: "other", cwd: WT2, worktrees: [WORKTREES[1]] } },
+  { worktreeScoped: false },
+);
+roundTrip(
+  parseAgentToServerMsg,
+  "picked_directory cancelled",
+  { type: "picked_directory", id: "p-2", project: null },
+  { worktreeScoped: false },
+);
+roundTrip(
+  parseAgentToServerMsg,
+  "watched_project_started",
+  { type: "watched_project_started", id: "watch-1", key: "k-2" },
+  { worktreeScoped: false },
+);
+check(
+  "picked_directory requires its correlation id and complete project identity",
+  parseAgentToServerMsg(JSON.stringify({ type: "picked_directory", project: null })) === null &&
+    parseAgentToServerMsg(
+      JSON.stringify({ type: "picked_directory", id: "p-3", project: { key: "k-2", label: "other", cwd: WT2 } }),
+    ) === null,
+);
+check(
+  "the removed folder_picked answer remains rejected",
+  parseAgentToServerMsg(JSON.stringify({ type: "folder_picked", path: WT2 })) === null,
+);
 roundTrip(parseAgentToServerMsg, "agent_error", { type: "agent_error", message: "no such worktree" }, { worktreeScoped: false });
 // what the injection pass briefed: project-wide, and the whole list every time
 roundTrip(parseAgentToServerMsg, "injected", { type: "injected", paneIds: ["pane-1"] }, { worktreeScoped: false });
@@ -271,13 +331,34 @@ roundTrip(
 );
 // project-wide questions stay project-wide: they are about the agent's machine
 roundTrip(parseServerToAgentMsg, "list_worktrees", { type: "list_worktrees", id: "w-1" }, { worktreeScoped: false });
+roundTrip(parseServerToAgentMsg, "pick_directory", { type: "pick_directory", id: "p-1" }, { worktreeScoped: false });
+roundTrip(
+  parseServerToAgentMsg,
+  "watch_project",
+  {
+    type: "watch_project",
+    id: "watch-1",
+    project: { key: "k-2", label: "other", cwd: WT2, worktrees: [WORKTREES[1]] },
+  },
+  { worktreeScoped: false },
+);
+roundTrip(parseServerToAgentMsg, "cancel_request", { type: "cancel_request", id: "p-1" }, { worktreeScoped: false });
+check(
+  "pick_directory requires its correlation id",
+  parseServerToAgentMsg(JSON.stringify({ type: "pick_directory" })) === null,
+);
+check(
+  "watch_project and cancel_request require complete correlation data",
+  parseServerToAgentMsg(JSON.stringify({ type: "watch_project", id: "watch-1" })) === null &&
+    parseServerToAgentMsg(JSON.stringify({ type: "cancel_request", id: "" })) === null,
+);
 
 check(
   "attached: a frame naming no room is refused",
   parseServerToAgentMsg(JSON.stringify({ type: "attached", projectId: "" })) === null,
 );
-// what a Shape that retargeted, picked, discovered and adopted sent down the
-// link: a project is a stored row now, and the agent serves the one it attached
+// The removed retarget/adopt/discovery requests and old `pick_folder` name
+// remain rejected; `pick_directory` only returns identity facts.
 for (const [label, frame] of [
   ["switch", { type: "switch", path: "/x" }],
   ["adopt", { type: "adopt", pid: 42 }],
@@ -294,6 +375,7 @@ for (const [label, frame] of [
 roundTrip(parseClientMsg, "diff", { type: "diff", worktree: WT2, revA: 1, revB: 4 });
 roundTrip(parseClientMsg, "focus_terminal", { type: "focus_terminal", worktree: WT });
 roundTrip(parseClientMsg, "select_project", { type: "select_project", projectId: "k-1" }, { worktreeScoped: false });
+roundTrip(parseClientMsg, "add_watched_project", { type: "add_watched_project" }, { worktreeScoped: false });
 // the whole of what a browser may do to the registry: mark a project active,
 // so the server holds a room for it, or inactive, so it keeps only its records
 roundTrip(
@@ -333,9 +415,9 @@ check(
   "client diff: a worktree alone is not a diff",
   parseClientMsg(JSON.stringify({ type: "diff", worktree: WT, revA: 1 })) === null,
 );
-// the frames a steering, launching Shape took from the browser: this one has a
-// reader for none of them, so they do not even parse. The browser cannot open,
-// pick, discover or adopt a project any more — it marks one active or inactive
+// The removed steering, launching and old project-picker frames still have no
+// reader. `add_watched_project` is deliberately distinct from `pick_folder`:
+// it registers a validated Git project instead of returning a path.
 for (const [label, frame] of [
   ["utterance", { type: "utterance", worktree: WT, referent: null, text: "build it" }],
   ["open_worktree", { type: "open_worktree", path: WT2, backend: "omp" }],

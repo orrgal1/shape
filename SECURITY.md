@@ -70,10 +70,10 @@ The parts of Shape that face something other than their own process:
   holds the link socket for the session's life.
 - **The `canvas` host tool.** Every op is validated and applied by `applyOps`
   (`packages/shared/src/index.ts`); a rejection comes back as a structured receipt rather than a
-  partial write. Inside the target repository the canvas writes only `.shape/`, and adds that one
-  line to the repository's `.git/info/exclude` so it stays out of every branch
-  (`ensureGitExclude` in `packages/bridge/src/agent/worktrees.ts`). A canvas op that writes
-  anywhere else in the target, or escapes `.shape/`, is in scope.
+  partial write. Canvas, registry, revision, audit and directive state is external to the
+  target repository; Shape does not write `.shape/` or `.git/info/exclude` there. Directory
+  selection and watched-project observation likewise use read-only filesystem and Git
+  operations. Any bridge path that writes inside a target repository is in scope.
 - **Stored state.** Graphs, revisions, the project registry and audit lines live in one SQLite
   database — `~/.shape/shape.db` locally, `<data-dir>/shape.db` for a server
   (`packages/bridge/src/server/sqlite.ts`). `shape login` writes the agent's server tokens to

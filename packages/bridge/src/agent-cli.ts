@@ -5,12 +5,11 @@
  * harness-side processes — hooks, the MCP sidecar, the omp extension — on
  * 127.0.0.1 only, so those never hold server credentials.
  *
- * One repo, named by `--cwd` (any worktree of it will do). A remote agent
- * discovers nothing: the registry deciding which projects are active lives on
- * the other side of the wire, so the fleet here holds exactly the project it
- * was pointed at. It starts no coding session either — the sessions it shows
- * are the ones already running in the repo's worktrees, which report in over
- * that link.
+ * The repo named by `--cwd` is the root runtime. A remote agent discovers
+ * nothing on its own, but a directory selected through that runtime may add a
+ * separate observation-only runtime on the same process. Each runtime owns a
+ * separate reconnecting agent link; the shared loopback router still directs
+ * harness-side callers by repository.
  *
  * Run: node src/agent-cli.ts --server ws://host:port
  *        [--token <t>] [--cwd <dir>] [--link-port <n>]
@@ -100,18 +99,19 @@ try {
     cli.token ??
     (envToken !== undefined && envToken.length > 0 ? envToken : await tokenForServer(serverOrigin(cli.server)));
   const sockets = new SocketServer({ port: cli.linkPort });
-  // the end owns the reconnect loop and says `waiting for Shape server` itself
-  // when the first connect fails; the project's runtime is its only listener
-  const link = connectAgentEnd(cli.server, {
-    ...(token === null ? {} : { token }),
-    // The runtime owns `onClose`, so a refused token is reported here. It is
-    // fatal whenever it lands — no retry makes a wrong token right — and the
-    // delay lets the runtime's teardown dispose the harness first.
-    onRefused: (reason) => {
-      console.error(`[bridge] startup failed: ${reason}`);
-      setTimeout(() => process.exit(1), 50);
-    },
-  });
+  // Every runtime needs its own connection: one server-side link is bound to
+  // exactly one room for its whole lifetime. Picker-created runtimes use this
+  // same factory instead of retargeting the root runtime's link.
+  let refused = false;
+  const newLink = () =>
+    connectAgentEnd(cli.server, {
+      ...(token === null ? {} : { token }),
+      onRefused: (reason) => {
+        refused = true;
+        console.error(`[bridge] startup failed: ${reason}`);
+        setTimeout(() => process.exit(1), 50);
+      },
+    });
 
   const fleet = new AgentFleet({
     sockets,
@@ -119,7 +119,7 @@ try {
     // the registry is the server's, on the far side of the link: this process
     // watches the repo it was pointed at and discovers nothing else
     registry: null,
-    link: () => link,
+    link: newLink,
   });
 
   // Registered before start(): Ctrl-C must work while we are still waiting for
@@ -145,7 +145,7 @@ try {
   await fleet.start();
   // a stop or a refused token settles the same gate: we were never attached,
   // and the process is already on its way out
-  if (!stopping && !link.closed) {
+  if (!stopping && !refused) {
     console.error(
       `[bridge] agent attached to ${cli.server} (target ${cli.cwd}, link at ${sockets.url(LINK_WS_PATH)})`,
     );

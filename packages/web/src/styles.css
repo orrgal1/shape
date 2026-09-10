@@ -469,6 +469,48 @@ button {
   cursor: default;
 }
 
+.project-add {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-top: var(--s4);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line);
+}
+
+.project-add-button {
+  padding: 5px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--text-dim);
+  transition:
+    color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+
+.project-add-button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-3);
+}
+
+.project-add-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.project-pending,
+.project-add-unavailable {
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+}
+
+.project-add-unavailable {
+  margin: var(--s2) 0 0;
+  line-height: 1.4;
+}
+
 .project-recents {
   display: flex;
   flex-direction: column;

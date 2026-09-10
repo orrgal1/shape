@@ -56,6 +56,7 @@ export function parseClientMsg(raw: string): ClientMsg | null {
     if (!("status" in parsed) || (parsed.status !== "active" && parsed.status !== "inactive")) return null;
     return { type: "set_project_status", projectId, status: parsed.status };
   }
+  if (parsed.type === "add_watched_project") return { type: "add_watched_project" };
   if (parsed.type === "focus_terminal") {
     if (worktree === null) return null;
     return { type: "focus_terminal", worktree };

@@ -26,6 +26,7 @@
     "smoke:herdr": "pnpm --filter @shape/bridge smoke:herdr",
     "smoke:manager": "pnpm --filter @shape/bridge smoke:manager",
     "smoke:projects": "pnpm --filter @shape/bridge smoke:projects",
+    "smoke:watched-project": "pnpm --filter @shape/bridge smoke:watched-project",
     "web": "pnpm --filter @shape/web dev",
     "smoke:shared": "pnpm --filter @shape/shared smoke",
     "smoke:link-cli": "pnpm --filter @shape/link smoke:link-cli",

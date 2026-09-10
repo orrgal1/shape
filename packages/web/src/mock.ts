@@ -52,6 +52,15 @@ export function isSwitcherVariant(): boolean {
   return isMockMode() && new URLSearchParams(window.location.search).get("switcher") === "1";
 }
 
+type PickerVariant = "success" | "cancel" | "error" | "unavailable";
+
+/** deterministic native-picker answer selected by `?picker=…` */
+function pickerVariant(): PickerVariant {
+  const value = new URLSearchParams(window.location.search).get("picker");
+  if (value === "cancel" || value === "error" || value === "unavailable") return value;
+  return "success";
+}
+
 /**
  * A checkout with code in it and nothing mapped: no intent nodes at all, and a
  * reality layer the extractor filled in — five packages and the imports between
@@ -191,6 +200,7 @@ function mockTools(): ProjectTools {
       { id: "omp", label: "omp", path: "/usr/local/bin/omp", version: "2.1.0" },
       { id: "claude", label: "Claude Code", path: "/usr/local/bin/claude", version: "1.4.7" },
     ],
+    directoryPicker: pickerVariant() !== "unavailable",
   };
 }
 
@@ -284,6 +294,36 @@ const MINUTE_MS = 60_000;
 
 /** what a real agent derives from machine + realpath(cwd); fixed here */
 const MOCK_PROJECT_ID = "mock-machine:/Users/you/code/vireo";
+const MOCK_PICKED_MAIN = "/Users/you/code/field-notes";
+const MOCK_PICKED_PROJECT_ID = `mock-machine:${MOCK_PICKED_MAIN}`;
+const MOCK_PICKER_DELAY_MS = 900;
+
+/** the directory picker fixture: a valid Git project with no live sessions */
+function mockPickedProject(): ProjectSummary {
+  return {
+    projectId: MOCK_PICKED_PROJECT_ID,
+    label: "field-notes",
+    cwd: MOCK_PICKED_MAIN,
+    status: "active",
+    liveSessions: 0,
+    manager: false,
+    caughtUp: true,
+    injected: 0,
+    lastSeen: new Date().toISOString(),
+  };
+}
+
+function mockPickedSession(): SessionInfo {
+  return {
+    cwd: MOCK_PICKED_MAIN,
+    targetHasCode: true,
+    worktrees: [{ id: MOCK_PICKED_MAIN, path: MOCK_PICKED_MAIN, branch: "main", head: "a11ce33" }],
+    sessions: [],
+    agentConnected: true,
+    directivePath: null,
+    manager: null,
+  };
+}
 
 /**
  * The registry the fixture server would have: the project `hello` joins this
@@ -978,6 +1018,34 @@ export function mockSend(msg: ClientMsg): void {
   // here — the fixture has one canvas, so there is no second project's graph
   // to answer a join with.
   console.info(`[mock] client frame ${JSON.stringify(msg)}`);
+  if (msg.type === "add_watched_project") {
+    const answer = pickerVariant();
+    window.setTimeout(() => {
+      if (answer === "cancel") {
+        store.ingest({ type: "watched_project_add_cancelled" });
+        return;
+      }
+      if (answer === "error") {
+        store.ingest({ type: "error", message: "The selected folder is not a Git project (mock)." });
+        return;
+      }
+
+      const picked = mockPickedProject();
+      mockRegistry = [picked, ...mockRegistry.filter((entry) => entry.projectId !== picked.projectId)];
+      store.ingest({
+        type: "hello",
+        graphs: { [MOCK_PICKED_MAIN]: emptyGraph() },
+        session: mockPickedSession(),
+        agents: { [MOCK_PICKED_MAIN]: "idle" },
+        projects: mockRegistry.map((entry) => ({ ...entry })),
+        projectId: MOCK_PICKED_PROJECT_ID,
+        revisions: {},
+        tools: mockTools(),
+      });
+      store.setConn("mock");
+    }, MOCK_PICKER_DELAY_MS);
+    return;
+  }
   if (msg.type === "focus_terminal") {
     // exactly what the room does with the agent's answer: a session in a herdr
     // tab is brought forward over there and says nothing back to this screen,

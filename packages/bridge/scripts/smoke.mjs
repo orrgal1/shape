@@ -1751,7 +1751,7 @@ try {
         label: basename(oldKeyTarget),
         cwd: wtOldKey,
         backend: null,
-        tools: { launcher: null, launchers: [], harnesses: [] },
+        tools: { launcher: null, launchers: [], harnesses: [], directoryPicker: false },
         targetHasCode: true,
         directivePath: null,
         manager: null,

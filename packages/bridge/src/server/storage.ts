@@ -33,7 +33,7 @@ import { LOCAL_TENANT } from "./auth.ts";
 
 /** what a room needs to come back without its agent */
 export interface StoredProject {
-  /** the project as its agent last attached it */
+  /** the project as its agent last attached it, including watched/read-only provenance */
   project: AgentProject;
   /** the tenant whose room this is; `local` on an unauthenticated server */
   tenant: string;

@@ -2,35 +2,29 @@
  * The agent side of one machine: the loopback link, what is installed here,
  * and one `AgentRuntime` per ACTIVE project.
  *
- * A project is never opened by hand. It enters the registry because a session
- * reported in — a herdr agent running in a repo, a caller greeting on the
- * loopback link, or the `--cwd` this process was started with — and the
- * registry's `status` decides whether it gets a runtime. Everything here is
- * therefore observation: a scan of what is live, handed to the registry, which
- * answers by telling the fleet which projects are active.
+ * Projects enter from discovery (a herdr agent, loopback caller or `--cwd`
+ * seed) or from a server command carrying a directory-picker result.
+ * Discovered runtimes keep the existing manager/injection behavior; picker
+ * runtimes are permanently observation-only.
  *
- * ONE LINK FOR THE WHOLE PROCESS. A caller names only the directory it runs in,
- * so which project it belongs to is a question no single runtime can answer:
- * the fleet asks each of them in turn (`routeLink`) and, when none claims it,
- * reports the directory to the registry so the project can come into being.
- * The caller is refused meanwhile and hung up on once its project exists, so
- * its own reconnect delivers it to the runtime that now holds it.
+ * ONE LOOPBACK LINK FOR THE WHOLE PROCESS. A harness-side caller names only
+ * the directory it runs in, so the fleet routes it across all runtimes.
+ * Server links are different: one fresh link per runtime, because a server
+ * room owns its agent link for life and a picker must never retarget it.
  *
  * THE SCAN COSTS A `ps` AND A `git worktree list` PER REPO, so it runs only
  * while somebody is watching: `browsers(n)` starts it and `browsers(0)` stops
  * it. The one exception is the seed scan at `start()`, which is how the
  * machine's projects get into the registry before the first browser connects.
  *
- * A SCAN IS THEREFORE FOUR THINGS: what is live on the machine, grouped into
- * repos; the handoff to the registry; a runtime for every project the registry
- * calls active; and one injection pass per project the scan saw a session in,
- * which briefs that project's sessions with the Shape directive (§Injection).
- * The injection pass is last because it wants the runtimes the handoff opened —
- * which is why the seed scan briefs nobody: it runs before any of them exists.
+ * A LOCAL SCAN IS THEREFORE FOUR THINGS: what is live on the machine, grouped
+ * into repos; the handoff to the registry; a runtime for every project the
+ * registry calls active; and one injection pass per DISCOVERED project the
+ * scan saw a session in. Observation-only runtimes reject that final pass.
  */
 
 import { basename } from "node:path";
-import type { WorktreeInfo } from "../../../shared/src/index.ts";
+import type { WatchedProjectCandidate, WorktreeInfo } from "../../../shared/src/index.ts";
 import type { ActiveProject, SeenRepo } from "../server/server.ts";
 import type { AgentEnd } from "../transport.ts";
 import type { SocketServer } from "../wsserver.ts";
@@ -59,9 +53,9 @@ function errText(err: unknown): string {
 }
 
 /**
- * What the fleet needs from the project registry. In local mode it is the
- * `ShapeServer` in this process; a remote agent has none, and then the seeds
- * are the whole fleet.
+ * In local mode the fleet talks to the `ShapeServer` in this process. A
+ * remote agent has no local registry, so its seed is the root runtime and
+ * correlated server commands add picker-created children.
  */
 export interface FleetRegistry {
   activeProjects(): ActiveProject[];
@@ -77,10 +71,17 @@ export interface AgentFleetOptions {
   sockets: SocketServer;
   /** repos treated as seen at startup (`--cwd`); may be non-git */
   seeds: string[];
-  /** null ⇒ no discovery, no scan: the seeds are the whole fleet (remote agent process) */
+  /** null ⇒ no discovery scan; the seed is the remote root and server commands add watched children */
   registry: FleetRegistry | null;
   /** a fresh agent link for one runtime; the server end is the caller's business */
   link: () => AgentEnd;
+}
+
+interface RuntimeProject {
+  cwd: string;
+  observationOnly: boolean;
+  watcherKey: string | null;
+  expectedKey?: string;
 }
 
 export class AgentFleet {
@@ -149,9 +150,11 @@ export class AgentFleet {
     this.#loopback = mountLoopbackLink(this.#sockets, { route: (cwd) => this.#route(cwd) });
     await this.#scan();
     const registry = this.#registry;
-    // without a registry nothing else will ever name a project: the seeds are it
-    const wanted = registry === null ? [...this.#seeds] : registry.activeProjects().map((project) => project.cwd);
-    await Promise.all(wanted.map((cwd) => this.#ensure(cwd)));
+    const wanted: RuntimeProject[] =
+      registry === null
+        ? this.#seeds.map((cwd) => ({ cwd, observationOnly: false, watcherKey: null }))
+        : registry.activeProjects();
+    await Promise.all(wanted.map((project) => this.#ensure(project)));
   }
 
   /**
@@ -159,7 +162,7 @@ export class AgentFleet {
    * flipped back on. Idempotent: the project may already have its runtime.
    */
   activated(project: ActiveProject): void {
-    void this.#ensure(project.cwd);
+    void this.#ensure(project);
   }
 
   /**
@@ -203,29 +206,40 @@ export class AgentFleet {
    * by the MAIN worktree, because every worktree of a repo is one project and
    * two of them reporting in must not become two runtimes.
    */
-  async #ensure(cwd: string): Promise<void> {
+  async #ensure(project: RuntimeProject, required = false): Promise<void> {
     if (this.#stopped) return;
     let main: string;
+    let key: string;
     try {
-      main = (await repoIdentity(cwd)).main;
+      const identity = await repoIdentity(project.cwd);
+      main = identity.main;
+      key = projectKey(identity);
+      if (project.expectedKey !== undefined && project.expectedKey !== key) {
+        throw new Error(`selected project identity changed (expected ${project.expectedKey}, got ${key})`);
+      }
     } catch (err) {
-      console.error(`[bridge] cannot open ${cwd}: ${errText(err)}`);
+      if (required) throw err;
+      console.error(`[bridge] cannot open ${project.cwd}: ${errText(err)}`);
       return;
     }
     if (this.#stopped) return;
-    // a runtime is in the map from the moment it is constructed, so the
-    // in-flight entry is checked FIRST: `has` would say yes to a runtime whose
-    // attach is still going, and the caller would carry on as if it were up
     const pending = this.#starting.get(main);
     if (pending !== undefined) {
-      await pending;
+      try {
+        await pending;
+      } catch (err) {
+        if (required) throw err;
+      }
       return;
     }
     if (this.#runtimes.has(main)) return;
-    const starting = this.#startRuntime(main);
+    const starting = this.#startRuntime(main, key, project.observationOnly, project.watcherKey);
     this.#starting.set(main, starting);
     try {
       await starting;
+    } catch (err) {
+      if (required) throw err;
+      console.error(`[bridge] project ${basename(main)} could not be watched: ${errText(err)}`);
     } finally {
       this.#starting.delete(main);
     }
@@ -236,14 +250,31 @@ export class AgentFleet {
    * during the attach belongs to it already, and the alternative is refusing a
    * session that is plainly inside the repo.
    */
-  async #startRuntime(main: string): Promise<void> {
+  async #startRuntime(
+    main: string,
+    key: string,
+    observationOnly: boolean,
+    watcherKey: string | null,
+  ): Promise<void> {
     const label = basename(main);
     const runtime = new AgentRuntime({
       cwd: main,
       sockets: this.#sockets,
       link: this.#newLink(),
       tools: this.#tools,
-      launcher: this.#launcher,
+      launcher: observationOnly ? null : this.#launcher,
+      observationOnly,
+      watcherKey,
+      onWatchProject: (project: WatchedProjectCandidate) =>
+        this.#ensure(
+          {
+            cwd: project.cwd,
+            expectedKey: project.key,
+            observationOnly: true,
+            watcherKey: key,
+          },
+          true,
+        ),
       isLinked: (cwd) => this.#isLinked(cwd),
       briefed: this.#briefed,
       // the server closed this project's link: it was marked inactive, or the
@@ -259,8 +290,7 @@ export class AgentFleet {
       await runtime.start();
     } catch (err) {
       this.#runtimes.delete(main);
-      console.error(`[bridge] project ${label} could not be watched: ${errText(err)}`);
-      return;
+      throw err;
     }
     console.error(`[bridge] project ${label} active: watching ${main}`);
     // a caller refused while this project did not exist is exactly the caller
@@ -416,6 +446,8 @@ export class AgentFleet {
       label: basename(identity.main),
       worktrees,
       live: live === null ? [] : [live],
+      observationOnly: false,
+      watcherKey: null,
     };
   }
 

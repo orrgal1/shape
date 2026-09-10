@@ -12,9 +12,9 @@
  * SHAPE STARTS NOTHING. A session appears because something inside a worktree
  * of this repo spoke on the loopback link — the omp extension greeting, a
  * Claude Code hook firing, an MCP sidecar calling the canvas — and it
- * disappears when that session says goodbye. There is no way in from the
- * browser: nothing here launches a harness, types at one, aborts one or
- * changes how it approves its own work.
+ * disappears when that session says goodbye. A browser may ask this Shape
+ * runtime to show a directory chooser; that only returns validated Git facts
+ * and never retargets the runtime, launches or instructs a coding harness.
  *
  * ONE RUNTIME, ONE REPO, N WORKTREES; the fleet owns the loopback link and
  * hosts one runtime per active project. All the worktrees of a repo are one
@@ -39,7 +39,7 @@
 import { execFile } from "node:child_process";
 import { basename } from "node:path";
 import { LINK_WS_PATH } from "../../../shared/src/index.ts";
-import type { AgentState, BackendInfo, ManagerHandle, RealityLayer, WorktreeInfo } from "../../../shared/src/index.ts";
+import type { AgentState, BackendInfo, ManagerHandle, RealityLayer, WatchedProjectCandidate, WorktreeInfo } from "../../../shared/src/index.ts";
 import type {
   AgentSession,
   AgentToServerMsg,
@@ -56,15 +56,8 @@ import type { HerdrLauncher } from "./launcher/herdr.ts";
 import { attachManager } from "./manager.ts";
 import { hasSourceCode, synthesizeSkeleton } from "./onboarding-fs.ts";
 import { extractReality } from "./reality.ts";
-import {
-  canonicalDir,
-  ensureGitExclude,
-  legacyProjectKey,
-  listWorktrees,
-  projectKey,
-  repoIdentity,
-  worktreeContaining,
-} from "./worktrees.ts";
+import { directoryPickerAvailable, pickWatchedProject } from "./picker.ts";
+import { canonicalDir, legacyProjectKey, listWorktrees, projectKey, repoIdentity, worktreeContaining } from "./worktrees.ts";
 
 /** an empty layer keeps `synthesizeSkeleton` honest before the first extraction */
 const NO_REALITY: RealityLayer = {
@@ -102,6 +95,12 @@ export interface AgentRuntimeOptions {
   /** what is installed on this machine; the fleet detects it once for every runtime */
   tools: DetectedTools;
   launcher: HerdrLauncher | null;
+  /** picker-created runtimes observe only: no manager, prompt, injection or terminal focus */
+  observationOnly: boolean;
+  /** project key of the runtime that selected this project */
+  watcherKey: string | null;
+  /** open a separate observation-only runtime after this runtime's picker answers */
+  onWatchProject: (project: WatchedProjectCandidate) => Promise<void>;
   /** whether a loopback caller from `cwd` is currently greeted (the fleet owns the link) */
   isLinked: (cwd: string) => boolean;
   /**
@@ -149,6 +148,9 @@ export class AgentRuntime {
   readonly #link: AgentEnd;
   readonly #isLinked: (cwd: string) => boolean;
   readonly #onExit: (reason: string) => void;
+  readonly #observationOnly: boolean;
+  readonly #watcherKey: string | null;
+  readonly #onWatchProject: (project: WatchedProjectCandidate) => Promise<void>;
 
   /** the directory this project was seen at; any worktree of the repo */
   readonly #cwd: string;
@@ -228,13 +230,18 @@ export class AgentRuntime {
   /** pending canvas calls, by frame id */
   readonly #calls = new Map<string, (result: { text: string; isError: boolean }) => void>();
   #callSeq = 0;
+  /** the one native chooser this runtime may have open */
+  #picker: { id: string; controller: AbortController } | null = null;
   #stopped = false;
 
   constructor(opts: AgentRuntimeOptions) {
     this.#sockets = opts.sockets;
     this.#link = opts.link;
     this.#tools = opts.tools;
-    this.#launcher = opts.launcher;
+    this.#observationOnly = opts.observationOnly;
+    this.#watcherKey = opts.watcherKey;
+    this.#onWatchProject = opts.onWatchProject;
+    this.#launcher = opts.observationOnly ? null : opts.launcher;
     this.#isLinked = opts.isLinked;
     this.#briefed = opts.briefed;
     this.#onExit = opts.onExit;
@@ -262,9 +269,10 @@ export class AgentRuntime {
     this.#link.onDisconnect((reason) => this.#onLinkGap(reason));
     this.#link.onReconnect(() => this.#onLinkBack());
     await this.#openProject();
-    // the config the manager pass writes is what every builder the manager
-    // launches later comes up with, so it is written before anything reports in
-    await this.#attachManager();
+    // Picker-created projects are deliberately observation-only: even when
+    // this machine has a manager and launcher, this runtime never configures
+    // or prompts either.
+    if (!this.#observationOnly) await this.#attachManager();
     this.#sendAttach();
     await this.#attachGate.promise;
   }
@@ -296,6 +304,8 @@ export class AgentRuntime {
     const pending = [...this.#calls.values()];
     this.#calls.clear();
     for (const settle of pending) settle({ text: SERVER_UNREACHABLE, isError: true });
+    this.#picker?.controller.abort();
+    this.#picker = null;
   }
 
   /** Reconnected: the room may be new or may have outlived us, so re-announce. */
@@ -332,7 +342,6 @@ export class AgentRuntime {
 
     const hasPackages = await this.#startupReality(this.#primary);
     this.#targetHasCode = hasPackages || (await hasSourceCode(this.#primary));
-    await ensureGitExclude(this.#cwd);
     await this.#writeDirective();
   }
 
@@ -404,7 +413,7 @@ export class AgentRuntime {
     const running = this.#injecting;
     if (running !== null) return running;
     const launcher = this.#launcher;
-    if (launcher === null || this.#stopped || !this.#outboxOpen) return Promise.resolve();
+    if (this.#observationOnly || launcher === null || this.#stopped || !this.#outboxOpen) return Promise.resolve();
     const pass = this.#runInject(launcher).finally(() => {
       this.#injecting = null;
     });
@@ -546,11 +555,18 @@ export class AgentRuntime {
         key: this.#projectKey,
         label: basename(this.#projectCwd),
         cwd: this.#projectCwd,
+        observationOnly: this.#observationOnly,
+        watcherKey: this.#watcherKey,
         // the project's harness as the canvas names it: the first session that
         // reported in. Null while none has — which is the ordinary state of a
         // project nobody is working in right now
         backend: sessions[0]?.backend ?? null,
-        tools: { launcher: this.#launcher?.id ?? null, launchers: this.#tools.launchers, harnesses: this.#tools.harnesses },
+        tools: {
+          launcher: this.#launcher?.id ?? null,
+          launchers: this.#tools.launchers,
+          harnesses: this.#tools.harnesses,
+          directoryPicker: directoryPickerAvailable(),
+        },
         targetHasCode: this.#targetHasCode,
         directivePath: this.#directivePath,
         manager: this.#manager,
@@ -577,6 +593,8 @@ export class AgentRuntime {
     // start() may still be waiting for an `attached` that will never come now
     this.#attachGate.resolve();
     this.#sessions.clear();
+    this.#picker?.controller.abort();
+    this.#picker = null;
     if (reason !== null) this.#onExit(reason);
   }
 
@@ -746,6 +764,10 @@ export class AgentRuntime {
         return;
       case "error":
         console.error(`[bridge] ${msg.message}`);
+        if (msg.message.startsWith("project ") && msg.message.endsWith(" is inactive")) {
+          this.#teardown(msg.message);
+          this.#link.close(msg.message);
+        }
         return;
       case "canvas_result": {
         const settle = this.#calls.get(msg.id);
@@ -760,6 +782,42 @@ export class AgentRuntime {
       case "list_worktrees": {
         const { id } = msg;
         void this.#refreshWorktrees(id);
+        return;
+      }
+      case "pick_directory": {
+        if (!directoryPickerAvailable()) {
+          this.#error(`pick_directory failed: directory picker unavailable on ${process.platform}`);
+          return;
+        }
+        if (this.#picker !== null) {
+          this.#error("pick_directory failed: a directory picker is already open");
+          return;
+        }
+        const controller = new AbortController();
+        this.#picker = { id: msg.id, controller };
+        void pickWatchedProject(controller.signal).then(
+          (project) => this.#post({ type: "picked_directory", id: msg.id, project }),
+          (err: unknown) => {
+            if (!controller.signal.aborted) this.#error(`pick_directory failed: ${errText(err)}`);
+          },
+        ).finally(() => {
+          if (this.#picker?.controller === controller) this.#picker = null;
+        });
+        return;
+      }
+      case "watch_project": {
+        const { id, project } = msg;
+        void this.#onWatchProject(project).then(
+          () => this.#post({ type: "watched_project_started", id, key: project.key }),
+          (err: unknown) => this.#error(`watch_project failed: ${errText(err)}`),
+        );
+        return;
+      }
+      case "cancel_request": {
+        const picker = this.#picker;
+        if (picker?.id !== msg.id) return;
+        this.#picker = null;
+        picker.controller.abort();
         return;
       }
       case "extract_reality":
@@ -790,6 +848,10 @@ export class AgentRuntime {
    * a frame that arrives anyway is answered with the reason.
    */
   async #focusTerminal(worktree: string): Promise<void> {
+    if (this.#observationOnly) {
+      this.#error("could not bring the terminal forward: watched projects are observation-only");
+      return;
+    }
     if (!this.#sessions.has(worktree)) {
       this.#error(`could not bring the terminal forward: no session is reporting in from ${this.#label(worktree)}`);
       return;

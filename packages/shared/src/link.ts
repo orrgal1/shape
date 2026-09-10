@@ -29,6 +29,7 @@ import type {
   ProjectTools,
   RealityLayer,
   WorktreeInfo,
+  WatchedProjectCandidate,
 } from "./index.ts";
 
 // ---------------------------------------------------------------------------
@@ -143,6 +144,18 @@ export interface AgentProject {
   label: string;
   cwd: string;
   /**
+   * True when this project entered through the directory picker. Its runtime
+   * reads repository state only: it never configures a manager, briefs a
+   * session, or exposes a terminal action. Missing legacy values parse false.
+   */
+  observationOnly: boolean;
+  /**
+   * Project key of the runtime whose picker selected this project. Persisted
+   * so that runtime can restore this observation link after either side
+   * restarts. Null for discovered projects and legacy rows.
+   */
+  watcherKey: string | null;
+  /**
    * The project's harness: the one the first session that reported in runs
    * on. `null` while no session is on the link.
    */
@@ -226,6 +239,10 @@ export type AgentToServerMsg =
   | { type: "reality"; worktree: string; reality: RealityLayer; head: string | null }
   /** answers `list_worktrees`; also pushed unsolicited when the agent notices a change */
   | { type: "worktrees"; id: string | null; worktrees: WorktreeInfo[] }
+  /** answers `pick_directory`; null means the chooser was cancelled */
+  | { type: "picked_directory"; id: string; project: WatchedProjectCandidate | null }
+  /** acknowledges that this agent started the selected project's separate runtime */
+  | { type: "watched_project_started"; id: string; key: string }
   /** answers `synthesize_skeleton`, echoing the request's worktree */
   | { type: "skeleton_result"; worktree: string; id: string; ops: CanvasOp[] }
   /** an adapter error worth showing the user (becomes a browser `error` frame) */
@@ -243,8 +260,8 @@ export type AgentToServerMsg =
   | { type: "detached"; reason: string };
 
 /**
- * Server → agent. Requests carry an `id` the agent echoes in its answer, and
- * everything that acts on one harness names its worktree.
+ * Server → agent. Requests carry an `id` the agent echoes in its answer.
+ * Harness-specific actions name a worktree; picker activation is project-wide.
  */
 export type ServerToAgentMsg =
   | { type: "attached"; projectId: string }
@@ -256,5 +273,11 @@ export type ServerToAgentMsg =
    */
   | { type: "focus_terminal"; worktree: string }
   | { type: "list_worktrees"; id: string }
+  /** show this machine's directory chooser without retargeting the current runtime */
+  | { type: "pick_directory"; id: string }
+  /** start a separate observation-only runtime for a picker result */
+  | { type: "watch_project"; id: string; project: WatchedProjectCandidate }
+  /** cancel a correlated operation that no browser is waiting for any longer */
+  | { type: "cancel_request"; id: string }
   | { type: "extract_reality"; worktree: string }
   | { type: "synthesize_skeleton"; worktree: string; id: string };

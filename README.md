@@ -60,14 +60,14 @@ existing repo** below.
 
 ## Projects come to you
 
-You never open, create or pick a project. A project is a row in Shape's registry with a
-status, and a repo becomes one the first time Shape sees work in it: a herdr agent running
-there, a session dialing the loopback link from it, or the `--cwd` seed at startup. A repo is
-ONE project however many worktrees it has — they show up on its canvas as variations — and
-Shape rescans while a browser is watching (on connect, then every 30 s), so a repo you start
-working in appears without a reload.
+Projects normally come to you: a repo becomes a registry row the first time Shape sees work
+in it — a herdr agent running there, a session dialing the loopback link from it, or the
+`--cwd` seed at startup. The project menu has one explicit exception: **Add watched
+project…** selects an existing Git repo for observation without creating a project or starting
+a session. A repo is ONE project however many worktrees it has — they show up on its canvas
+as variations — and Shape rescans discovered projects while a browser is watching.
 
-A project is **active** or **inactive**, and that is the only thing you change:
+Beyond that one add action, a project's only lifecycle setting is **active** or **inactive**:
 
 - **active** — it has a canvas open and its sessions stream onto it. New projects arrive
   active.
@@ -90,20 +90,27 @@ ln -s "$PWD/skills/visualize" ~/.claude/skills/
 ```
 
 Then, from any repo, say "onboard this repo to Shape". The skill starts (or reuses) the bridge
-and web server, seeds it with that repo — which is all it takes to make it a project — and
-hands back the canvas URL. The map
-starts itself: the bridge reads the checkout, and on a canvas with no bubbles it seeds one
-bubble per workspace package with the imports between them, so the picture is ground truth
-before any agent has said a word. The meaning on top of it — what each part promises, the
-capabilities above them — is written by an agent through the `canvas` tool while it works in
-the repo. See [`skills/visualize/SKILL.md`](skills/visualize/SKILL.md) for the steps and
-[`docs/onboarding.md`](docs/onboarding.md) for the automatic map itself.
+and web server, seeds it with that repo and hands back the canvas URL. From an existing canvas,
+the project menu's **Add watched project…** action can register another existing Git checkout:
+the connected Shape agent shows that machine's native directory picker, validates the
+selection without changing it, and opens a separate observation-only runtime and connection
+for the new project. This works with a split server and agent too. The watched runtime reads
+Git/worktree/reality facts but receives no launcher, never configures or prompts a manager or
+session, and exposes no terminal-focus action. Its originating agent relationship is persisted
+so reactivation and restart restore the same read-only behavior. The action is disabled when
+no connected local Shape agent can browse folders.
+
+The map starts itself: the bridge reads the checkout, and on a canvas with no bubbles it seeds
+one bubble per workspace package with the imports between them, so the picture is ground truth
+before any agent has said a word. The meaning on top of it is written by an agent through the
+`canvas` tool while it works in the repo. See [`skills/visualize/SKILL.md`](skills/visualize/SKILL.md)
+and [`docs/onboarding.md`](docs/onboarding.md).
 
 ## Architecture
 
 ```
 browser (Vite dev :5173)
-   │  WebSocket  ws://127.0.0.1:4400/ws     reads the picture; no path to an agent
+   │  WebSocket  ws://127.0.0.1:4400/ws     reads the picture; may add one watched Git project
    ▼
 server half   packages/bridge/src/server/
    │  graph + revision store, drift, activity, the automatic map
@@ -127,14 +134,15 @@ becomes a session of the worktree it runs in, and everything the canvas knows ab
 it is doing, what it just wrote — arrives over that link. Both integrations register exactly
 one tool, `canvas`, and the agent only ever mutates the picture through it (`upsert_node`,
 `remove_node`, `upsert_edge`, `remove_edge`, `set_phase`): the server validates each op,
-applies it, and broadcasts the whole document to every connected browser. Nothing travels the
-other way — there is no frame a browser can send that reaches an agent.
+applies it, and broadcasts the whole document. The watched-project action reaches the local
+Shape agent only to show a native chooser and read canonical Git identity; it never reaches,
+starts or prompts a coding harness and never writes to the selected repository.
 
 A link caller also decides what Shape watches. A harness dialing in from a repo no runtime
 covers is answered with the reason and that repo is added to the registry as an active
 project, so its next dial lands on a real canvas; the same repos herdr's own agents are
-working in arrive the same way. Nothing in the browser opens or picks a project — it marks
-one active or inactive and switches between the active ones.
+working in arrive the same way. The browser may also ask its connected local Shape agent to
+pick one existing Git repo; otherwise it only changes project status or selects an active row.
 
 Packages:
 
@@ -181,8 +189,8 @@ Where state lives:
 - `~/.shape/server/projects/<key>/shape-directive.md` — one file per project saying what Shape
   is, where this project's link is, and how to call the `canvas` tool; a session you started by
   hand is pointed at it.
-- The bridge appends `.shape/` to the target repo's `.git/info/exclude`, so a canvas an older
-  Shape left in the repo never lands in a commit. Nothing is written into the target project.
+- Target repositories stay untouched. The obsolete `.shape/` Git-exclude write was removed;
+  watched-project selection and observation only read repository and worktree facts.
 
 ## Integrations
 
@@ -190,14 +198,15 @@ Where state lives:
   extension inside the session, Claude Code is wired from the outside with the link's MCP
   server and its hooks. Any other session reports in through the link's one-shot CLI. Nothing
   is asked of a harness beyond dialing the loopback link — Shape never starts one.
-- **herdr — optional, recommended.** When herdr is installed and its socket answers, Shape
-  finds the project's manager tab (`packages/bridge/src/agent/manager.ts`) and configures it,
-  so every builder started from there is handed the link; the repos herdr's agents are working
-  in are also how projects find their way into the registry, and "go to the terminal" raises
-  the tab a session is running in (`packages/bridge/src/agent/launcher/herdr.ts`). Shape never
-  opens a tab of its own. Without herdr,
-  sessions still report in from wherever you started them; the canvas simply has no terminal to
-  send you to.
+- **herdr — optional, recommended.** For projects discovered from existing work, when herdr is
+  installed and its socket answers, Shape finds the project's manager tab
+  (`packages/bridge/src/agent/manager.ts`) and configures it so future builders receive the
+  link; herdr's agents also feed discovery, and "go to the terminal" raises an existing
+  session's tab (`packages/bridge/src/agent/launcher/herdr.ts`). A project added through the
+  directory picker is deliberately different: its observation-only runtime never consults or
+  configures herdr and never exposes terminal focus, even when herdr and a manager are present.
+  Shape never opens a tab or starts a harness. Without herdr, discovered sessions still report
+  in from wherever you started them; their canvas simply has no terminal to send you to.
 - **The manager skill — optional adapter**, see below.
 
 ## Manager mode

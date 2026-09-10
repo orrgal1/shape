@@ -284,6 +284,10 @@ export interface AppState {
    * truth.
    */
   pendingStatus: { previous: ProjectSummary[] } | null;
+  /** a local directory picker request is waiting for its agent reply */
+  addingWatchedProject: boolean;
+  /** only an add request's own failure, for the switcher's inline feedback */
+  watchedProjectAddError: string | null;
   /** saved versions of each variation's canvas, oldest first */
   revisions: Record<string, RevisionInfo[]>;
   /**
@@ -338,6 +342,10 @@ export interface AppState {
    * it must not wait a round trip to move.
    */
   markProjectStatus: (projectId: string, status: ProjectStatus) => void;
+  /** mark the directory picker request pending immediately before its frame is sent */
+  beginWatchedProjectAdd: () => void;
+  /** settle a picker request that could not be put on the socket */
+  failWatchedProjectAdd: (message: string) => void;
   /** switch layers, restoring where that layer was last left */
   setView: (view: Layer) => void;
   /** product → build: show exactly the bubbles that make one capability real */
@@ -581,6 +589,8 @@ export const useApp = create<AppState>((set, get) => ({
   projects: [],
   projectId: null,
   pendingStatus: null,
+  addingWatchedProject: false,
+  watchedProjectAddError: null,
   revisions: {},
   filter: null,
   target: null,
@@ -621,6 +631,8 @@ export const useApp = create<AppState>((set, get) => ({
           // the list this hello carries is the server's own word on every
           // status, so an optimistic move waiting for one is answered
           pendingStatus: null,
+          addingWatchedProject: false,
+          watchedProjectAddError: null,
           revisions: msg.revisions,
           agents: msg.agents,
           filter,
@@ -760,6 +772,11 @@ export const useApp = create<AppState>((set, get) => ({
         // optimistic move and all
         set({ projects: msg.projects, pendingStatus: null });
         return;
+      case "watched_project_add_cancelled":
+        // Cancelling the native picker changes nothing except the request that
+        // was waiting for it: registry, room and selection stay as they were.
+        set({ addingWatchedProject: false, watchedProjectAddError: null });
+        return;
       case "delta": {
         // The answer is broadcast to every attached browser, so a client that
         // asked nothing — or asked about another variation — is not yanked into
@@ -777,6 +794,11 @@ export const useApp = create<AppState>((set, get) => ({
         return;
       }
       case "error": {
+        // Only an error arriving while this request is outstanding belongs
+        // inline in the switcher. Other errors remain global toasts.
+        if (get().addingWatchedProject) {
+          set({ addingWatchedProject: false, watchedProjectAddError: msg.message });
+        }
         // an unknown revision is answered with an error frame, so a request
         // still waiting for its answer is what just failed
         if (get().delta === null) set({ compare: null });
@@ -835,6 +857,13 @@ export const useApp = create<AppState>((set, get) => ({
       // rollback target, or a refusal would restore a list nobody stated
       pendingStatus: s.pendingStatus ?? { previous: s.projects },
     })),
+
+  beginWatchedProjectAdd: () => set({ addingWatchedProject: true, watchedProjectAddError: null }),
+
+  failWatchedProjectAdd: (message) =>
+    set((s) =>
+      s.addingWatchedProject ? { addingWatchedProject: false, watchedProjectAddError: message } : {},
+    ),
 
   // Asked for by hand, which is the whole difference between this and the
   // canvas following the work: it stamps the pin, so the next few frames of

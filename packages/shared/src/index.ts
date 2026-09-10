@@ -1436,6 +1436,18 @@ export interface WorktreeInfo {
   head: string | null;
 }
 
+/** A directory picker result, validated on the agent before it crosses the link. */
+export interface WatchedProjectCandidate {
+  /** stable project identity: sha256(machine + repository common directory) */
+  key: string;
+  /** basename of the canonical main worktree */
+  label: string;
+  /** canonical realpath of the repository's main worktree */
+  cwd: string;
+  /** every worktree of the selected repository, main first and without duplicate ids */
+  worktrees: WorktreeInfo[];
+}
+
 // ---------------------------------------------------------------------------
 // Harnesses
 // ---------------------------------------------------------------------------
@@ -1502,6 +1514,8 @@ export interface ProjectTools {
   launchers: ToolInfo[];
   /** every harness detected on PATH */
   harnesses: ToolInfo[];
+  /** this agent can show a native directory chooser on the machine that owns the repositories */
+  directoryPicker: boolean;
 }
 
 /**
@@ -1616,6 +1630,8 @@ export type ServerMsg =
       /** what is installed where this project's agent runs */
       tools: ProjectTools;
     }
+  /** the directory chooser was closed without selecting a project; caller only */
+  | { type: "watched_project_add_cancelled" }
   | { type: "graph"; worktree: string; graph: GraphDoc }
   | { type: "agent"; worktree: string; state: AgentState }
   /** session facts changed without any graph changing (agent attached/detached, worktrees appeared) — no client state reset */
@@ -1642,18 +1658,20 @@ export type ServerMsg =
 
 /**
  * Browser → bridge. Shape is a read-only picture: nothing here instructs,
- * starts, stops or types into an agent. The only input it has is a project's
- * status — active or inactive — and which of the active ones to watch; the
- * rest is a comparison of two snapshots and, under herdr, a request for a
- * session's own terminal to be raised. A frame that acts on a canvas names
- * the worktree it acts on: with several worktrees merged into one view, "the
- * current one" is a property of the click, not of the connection.
+ * starts, stops or types into a coding agent. Project input changes status,
+ * chooses which active room to watch, or asks the attached local Shape agent
+ * for one existing Git repository through its native directory picker. The
+ * remaining actions compare snapshots or raise a session's own terminal. A
+ * frame that acts on a canvas names its worktree: with several worktrees
+ * merged into one view, "the current one" is a property of the click.
  */
 export type ClientMsg =
   /** join another ACTIVE project this server hosts; answered with a fresh `hello` to this socket only. Inactive/unknown → `error` */
   | { type: "select_project"; projectId: string }
   /** mark a project active or inactive; answered by a `projects` broadcast, or an `error` to this socket */
   | { type: "set_project_status"; projectId: string; status: ProjectStatus }
+  /** choose and register one existing Git project through this room's local agent */
+  | { type: "add_watched_project" }
   /** take the user to the harness's terminal: its herdr tab is switched to and the app raised */
   | { type: "focus_terminal"; worktree: string }
   /** compare two snapshots of one worktree; `revA` = before, `revB` = after. Unknown rev → `error` frame */

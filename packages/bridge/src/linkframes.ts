@@ -31,6 +31,7 @@ import type {
   ServerToAgentMsg,
   ToolInfo,
   WorktreeInfo,
+  WatchedProjectCandidate,
   WorktreeSession,
 } from "../../shared/src/index.ts";
 
@@ -187,7 +188,7 @@ function parseToolList(value: unknown): ToolInfo[] | null {
  * present but malformed value is a malformed frame.
  */
 function parseTools(value: unknown): ProjectTools | null {
-  if (value === undefined) return { launcher: null, launchers: [], harnesses: [] };
+  if (value === undefined) return { launcher: null, launchers: [], harnesses: [], directoryPicker: false };
   if (value === null || typeof value !== "object") return null;
   const t = value as Record<string, unknown>;
   // `pty` is how an older Shape named the terminal it hosted itself; a row
@@ -197,7 +198,9 @@ function parseTools(value: unknown): ProjectTools | null {
   if (launchers === null) return null;
   const harnesses = parseToolList(t.harnesses);
   if (harnesses === null) return null;
-  return { launcher: t.launcher === "herdr" ? "herdr" : null, launchers, harnesses };
+  const directoryPicker = t.directoryPicker ?? false;
+  if (typeof directoryPicker !== "boolean") return null;
+  return { launcher: t.launcher === "herdr" ? "herdr" : null, launchers, harnesses, directoryPicker };
 }
 
 /**
@@ -273,12 +276,19 @@ export function parseProject(value: unknown): AgentProject | null {
   if (p.backend !== null && p.backend !== undefined && backend === null) return null;
   const tools = parseTools(p.tools);
   if (tools === null) return null;
+  if (p.observationOnly !== undefined && typeof p.observationOnly !== "boolean") return null;
+  const observationOnly = p.observationOnly === true;
+  if (p.watcherKey !== undefined && p.watcherKey !== null && !isId(p.watcherKey)) return null;
+  const watcherKey = typeof p.watcherKey === "string" ? p.watcherKey : null;
+  if (observationOnly !== (watcherKey !== null)) return null;
   return {
     key: p.key,
     label: p.label,
     cwd: p.cwd,
     backend,
     tools,
+    observationOnly,
+    watcherKey,
     targetHasCode: p.targetHasCode,
     directivePath,
     manager: parseManager(p.manager),
@@ -413,6 +423,16 @@ export function parseWorktrees(value: unknown): WorktreeInfo[] | null {
   return out;
 }
 
+/** One picker answer, already reduced to the read-only repository facts the server needs. */
+function parseWatchedProject(value: unknown): WatchedProjectCandidate | null {
+  if (value === null || typeof value !== "object") return null;
+  const project = value as Record<string, unknown>;
+  if (!isId(project.key) || typeof project.label !== "string" || !isWorktree(project.cwd)) return null;
+  const worktrees = parseWorktrees(project.worktrees);
+  if (worktrees === null || worktrees.length === 0) return null;
+  return { key: project.key, label: project.label, cwd: project.cwd, worktrees };
+}
+
 /**
  * The sessions an agent is watching, one per worktree with one reporting in.
  * Every field is load-bearing where this lands: the room keys its per-worktree
@@ -514,6 +534,16 @@ export function parseAgentToServerMsg(raw: string): AgentToServerMsg | null {
       if (worktrees === null) return null;
       return { type: "worktrees", id, worktrees };
     }
+    case "picked_directory": {
+      if (!isId(m.id)) return null;
+      if (m.project === null) return { type: "picked_directory", id: m.id, project: null };
+      const project = parseWatchedProject(m.project);
+      if (project === null) return null;
+      return { type: "picked_directory", id: m.id, project };
+    }
+    case "watched_project_started":
+      if (!isId(m.id) || !isId(m.key)) return null;
+      return { type: "watched_project_started", id: m.id, key: m.key };
     case "skeleton_result":
       if (!isWorktree(m.worktree) || !isId(m.id) || !Array.isArray(m.ops)) return null;
       // every op is validated by `applyOps`; a non-array is what it cannot survive
@@ -562,6 +592,18 @@ export function parseServerToAgentMsg(raw: string): ServerToAgentMsg | null {
     case "list_worktrees":
       if (!isId(m.id)) return null;
       return { type: "list_worktrees", id: m.id };
+    case "pick_directory":
+      if (!isId(m.id)) return null;
+      return { type: "pick_directory", id: m.id };
+    case "watch_project": {
+      if (!isId(m.id)) return null;
+      const project = parseWatchedProject(m.project);
+      if (project === null) return null;
+      return { type: "watch_project", id: m.id, project };
+    }
+    case "cancel_request":
+      if (!isId(m.id)) return null;
+      return { type: "cancel_request", id: m.id };
     case "synthesize_skeleton":
       if (!isWorktree(m.worktree) || !isId(m.id)) return null;
       return { type: "synthesize_skeleton", worktree: m.worktree, id: m.id };

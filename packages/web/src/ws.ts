@@ -101,14 +101,15 @@ export function connectBridge(): void {
   open();
 }
 
-export function send(msg: ClientMsg): void {
+export function send(msg: ClientMsg): boolean {
   if (isMockMode()) {
     mockSend(msg);
-    return;
+    return true;
   }
   if (socket === null || socket.readyState !== WebSocket.OPEN) {
     useApp.getState().pushError("not connected to the bridge — nothing was sent");
-    return;
+    return false;
   }
   socket.send(JSON.stringify(msg));
+  return true;
 }
