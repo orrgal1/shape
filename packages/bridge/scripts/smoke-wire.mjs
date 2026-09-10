@@ -60,6 +60,24 @@ function check(name, ok, detail = "") {
 }
 
 /**
+ * What a frame CARRIES, with object keys in a fixed order. A validator builds
+ * its answer in whatever order suits it, and only what the frame carries is
+ * what a consumer sees, so a field-for-field comparison is the honest one.
+ */
+function frameContent(value) {
+  if (Array.isArray(value)) return value.map(frameContent);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, frameContent(value[key])]));
+  }
+  return value;
+}
+
+/** Same fields, same values, same nesting: the key order does not count. */
+function sameFrame(left, right) {
+  return JSON.stringify(frameContent(left)) === JSON.stringify(frameContent(right));
+}
+
+/**
  * A frame survives its validator unchanged, and the same frame without its
  * `worktree` (and with an empty one) is refused: an unplaceable frame must not
  * reach a room that would have to guess which canvas it is about.
@@ -68,7 +86,7 @@ function roundTrip(parse, label, frame, { worktreeScoped = true } = {}) {
   const parsed = parse(JSON.stringify(frame));
   check(`${label}: accepted`, parsed !== null, "validator returned null");
   if (parsed !== null) {
-    check(`${label}: survives the round trip unchanged`, JSON.stringify(parsed) === JSON.stringify(frame), JSON.stringify(parsed));
+    check(`${label}: survives the round trip unchanged`, sameFrame(parsed, frame), JSON.stringify(parsed));
   }
   if (!worktreeScoped) return;
   const { worktree: _dropped, ...without } = frame;
@@ -962,7 +980,7 @@ function linkTrip(label, frame) {
   const parsed = parseLinkMsg(JSON.stringify(frame));
   check(`${label}: accepted`, parsed !== null, "validator returned null");
   if (parsed !== null) {
-    check(`${label}: survives the round trip unchanged`, JSON.stringify(parsed) === JSON.stringify(frame), JSON.stringify(parsed));
+    check(`${label}: survives the round trip unchanged`, sameFrame(parsed, frame), JSON.stringify(parsed));
   }
   const { cwd: _dropped, ...without } = frame;
   check(`${label}: refused without a cwd`, parseLinkMsg(JSON.stringify(without)) === null);

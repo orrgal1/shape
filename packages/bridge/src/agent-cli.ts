@@ -98,6 +98,7 @@ try {
   const token =
     cli.token ??
     (envToken !== undefined && envToken.length > 0 ? envToken : await tokenForServer(serverOrigin(cli.server)));
+  const mgr = process.env.SHAPE_MGR;
   const sockets = new SocketServer({ port: cli.linkPort });
   // Every runtime needs its own connection: one server-side link is bound to
   // exactly one room for its whole lifetime. Picker-created runtimes use this
@@ -119,6 +120,7 @@ try {
     // the registry is the server's, on the far side of the link: this process
     // watches the repo it was pointed at and discovers nothing else
     registry: null,
+    ...(mgr === undefined ? {} : { mgr }),
     link: newLink,
   });
 

@@ -74,6 +74,7 @@ function parseArgv(argv: string[]): Cli {
 // what went wrong.
 try {
   const cli = parseArgv(process.argv.slice(2));
+  const mgr = process.env.SHAPE_MGR;
   const sockets = new SocketServer({ port: cli.port });
   // one database for every project this user opens, keyed by project AND
   // worktree, so every variation of a repo keeps its own canvas on the one
@@ -98,6 +99,7 @@ try {
       activeProjects: () => server.activeProjects(),
       discovered: (repos, complete) => server.discovered(LOCAL_TENANT, repos, complete),
     },
+    ...(mgr === undefined ? {} : { mgr }),
     // one link per runtime: the server end is this process's business, so it
     // is attached here and the agent end handed back
     link: () => {

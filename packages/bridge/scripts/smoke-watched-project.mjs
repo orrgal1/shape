@@ -18,6 +18,8 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 
+import { SYNC_TAB_LABEL } from "../src/agent/launcher/herdr.ts";
+
 const results = [];
 let failed = 0;
 
@@ -212,6 +214,7 @@ function launchAgent() {
         SHAPE_LAUNCHER: "herdr",
         HERDR_SOCKET_PATH: herdrSocket,
         FAKE_MGR_LOG: mgrLog,
+        SHAPE_MGR: fakeMgr,
         PATH: `${root}:${process.env.PATH ?? ""}`,
         SHAPE_PICK_FOLDER: `${process.execPath} ${picker} ${pickerState}`,
       },
@@ -272,12 +275,6 @@ try {
 
   agent = launchAgent();
   await waitFor("remote agent attached", () => agent.output.includes("agent attached to"));
-  const launcherReadsBeforeWatched = (await jsonl(herdrLog)).filter(
-    (frame) =>
-      frame.type === "__call" &&
-      !String(frame.id).startsWith("smoke-") &&
-      ["workspace.list", "tab.list", "agent.list"].includes(frame.method),
-  ).length;
 
   socket = await connectSocket(serverPort, frames);
   const initial = await waitFor("capable current project hello", () =>
@@ -332,7 +329,6 @@ try {
     JSON.stringify(rowsAfterCancel) === JSON.stringify(rowsBeforeCancel) && !rowsAfterCancel.some((row) => row.project.cwd === pathB),
     JSON.stringify(rowsAfterCancel),
   );
-
   const addedAt = frames.length;
   const observerAt = observerFrames.length;
   socket.send(JSON.stringify({ type: "add_watched_project" }));
@@ -382,17 +378,28 @@ try {
   const launcherCallsAfterFirstWatch = (await jsonl(herdrLog)).filter(
     (frame) => frame.type === "__call" && !String(frame.id).startsWith("smoke-"),
   );
+  // A manager is looked for by listing the tabs of ONE workspace, so every such
+  // listing has to be the root project's: none may name the watched project's,
+  // which has no manager tab and whose own synchronization never lists tabs.
+  const tabListWorkspaces = launcherCallsAfterFirstWatch
+    .filter((frame) => frame.method === "tab.list")
+    .map((frame) => frame.params.workspace_id);
   const managerCallsAfterFirstWatch = await jsonl(mgrLog);
   check(
     "the split server waits for a separate observation-only runtime without inspecting its manager",
     activePicked.session.agentConnected &&
       activePicked.tools.launcher === null &&
-      launcherCallsAfterFirstWatch.filter((frame) =>
-        ["workspace.list", "tab.list", "agent.list"].includes(frame.method),
-      ).length === launcherReadsBeforeWatched &&
+      activePicked.session.manager === null &&
+      tabListWorkspaces.length > 0 &&
+      tabListWorkspaces.every((id) => id === rootWorkspace.workspace.workspace_id) &&
       managerCallsAfterFirstWatch.some((call) => call.cwd === pathA) &&
       managerCallsAfterFirstWatch.every((call) => call.cwd !== pathB),
-    JSON.stringify({ activePicked, launcherCallsAfterFirstWatch, managerCallsAfterFirstWatch }),
+    JSON.stringify({
+      activePicked,
+      tabListWorkspaces,
+      launcherCallsAfterFirstWatch,
+      managerCallsAfterFirstWatch,
+    }),
   );
 
   const repeatedAt = frames.length;
@@ -420,21 +427,25 @@ try {
     cwd: pathB,
     focus: false,
   });
+  const watchedWorkspaceId = workspace.workspace.workspace_id;
   await herdrCall(herdrSocket, "tab.rename", {
     tab_id: workspace.tab.tab_id,
     label: "manager",
   });
+  // herdr agent names are process-wide even though manager tabs are per workspace
+  const watchedManagerPane = workspace.root_pane.pane_id;
   await herdrCall(herdrSocket, "agent.start", {
-    pane_id: workspace.root_pane.pane_id,
-    name: "manager",
+    pane_id: watchedManagerPane,
+    name: "watched-manager",
     kind: "omp",
     args: [],
   });
-  const launcherReadsBeforeReactivation = (await jsonl(herdrLog)).filter(
+  const managerReadsBeforeReactivation = (await jsonl(herdrLog)).filter(
     (frame) =>
       frame.type === "__call" &&
       !String(frame.id).startsWith("smoke-") &&
-      ["workspace.list", "tab.list", "agent.list"].includes(frame.method),
+      frame.method === "tab.list" &&
+      frame.params.workspace_id === watchedWorkspaceId,
   ).length;
 
   const parkedAt = frames.length;
@@ -482,14 +493,17 @@ try {
   check(
     "reactivation keeps provenance and never inspects or configures the present manager",
     registry(dbFile).find((row) => row.key === keyB)?.project.observationOnly === true &&
-      bridgeLauncherCalls.filter((frame) =>
-        ["workspace.list", "tab.list", "agent.list"].includes(frame.method),
-      ).length === launcherReadsBeforeReactivation &&
+      bridgeLauncherCalls.filter(
+        (frame) => frame.method === "tab.list" && frame.params.workspace_id === watchedWorkspaceId,
+      ).length === managerReadsBeforeReactivation &&
       managerCallsAfterReactivation.some((call) => call.cwd === pathA) &&
       managerCallsAfterReactivation.every((call) => call.cwd !== pathB),
     JSON.stringify({ bridgeLauncherCalls, managerCallsAfterReactivation }),
   );
 
+  const launcherCallsBeforeWatchedSession = (await jsonl(herdrLog)).filter(
+    (frame) => frame.type === "__call" && !String(frame.id).startsWith("smoke-"),
+  ).length;
   linkedSession = new WebSocket(`ws://127.0.0.1:${String(linkPort)}/link`);
   await new Promise((resolve, reject) => {
     linkedSession.once("open", resolve);
@@ -519,18 +533,26 @@ try {
   await waitFor("observation-only focus refusal", () =>
     frames.slice(focusAt).find((frame) => frame.type === "error" && frame.message.includes("no terminal")),
   );
-  const finalLauncherCalls = (await jsonl(herdrLog)).filter(
-    (frame) => frame.type === "__call" && !String(frame.id).startsWith("smoke-"),
+  const finalLauncherCalls = (await jsonl(herdrLog))
+    .filter((frame) => frame.type === "__call" && !String(frame.id).startsWith("smoke-"))
+    .slice(launcherCallsBeforeWatchedSession);
+  // Shape's own dedicated synchronization launch is the project's, not this
+  // session's: what is left is everything the watched session could have caused.
+  const sessionLauncherCalls = finalLauncherCalls.filter(
+    (call) => call.params.label !== SYNC_TAB_LABEL && call.params.name !== SYNC_TAB_LABEL,
   );
   check(
     "a watched session exposes no focusable terminal and causes no prompt, launch, or focus",
     watchedSession.backend.capabilities.terminal === "none" &&
-      !finalLauncherCalls.some((frame) =>
+      !sessionLauncherCalls.some((frame) =>
         ["agent.prompt", "agent.start", "agent.focus", "tab.focus"].includes(frame.method),
       ),
-    JSON.stringify(finalLauncherCalls),
+    JSON.stringify(sessionLauncherCalls),
   );
 
+  const launcherCallsBeforeRestart = (await jsonl(herdrLog)).filter(
+    (frame) => frame.type === "__call" && !String(frame.id).startsWith("smoke-"),
+  ).length;
   linkedSession.close();
   linkedSession = null;
   const restartedAt = frames.length;
@@ -547,7 +569,17 @@ try {
         frame.tools.launcher === null,
     ),
   );
-  const restartLauncherCalls = await jsonl(herdrLog);
+  await waitFor("watched-project synchronization settled after restart", () =>
+    frames.slice(restartedAt).some(
+      (frame) =>
+        frame.type === "catch_up" &&
+        frame.worktree === pathB &&
+        (frame.catchUp.state === "idle" || frame.catchUp.state === "failed"),
+    ),
+  );
+  const restartLauncherCalls = (await jsonl(herdrLog))
+    .filter((frame) => frame.type === "__call" && !String(frame.id).startsWith("smoke-"))
+    .slice(launcherCallsBeforeRestart);
   const managerCallsAfterRestart = await jsonl(mgrLog);
   check(
     "agent restart recreates the separate read-only watched runtime from persisted provenance",
@@ -555,12 +587,15 @@ try {
       restoredHello.session.manager === null &&
       managerCallsAfterRestart.some((call) => call.cwd === pathA) &&
       managerCallsAfterRestart.every((call) => call.cwd !== pathB) &&
-      !restartLauncherCalls.some(
-        (frame) =>
-          frame.type === "__call" &&
-          !String(frame.id).startsWith("smoke-") &&
-          ["agent.prompt", "agent.start", "agent.focus", "tab.focus"].includes(frame.method),
-      ),
+      !restartLauncherCalls.some((frame) => {
+        // the project's own dedicated synchronization is the one launch Shape
+        // is allowed to make; anything else starting an agent is not
+        if (frame.method === "agent.start") return frame.params.name !== SYNC_TAB_LABEL;
+        if (frame.method === "agent.prompt" || frame.method === "agent.focus") {
+          return frame.params.target === watchedManagerPane || frame.params.target === "watched-manager";
+        }
+        return frame.method === "tab.focus" && frame.params.tab_id === workspace.tab.tab_id;
+      }),
     JSON.stringify({
       row: registry(dbFile).find((row) => row.key === keyB),
       restoredHello,

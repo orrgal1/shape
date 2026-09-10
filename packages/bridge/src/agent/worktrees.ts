@@ -42,7 +42,9 @@ function parsePorcelain(stdout: string): Stanza[] {
   const stanzas: Stanza[] = [];
   let current: Stanza | null = null;
   for (const raw of stdout.split("\n")) {
-    const line = raw.trimEnd();
+    // a worktree path can itself end in a space, so only git's line ending is
+    // formatting here: trim a CR and nothing else
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     if (line.length === 0) {
       if (current !== null) stanzas.push(current);
       current = null;

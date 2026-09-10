@@ -393,6 +393,15 @@ async function dispatch(method, params) {
       const name = String(params.name ?? "agent");
       if (agentTarget(name) !== null) throw Object.assign(new Error(`agent name in use: ${name}`), { code: "agent_name_in_use" });
       const args = Array.isArray(params.args) ? params.args.map(String) : [];
+      // the real server encodes every argument for the target shell and refuses
+      // the ones it cannot: a newline is such a character, and the launcher's
+      // prose prompt therefore has to arrive as an @ file rather than argv
+      if (args.some((arg) => arg.includes("\n") || arg.includes("\r"))) {
+        throw Object.assign(
+          new Error("agent arguments cannot be encoded safely for the target shell"),
+          { code: "invalid_agent_argument" },
+        );
+      }
       const timeoutMs = typeof params.timeout_ms === "number" ? params.timeout_ms : START_TIMEOUT_MS;
       try {
         await startAgent(tab, name, String(params.kind ?? "omp"), args, timeoutMs);
@@ -540,11 +549,11 @@ const server = createServer((socket) => {
         continue;
       }
       answered = true;
-      const request =
+      const response =
         REFUSE_SHAPE_MUTATIONS && String(id).startsWith("shape-") && MUTATING_METHODS.has(method)
           ? Promise.reject(Object.assign(new Error(`forbidden Shape launcher mutation: ${method}`), { code: "forbidden" }))
           : dispatch(method, params ?? {});
-      request.then(
+      response.then(
         (result) => {
           // the answer, not only the question: a test that has to know WHICH
           // workspace or tab herdr handed out reads it here rather than

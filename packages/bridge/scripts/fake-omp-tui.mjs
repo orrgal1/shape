@@ -40,10 +40,11 @@
  * `__dir` of "out"/"in" — one frame per line, which is what the smokes'
  * `ompFrames()` helper reads; a frame written while the link was down is
  * logged as "dropped", because it never left. Lifecycle markers
- * `__start`/`__closed`/`__exit` carry the pid, the argv and the dial count.
+ * `__start`/`__closed`/`__exit` carry the pid, argv and dial count; `__start`
+ * also carries the initial message after OMP's `@<path>` expansion.
  */
 
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const LOG = process.env.FAKE_OMP_LOG ?? join(process.cwd(), "fake-omp.log");
@@ -54,6 +55,26 @@ const TURN_HOLD_MS = Number(process.env.FAKE_OMP_TURN_HOLD_MS ?? 0);
 const SESSION_DIR = process.env.FAKE_OMP_SESSION_DIR ?? "/tmp/fake-omp-tui";
 
 const argv = process.argv.slice(2);
+const PRINT_ONCE = argv.includes("-p");
+const MESSAGE_ARG = PRINT_ONCE ? (argv.at(-1) ?? null) : null;
+/** the same ceiling OMP's CLI puts on inlining a text file (5 MiB) */
+const MAX_CLI_TEXT_BYTES = 5 * 1024 * 1024;
+/**
+ * OMP expands an @ message before the agent sees it: a text file arrives as a
+ * `<file name="…">` block, and one over the ceiling arrives as a placeholder
+ * with its contents left out. Keep that boundary real, so a launcher smoke
+ * proves the prose reached the agent rather than merely that a path was sent.
+ */
+function expand(arg) {
+  if (arg?.startsWith("@") !== true) return arg;
+  const path = arg.slice(1);
+  const content = readFileSync(path, "utf8");
+  if (Buffer.byteLength(content) > MAX_CLI_TEXT_BYTES) {
+    return `<file name="${path}">(skipped: too large)</file>\n`;
+  }
+  return `<file name="${path}">\n${content}\n</file>\n`;
+}
+const INITIAL_MESSAGE = expand(MESSAGE_ARG);
 const resumeAt = argv.indexOf("--resume");
 const SESSION_ID = resumeAt === -1 ? `fake-tui-${process.pid}` : (argv[resumeAt + 1] ?? `fake-tui-${process.pid}`);
 const SESSION_FILE = join(SESSION_DIR, `${SESSION_ID}.jsonl`);
@@ -72,7 +93,7 @@ if (LINK === undefined || LINK.length === 0) {
   process.exit(2);
 }
 
-record({ type: "__start", pid: process.pid, cwd: CWD, argv, link: LINK, sessionId: SESSION_ID });
+record({ type: "__start", pid: process.pid, cwd: CWD, argv, message: INITIAL_MESSAGE, link: LINK, sessionId: SESSION_ID });
 
 // ---------------------------------------------------------------------------
 // The prompt -> canvas conventions: which regexes produce which ops, notes and
@@ -367,6 +388,9 @@ function dial() {
     });
     event({ kind: "session", sessionId: SESSION_ID, sessionFile: SESSION_FILE, model: MODEL });
     tell({ type: "ready", pid: process.pid, sessionId: SESSION_ID, sessionFile: SESSION_FILE, cwd: CWD });
+    // `omp -p` runs one prompt and leaves. The smoke only needs the launch
+    // boundary, so recording the expanded message above is the completed turn.
+    if (PRINT_ONCE) setTimeout(() => bye("print completed"), 0);
   });
 
   socket.addEventListener("message", (message) => {

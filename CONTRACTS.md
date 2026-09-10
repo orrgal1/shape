@@ -182,6 +182,7 @@ replaces the detected harnesses with stubs (empty string = none detected) and
 `scripts/fake-herdr.mjs`; `SHAPE_MANAGER=0` skips the manager pass;
 `SHAPE_PICK_FOLDER` whitespace-splits a direct chooser command whose stdout, minus only its
 final line terminator, is the selected path and whose silent exit 1 is cancellation;
+`SHAPE_MGR` overrides the `mgr` executable for smoke tests;
 `SHAPE_TERMINAL_APP` and `SHAPE_OPEN` stand in for the window raise
 (§Views and the terminal). `SHAPE_LINK` is the only
 variable Shape now WRITES for a harness — `mgr config env` carries it into the builders the
@@ -321,9 +322,15 @@ and `HEAD`. A current graph at the current head launches nothing. The room expos
   graph.
 - The run creates an unfocused Shape-owned tab and starts OMP with the fixed read-only
   invocation: `-p --no-session --no-extensions --mode=text --approval-mode=yolo
-  --tools=read,glob,grep,canvas -e <Shape extension> <prompt>`. No other harness, tool,
-  extension, focus action or interactive terminal is allowed. The job id travels on its
-  `canvas_call` writes, so ordinary sessions cannot satisfy this run accidentally.
+  --tools=read,glob,grep,canvas -e <Shape extension> @<staged prompt file>`. No other harness,
+  tool, extension, focus action or interactive terminal is allowed. The job id travels on its
+  `canvas_call` writes, so ordinary sessions cannot satisfy this run accidentally. The prompt is
+  composed prose, and herdr refuses any agent argument it cannot encode for the target shell
+  (`invalid_agent_argument` — a newline is such a character), so the prompt is written to a
+  temporary file outside the project and reaches OMP as the `@` message argument it inlines; the
+  file is removed when the run is over either way. OMP inlines a text file up to its own size
+  ceiling and leaves the contents out above it, which surfaces as a run that persists nothing
+  (a visible `failed` state), never as a run against the wrong prompt.
 - Completion is accepted only when the matching job has exited successfully and its canvas
   writes are persisted against the pinned head. The room then records `idle`; a changed head,
   missing matching writes or any launch/canvas/persistence failure leaves the state visible

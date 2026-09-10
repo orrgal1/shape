@@ -48,6 +48,9 @@ jobs:
       - name: bridge end-to-end smoke
         run: pnpm --filter @shape/bridge smoke
 
+      - name: watched-project smoke
+        run: pnpm --filter @shape/bridge smoke:watched-project
+
       - name: link omp extension selftest
         run: pnpm --filter @shape/link selftest:omp
 

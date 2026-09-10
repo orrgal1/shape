@@ -34,13 +34,16 @@
  *   gone quiet      — that agent's tab closes and nobody says so: the next
  *                     scan sees the whole machine, so the project it no longer
  *                     mentions drops to no live sessions and stays active
+ *   sync            — a paragraph-separated prompt crosses herdr's shell-safe
+ *                     agent boundary by @ file and reaches one read-only OMP
+ *                     run intact
  *
- * Shape OPENS nothing in herdr any more (#28): the manager is a tab the user
- * (or a previous Shape) started, so the fake here hosts one BEFORE the bridge
- * comes up, in a workspace named after the project, with an agent in the
- * project's main checkout and no link of its own — the user's own session, seen
- * in herdr and nowhere else. `smoke-manager.mjs` drives the same pass against
- * the real herdr on this machine.
+ * Outside that dedicated synchronization, Shape opens nothing in herdr (#28):
+ * the manager is a tab the user (or a previous Shape) started, so the fake
+ * here hosts one BEFORE the bridge comes up, in a workspace named after the
+ * project, with an agent in its main checkout and no link of its own — the
+ * user's own session, seen in herdr and nowhere else. `smoke-manager.mjs`
+ * drives the same pass against the real herdr on this machine.
  *
  * Not in CI (it models a terminal): run it locally, against the fake by
  * default. Usage (from packages/bridge): node scripts/smoke-herdr.mjs
@@ -52,9 +55,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 
-import { parsePsRows, terminalAppOf } from "../src/agent/launcher/herdr.ts";
+import { HerdrLauncher, SYNC_TAB_LABEL, parsePsRows, terminalAppOf } from "../src/agent/launcher/herdr.ts";
 
 const PORT = Number(process.env.SMOKE_HERDR_PORT ?? 4415);
 
@@ -100,10 +103,19 @@ const calls = (method) => jsonl(herdrLog).filter((f) => f.type === "__call" && f
  * The same, minus this smoke's own calls. The smoke plays the user's terminal
  * here — it creates the workspaces, tabs and agents that a manager or a person
  * would — and its request ids all start with `smoke-`, so what is left is
- * exactly what the BRIDGE asked herdr for. Shape opens nothing, and this is
- * how a run says so.
+ * exactly what the BRIDGE asked herdr for.
  */
 const bridgeCalls = (method) => calls(method).filter((f) => !String(f.id).startsWith("smoke-"));
+
+/** Manager discovery is find-only; the separately authorized sync is not. */
+const nonSyncBridgeCalls = (method) =>
+  bridgeCalls(method).filter(
+    (call) =>
+      !(
+        (method === "tab.create" && call.params.label === SYNC_TAB_LABEL) ||
+        (method === "agent.start" && call.params.name === SYNC_TAB_LABEL)
+      ),
+  );
 
 let callSeq = 0;
 
@@ -162,6 +174,12 @@ const herdrLog = join(fakeHome, "fake-herdr.log");
 await seedTarget(target);
 await writeFile(join(stranger, "README.md"), "# a repo nobody told Shape about\n");
 commitAll(stranger);
+const syncRepo = join(fakeHome, "sync-repo");
+const syncExtension = join(fakeHome, "sync-extension.mjs");
+await mkdir(syncRepo, { recursive: true });
+await writeFile(join(syncRepo, "README.md"), "# a scratch repo for the sync launch\n");
+await writeFile(syncExtension, "export default {};\n");
+commitAll(syncRepo);
 /** the variation a builder works in: its own worktree, as the manager makes one */
 const worktree = join(tmpdir(), `vh-herdr-wt-${process.pid}`);
 execFileSync("git", ["worktree", "add", "-q", "-b", "variation", worktree], { cwd: target, stdio: "ignore" });
@@ -174,6 +192,7 @@ const frames = [];
 let herdr = null;
 let bridge = null;
 let socket = null;
+let syncLink = null;
 
 /**
  * A browser watching the canvas. The scan runs only while one is connected, so
@@ -312,9 +331,11 @@ try {
   );
   check("and the project says it has one", hello.projects[0]?.manager === true, String(hello.projects[0]?.manager));
   check(
-    "nothing was opened to get it: Shape created no tab, started no agent and typed nothing",
-    bridgeCalls("tab.create").length === 0 && bridgeCalls("agent.start").length === 0 && bridgeCalls("agent.prompt").length === 0,
-    `${bridgeCalls("tab.create").length} tab.create, ${bridgeCalls("agent.start").length} agent.start, ${bridgeCalls("agent.prompt").length} agent.prompt`,
+    "nothing was opened to get the manager: no tab, agent or typed prompt",
+    nonSyncBridgeCalls("tab.create").length === 0 &&
+      nonSyncBridgeCalls("agent.start").length === 0 &&
+      bridgeCalls("agent.prompt").length === 0,
+    `${nonSyncBridgeCalls("tab.create").length} other tab.create, ${nonSyncBridgeCalls("agent.start").length} other agent.start, ${bridgeCalls("agent.prompt").length} agent.prompt`,
   );
 
   // --- a builder in a tab of its own, the way the manager launches one -------
@@ -482,9 +503,11 @@ try {
     JSON.stringify(listed.projects.map((p) => `${p.label}:${p.status}`)),
   );
   check(
-    "and discovering it opened nothing in the user's terminal either",
-    bridgeCalls("tab.create").length === 0 && bridgeCalls("agent.start").length === 0 && bridgeCalls("agent.prompt").length === 0,
-    `${bridgeCalls("tab.create").length} tab.create, ${bridgeCalls("agent.start").length} agent.start, ${bridgeCalls("agent.prompt").length} agent.prompt`,
+    "and every session Shape opened was its dedicated sync, never manager discovery",
+    nonSyncBridgeCalls("tab.create").length === 0 &&
+      nonSyncBridgeCalls("agent.start").length === 0 &&
+      bridgeCalls("agent.prompt").length === 0,
+    `${nonSyncBridgeCalls("tab.create").length} other tab.create, ${nonSyncBridgeCalls("agent.start").length} other agent.start, ${bridgeCalls("agent.prompt").length} agent.prompt`,
   );
 
   // A project no workspace of the user's belongs to has no manager, and the
@@ -523,12 +546,83 @@ try {
     quiet.projects.find((p) => p.cwd === wtMain)?.liveSessions === 1,
     JSON.stringify(quiet.projects.find((p) => p.cwd === wtMain)),
   );
+
+  // --- the one Shape-owned launch -------------------------------------------
+  // The synchronization prompt is paragraph prose. Real herdr refuses a raw
+  // newline in any agent argument, so the launcher has to hand OMP an @ file;
+  // an inert loopback websocket gives the fake a link that can touch no canvas.
+  syncLink = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise((resolve, reject) => {
+    syncLink.once("listening", resolve);
+    syncLink.once("error", reject);
+  });
+  const syncAddress = syncLink.address();
+  if (syncAddress === null || typeof syncAddress === "string") throw new Error("sync link did not bind a TCP port");
+  const syncPrompt = ["Read this scratch repository without changing it.", "Report the packages and their responsibilities."].join("\n\n");
+  process.env.HERDR_SOCKET_PATH = socketPath;
+  process.env.SHAPE_TERMINAL_APP = "/tmp/FakeTerminal.app";
+  const syncLauncher = await HerdrLauncher.probe();
+  if (syncLauncher === null) throw new Error("the sync launcher did not find fake herdr");
+  const syncStartsAt = calls("agent.start").length;
+  let syncError = null;
+  try {
+    await syncLauncher.sync(
+      { path: realpathSync(syncRepo), label: "sync scratch" },
+      {
+        cwd: realpathSync(syncRepo),
+        link: `ws://127.0.0.1:${String(syncAddress.port)}`,
+        extension: syncExtension,
+        prompt: syncPrompt,
+        timeoutMs: 5_000,
+      },
+    );
+  } catch (err) {
+    syncError = err;
+  }
+  check(
+    "a read-only sync with a multi-line prompt runs to completion",
+    syncError === null,
+    syncError instanceof Error ? syncError.message : String(syncError ?? ""),
+  );
+  const syncStart = calls("agent.start").slice(syncStartsAt)[0];
+  const syncArgs = Array.isArray(syncStart?.params?.args) ? syncStart.params.args : [];
+  const expectedSyncArgs = [
+    "-p",
+    "--no-session",
+    "--no-extensions",
+    "--mode=text",
+    "--approval-mode=yolo",
+    "--tools=read,glob,grep,canvas",
+    "-e",
+    syncExtension,
+  ];
+  check(
+    "the sync agent gets the fixed read-only invocation and no shell-unsafe newline",
+    syncArgs.length === expectedSyncArgs.length + 1 &&
+      expectedSyncArgs.every((arg, i) => syncArgs[i] === arg) &&
+      typeof syncArgs.at(-1) === "string" &&
+      syncArgs.at(-1).startsWith("@") &&
+      syncArgs.every((arg) => !arg.includes("\n") && !arg.includes("\r")),
+    JSON.stringify(syncArgs),
+  );
+  const syncAgentStart = jsonl(join(syncRepo, "fake-omp.log")).find((entry) => entry.type === "__start");
+  const promptPath = typeof syncArgs.at(-1) === "string" ? syncArgs.at(-1).slice(1) : "";
+  check(
+    "OMP expands the @ argument and receives the multi-line prompt intact",
+    syncAgentStart?.argv?.at(-1) === syncArgs.at(-1) &&
+      syncAgentStart?.message === `<file name="${promptPath}">\n${syncPrompt}\n</file>\n`,
+    JSON.stringify(syncAgentStart ?? null),
+  );
 } catch (err) {
   check("the herdr smoke ran to completion", false, err instanceof Error ? err.message : String(err));
 } finally {
   socket?.close();
   bridge?.kill("SIGKILL");
   herdr?.kill("SIGKILL");
+  if (syncLink !== null) {
+    for (const client of syncLink.clients) client.terminate();
+    await new Promise((resolve) => syncLink.close(resolve));
+  }
   await sleep(150);
   try {
     execFileSync("git", ["worktree", "remove", "--force", worktree], { cwd: target, stdio: "ignore" });

@@ -76,6 +76,8 @@ export interface AgentFleetOptions {
   registry: FleetRegistry | null;
   /** a fresh agent link for one runtime; the server end is the caller's business */
   link: () => AgentEnd;
+  /** `mgr` executable override for hermetic smoke processes */
+  mgr?: string;
 }
 
 interface RuntimeProject {
@@ -90,6 +92,7 @@ export class AgentFleet {
   readonly #seeds: readonly string[];
   readonly #registry: FleetRegistry | null;
   readonly #newLink: () => AgentEnd;
+  readonly #mgr: string | undefined;
 
   /** one PATH, one machine: detected once and handed to every runtime */
   #tools: DetectedTools = { launchers: [], harnesses: [] };
@@ -132,6 +135,7 @@ export class AgentFleet {
     this.#seeds = opts.seeds;
     this.#registry = opts.registry;
     this.#newLink = opts.link;
+    this.#mgr = opts.mgr;
   }
 
   /**
@@ -270,6 +274,7 @@ export class AgentFleet {
       tools: this.#tools,
       launcher: this.#launcher,
       catchUps: this.#catchUps,
+      ...(this.#mgr === undefined ? {} : { mgr: this.#mgr }),
       observationOnly,
       watcherKey,
       onWatchProject: (project: WatchedProjectCandidate) =>

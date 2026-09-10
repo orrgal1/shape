@@ -36,9 +36,10 @@
  */
 
 import { execFile } from "node:child_process";
-import { realpath } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { realpath, rm, writeFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve as resolvePath } from "node:path";
 
 /** the protocol version this client was written against (herdr 0.8.x) */
@@ -112,6 +113,11 @@ function requiredId(value: unknown, kind: string): string {
   return id;
 }
 
+
+function abortReason(signal: AbortSignal): unknown {
+  // an AbortController without an explicit reason still says why it aborted
+  return signal.reason ?? new Error("herdr sync aborted");
+}
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw abortReason(signal);
@@ -621,6 +627,13 @@ export class HerdrLauncher {
         ? opts.timeoutMs
         : SYNC_TIMEOUT_MS;
     const env = { SHAPE_LINK: opts.link };
+    // herdr encodes every agent argument for the target shell and refuses the
+    // ones it cannot (`invalid_agent_argument` on 0.8.0). A newline is one such
+    // character, and the synchronization prompt is prose, so the prompt travels
+    // as a file omp inlines from an `@` message argument: only the path has to
+    // be encodable, and the prompt reaches the agent as that file's contents
+    // (omp leaves contents out above its own 5 MiB inline ceiling).
+    const promptFile = join(tmpdir(), `shape-sync-${randomUUID()}.md`);
     const args = [
       "-p",
       "--no-session",
@@ -630,12 +643,19 @@ export class HerdrLauncher {
       "--tools=read,glob,grep,canvas",
       "-e",
       opts.extension,
-      opts.prompt,
+      `@${promptFile}`,
     ];
 
     let tabId: string | null = null;
     let paneId: string | null = null;
     try {
+      // inside the try that removes it: a write that fails part-way still
+      // leaves the file behind, and nothing else would ever clean that up
+      try {
+        await writeFile(promptFile, opts.prompt, "utf8");
+      } catch (err) {
+        throw new Error(`could not stage the synchronization prompt: ${err instanceof Error ? err.message : String(err)}`);
+      }
       throwIfAborted(opts.signal);
       const existingWorkspace = await this.workspaceOf(project);
       if (existingWorkspace !== null) {
@@ -696,6 +716,8 @@ export class HerdrLauncher {
       }
       await this.#waitForExit(launchedPaneId, timeoutMs, opts.signal);
     } finally {
+      // a leaked temp file is not a reason to fail a synchronization over
+      await rm(promptFile, { force: true }).catch(() => {});
       if (tabId !== null) {
         try {
           await this.closeTab(tabId);

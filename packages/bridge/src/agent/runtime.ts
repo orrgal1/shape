@@ -100,6 +100,8 @@ export interface AgentRuntimeOptions {
   tools: DetectedTools;
   launcher: HerdrLauncher | null;
   catchUps: CatchUpQueue;
+  /** `mgr` executable override for hermetic smoke processes */
+  mgr?: string;
   /** picker-created runtimes observe only: no manager, prompt, injection or terminal focus */
   observationOnly: boolean;
   /** project key of the runtime that selected this project */
@@ -177,6 +179,7 @@ export class AgentRuntime {
    */
   readonly #launcher: HerdrLauncher | null;
   readonly #catchUps: CatchUpQueue;
+  readonly #mgr: string | undefined;
   readonly #syncJobs = new Set<string>();
   /**
    * The panes the whole process has briefed, shared with every other runtime
@@ -250,6 +253,7 @@ export class AgentRuntime {
     this.#onWatchProject = opts.onWatchProject;
     this.#launcher = opts.launcher;
     this.#catchUps = opts.catchUps;
+    this.#mgr = opts.mgr;
     this.#isLinked = opts.isLinked;
     this.#briefed = opts.briefed;
     this.#onExit = opts.onExit;
@@ -397,6 +401,7 @@ export class AgentRuntime {
     this.#manager = await attachManager({ path: this.#projectCwd, label: basename(this.#projectCwd) }, this.#launcher, {
       linkUrl: this.#sockets.url(LINK_WS_PATH),
       directivePath: this.#directivePath,
+      ...(this.#mgr === undefined ? {} : { mgr: this.#mgr }),
       isLinked: this.#isLinked,
     });
   }
@@ -440,6 +445,7 @@ export class AgentRuntime {
         linkUrl: this.#sockets.url(LINK_WS_PATH),
         directivePath: this.#directivePath,
         isLinked: this.#isLinked,
+        ...(this.#mgr === undefined ? {} : { mgr: this.#mgr }),
       },
       this.#briefed,
     );

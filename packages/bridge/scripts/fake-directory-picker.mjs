@@ -15,7 +15,9 @@ if (
   typeof choice.hang === "string"
 ) {
   await appendFile(choice.hang, "started\n");
+  const keep = setInterval(() => {}, 1_000);
   process.on("SIGTERM", () => {
+    clearInterval(keep);
     void appendFile(choice.hang, "terminated\n").finally(() => process.exit(0));
   });
   await new Promise(() => {});
