@@ -307,6 +307,7 @@ function mockPickedProject(): ProjectSummary {
     status: "active",
     liveSessions: 0,
     manager: false,
+    catchUp: { state: "idle", at: Date.now() },
     caughtUp: true,
     injected: 0,
     lastSeen: new Date().toISOString(),
@@ -341,6 +342,7 @@ function mockProjects(): ProjectSummary[] {
       status: "active",
       liveSessions: 2,
       manager: false,
+      catchUp: { state: "idle", at: Date.now() - MINUTE_MS },
       caughtUp: true,
       injected: 2,
       lastSeen: new Date(Date.now() - MINUTE_MS).toISOString(),
@@ -352,6 +354,7 @@ function mockProjects(): ProjectSummary[] {
       status: "active",
       liveSessions: 1,
       manager: true,
+      catchUp: { state: "failed", reason: "mock synchronization failed", at: Date.now() - 10 * MINUTE_MS },
       caughtUp: false,
       injected: 0,
       lastSeen: new Date(Date.now() - 12 * MINUTE_MS).toISOString(),
@@ -363,6 +366,7 @@ function mockProjects(): ProjectSummary[] {
       status: "inactive",
       liveSessions: 0,
       manager: false,
+      catchUp: { state: "idle", at: Date.now() - 180 * MINUTE_MS },
       caughtUp: true,
       injected: 1,
       lastSeen: new Date(Date.now() - 180 * MINUTE_MS).toISOString(),
@@ -924,6 +928,13 @@ function mockAgents(state: AgentState): Record<string, AgentState> {
   return { [MOCK_MAIN]: state, [MOCK_SPIKE]: state };
 }
 
+function mockCatchUps() {
+  return {
+    [MOCK_MAIN]: { state: "idle" as const, at: 0 },
+    [MOCK_SPIKE]: { state: "idle" as const, at: 0 },
+  };
+}
+
 export function startMock(): () => void {
   const store = useApp.getState();
   if (isPlaygroundMock()) return startPlaygroundMock();
@@ -935,6 +946,7 @@ export function startMock(): () => void {
       graphs: { [MOCK_MAIN]: unmappedGraph() },
       session: mockSession(true),
       agents: mockAgents("idle"),
+      catchUps: mockCatchUps(),
       projects: mockRegistry.map((entry) => ({ ...entry })),
       projectId: MOCK_PROJECT_ID,
       revisions: {},
@@ -951,6 +963,7 @@ export function startMock(): () => void {
       graphs: { [MOCK_MAIN]: trioGraph() },
       session: mockSession(true),
       agents: mockAgents("idle"),
+      catchUps: mockCatchUps(),
       projects: mockRegistry.map((entry) => ({ ...entry })),
       projectId: MOCK_PROJECT_ID,
       revisions: { [MOCK_MAIN]: mockRevisions(7) },
@@ -966,6 +979,7 @@ export function startMock(): () => void {
     graphs: mockGraphs(),
     session: mockSession(false),
     agents: mockAgents("streaming"),
+    catchUps: mockCatchUps(),
     projects: mockRegistry.map((entry) => ({ ...entry })),
     projectId: MOCK_PROJECT_ID,
     revisions: { [MOCK_MAIN]: mockRevisions(41), [MOCK_SPIKE]: mockRevisions(44) },
@@ -1037,6 +1051,7 @@ export function mockSend(msg: ClientMsg): void {
         graphs: { [MOCK_PICKED_MAIN]: emptyGraph() },
         session: mockPickedSession(),
         agents: { [MOCK_PICKED_MAIN]: "idle" },
+        catchUps: { [MOCK_PICKED_MAIN]: { state: "idle", at: Date.now() } },
         projects: mockRegistry.map((entry) => ({ ...entry })),
         projectId: MOCK_PICKED_PROJECT_ID,
         revisions: {},

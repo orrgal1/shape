@@ -28,6 +28,7 @@ import type { WatchedProjectCandidate, WorktreeInfo } from "../../../shared/src/
 import type { ActiveProject, SeenRepo } from "../server/server.ts";
 import type { AgentEnd } from "../transport.ts";
 import type { SocketServer } from "../wsserver.ts";
+import { CatchUpQueue } from "./catchup.ts";
 import { detectTools, type DetectedTools } from "./detect.ts";
 import type { LinkTarget } from "./external.ts";
 import type { HerdrLauncher } from "./launcher/herdr.ts";
@@ -94,6 +95,7 @@ export class AgentFleet {
   #tools: DetectedTools = { launchers: [], harnesses: [] };
   #launcher: HerdrLauncher | null = null;
   #loopback: LoopbackLink | null = null;
+  readonly #catchUps = new CatchUpQueue();
 
   /** the live runtimes, keyed by their repo's main worktree */
   readonly #runtimes = new Map<string, AgentRuntime>();
@@ -147,7 +149,10 @@ export class AgentFleet {
     console.error(
       `[bridge] terminal: ${this.#launcher === null ? "none" : "herdr"}; harnesses here: ${this.#tools.harnesses.map((tool) => tool.id).join(", ") || "none"}`,
     );
-    this.#loopback = mountLoopbackLink(this.#sockets, { route: (cwd) => this.#route(cwd) });
+    this.#loopback = mountLoopbackLink(this.#sockets, {
+      route: (cwd) => this.#route(cwd),
+      jobCanvas: (job, cwd, args) => this.#catchUps.canvas(job, cwd, args),
+    });
     await this.#scan();
     const registry = this.#registry;
     const wanted: RuntimeProject[] =
@@ -186,6 +191,7 @@ export class AgentFleet {
 
   async stop(): Promise<void> {
     this.#stopped = true;
+    this.#catchUps.stop();
     if (this.#timer !== null) {
       clearInterval(this.#timer);
       this.#timer = null;
@@ -262,7 +268,8 @@ export class AgentFleet {
       sockets: this.#sockets,
       link: this.#newLink(),
       tools: this.#tools,
-      launcher: observationOnly ? null : this.#launcher,
+      launcher: this.#launcher,
+      catchUps: this.#catchUps,
       observationOnly,
       watcherKey,
       onWatchProject: (project: WatchedProjectCandidate) =>

@@ -1580,6 +1580,14 @@ export interface SessionInfo {
   manager: ManagerHandle | null;
 }
 
+/** Runtime state of Shape's explicit synchronization job for one worktree. */
+export interface CatchUpState {
+  state: "idle" | "queued" | "running" | "failed";
+  reason?: string;
+  /** epoch milliseconds when this state was entered */
+  at: number;
+}
+
 export type ProjectStatus = "active" | "inactive";
 
 /** one project the server knows, for the switcher — every status, not only the ones with rooms */
@@ -1593,7 +1601,9 @@ export interface ProjectSummary {
   liveSessions: number;
   /** a manager session was found in the project's herdr workspace */
   manager: boolean;
-  /** false while the bridge still owes this project a catch-up (#29 wires the real signal) */
+  /** aggregate synchronization state across the project's worktrees */
+  catchUp: CatchUpState;
+  /** compatibility projection: true iff `catchUp.state` is `"idle"` */
   caughtUp: boolean;
   /**
    * How many of this project's sessions the bridge has briefed with the Shape
@@ -1621,6 +1631,8 @@ export type ServerMsg =
       session: SessionInfo;
       /** what each worktree's harness is doing; a worktree with no session has no entry */
       agents: Record<string, AgentState>;
+      /** synchronization state for every worktree, including idle worktrees */
+      catchUps: Record<string, CatchUpState>;
       /** every project of this tenant, both statuses; local mode has one tenant */
       projects: ProjectSummary[];
       /** the project this socket is joined to */
@@ -1634,6 +1646,8 @@ export type ServerMsg =
   | { type: "watched_project_add_cancelled" }
   | { type: "graph"; worktree: string; graph: GraphDoc }
   | { type: "agent"; worktree: string; state: AgentState }
+  /** one worktree's synchronization state changed */
+  | { type: "catch_up"; worktree: string; catchUp: CatchUpState }
   /** session facts changed without any graph changing (agent attached/detached, worktrees appeared) — no client state reset */
   | { type: "session"; session: SessionInfo }
   /** a harness started reporting in from `worktree` */

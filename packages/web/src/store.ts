@@ -5,6 +5,7 @@ import {
   type AgentSession,
   type AgentState,
   type BackendInfo,
+  type CatchUpState,
   type GraphDelta,
   type GraphDoc,
   type Layer,
@@ -222,6 +223,8 @@ export interface AppState {
   worktreeIds: readonly string[];
   /** what each variation's harness is doing; a variation with no harness is idle */
   agents: Record<string, AgentState>;
+  /** synchronization state for each worktree */
+  catchUps: Record<string, CatchUpState>;
   /** intent node ids each variation is working inside right now */
   activity: Record<string, ReadonlySet<string>>;
   /** the union over the filtered variations: what the canvas lights */
@@ -572,6 +575,7 @@ export const useApp = create<AppState>((set, get) => ({
   tools: null,
   worktreeIds: [],
   agents: {},
+  catchUps: {},
   activity: {},
   activeNodes: NO_ACTIVE,
   activeAt: {},
@@ -635,6 +639,7 @@ export const useApp = create<AppState>((set, get) => ({
           watchedProjectAddError: null,
           revisions: msg.revisions,
           agents: msg.agents,
+          catchUps: msg.catchUps,
           filter,
           target: null,
           conn: "live",
@@ -693,6 +698,9 @@ export const useApp = create<AppState>((set, get) => ({
       }
       case "agent":
         set((s) => ({ agents: { ...s.agents, [msg.worktree]: msg.state } }));
+        return;
+      case "catch_up":
+        set((s) => ({ catchUps: { ...s.catchUps, [msg.worktree]: msg.catchUp } }));
         return;
       case "activity": {
         set((s) => {

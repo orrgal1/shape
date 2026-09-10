@@ -118,6 +118,7 @@ const summarize = (project) => ({
   status: project.status,
   liveSessions: project.liveSessions,
   manager: project.manager,
+  catchUp: project.catchUp,
   caughtUp: project.caughtUp,
 });
 

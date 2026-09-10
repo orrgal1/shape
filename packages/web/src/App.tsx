@@ -165,6 +165,31 @@ function ProjectSwitcher() {
     return entry.liveSessions === 1 ? "1 live session" : `${entry.liveSessions} live sessions`;
   };
 
+  const catchUpMark = (entry: ProjectSummary) => {
+    switch (entry.catchUp.state) {
+      case "idle":
+        return null;
+      case "queued":
+        return (
+          <span className="project-mark project-behind" title={entry.catchUp.reason}>
+            sync queued
+          </span>
+        );
+      case "running":
+        return (
+          <span className="project-mark project-behind" title={entry.catchUp.reason}>
+            syncing…
+          </span>
+        );
+      case "failed":
+        return (
+          <span className="project-mark project-behind" title={entry.catchUp.reason ?? "synchronization failed"}>
+            sync failed
+          </span>
+        );
+    }
+  };
+
   /**
    * Arrows walk the rows, the way every other menu on this screen is walked;
    * Enter is the focused row's own click. The handler sits on the whole
@@ -227,7 +252,7 @@ function ProjectSwitcher() {
                         {liveOf(entry)}
                       </span>
                       {entry.manager ? <span className="project-mark">manager</span> : null}
-                      {entry.caughtUp ? null : <span className="project-mark project-behind">catching up…</span>}
+                      {catchUpMark(entry)}
                     </span>
                   </button>
                   <button

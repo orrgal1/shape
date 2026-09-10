@@ -3,11 +3,19 @@
 Settled 2026-08-28. `packages/shared/src/index.ts` is the machine-readable form of this
 document; when they disagree, the TS file wins.
 
-**Read-only since 2026-09-05.** Shape shows; it does not drive. The browser cannot instruct,
-start, stop or type into a coding agent, and the bridge never launches a harness or sends one
-a prompt. The one filesystem-facing browser action added by #33 asks the connected local
+**Read-only since 2026-09-05, with one narrow #35 exception.** Shape shows; it does not
+drive ordinary sessions. The browser cannot instruct, start, stop, prompt or focus an ordinary
+coding agent, and the bridge never launches a general harness or sends a prompt to an observed
+session. Its existing terminal action only reveals a session that is already running; it is not
+agent control. The one filesystem-facing browser action added by #33 asks the connected local
 Shape agent to show a native directory chooser and register the selected existing Git repo for
 observation; it does not address a harness.
+For a newly watched or reactivated repo whose graph is missing, or whose surveyed head differs
+from the current extracted reality/`HEAD`, #35 may expose catch-up state and run exactly one
+dedicated OMP synchronization through herdr in the selected project workspace. That run is
+unfocused, uses Shape's extension and only `read`, `glob`, `grep` and `canvas`; it is not a
+general launcher. A current graph launches nothing, and a graph is caught up only after the
+matching job's canvas writes are persisted at the pinned head. Failures remain visible.
 
 **Projects are a registry, with one explicit add path since #33.** A project exists because a
 session reported in from its repo or because the operator selected an existing Git repo with
@@ -41,12 +49,13 @@ ACTIVE project.
 The two halves meet ONLY in `shared/src/link.ts` and `index.ts`; `server/` never imports
 `agent/`.
 
-- Sessions are OBSERVED, never started. A harness that dials the loopback link — the omp
-  extension inside omp, the link's MCP server or hook beside Claude Code, the link CLI from
+- Ordinary sessions are OBSERVED, never started. A harness that dials the loopback link — the
+  omp extension inside omp, the link's MCP server or hook beside Claude Code, the link CLI from
   anything else — becomes the session of the worktree its `cwd` resolves to, and the agent
   registers it the first time it speaks (§Sessions are observed). One session per worktree; a
   worktree with nothing running is a normal state and the canvas says so rather than offering
-  to fix it.
+  to fix it. The dedicated #35 synchronization run is the sole narrow exception: its own OMP
+  session is started by herdr only when catch-up is owed.
 - The harness writes to the canvas through the loopback link and the agent forwards
   `canvas_call { id, args }` to the server, which validates + applies to the graph store,
   answers `canvas_result`, and broadcasts the new graph to browsers. That is the only path
@@ -54,8 +63,9 @@ The two halves meet ONLY in `shared/src/link.ts` and `index.ts`; `server/` never
 - What the agent is expected to write onto the canvas is carried by the session's own
   integration — `CANVAS_TOOL_DESCRIPTION` on the tool it registers, and the per-project
   directive file the agent writes on every project open
-  (`packages/bridge/src/agent/directive.ts`) for a session started by hand. The server hands
-  out no preamble and composes no prompt.
+  (`packages/bridge/src/agent/directive.ts`) for an ordinary session started by hand. The
+  server hands out no preamble and composes no prompt for observed sessions; the dedicated
+  catch-up run has its own fixed prompt and extension (§Catch-up synchronization).
 - Projects usually arrive from observed sessions. In addition, a browser already joined to a
   capable local agent may send `add_watched_project`; that same agent shows the directory
   chooser and returns validated repo identity facts without retargeting its current runtime.
@@ -70,16 +80,21 @@ The two halves meet ONLY in `shared/src/link.ts` and `index.ts`; `server/` never
 - Going to the terminal: `focus_terminal { worktree }` server → agent → the herdr agent whose
   cwd is that worktree is focused and its terminal window raised (§Views and the terminal). No
   herdr, no terminal: the session reports `terminal: "none"` and the browser offers nothing.
-- The one thing left behind a seam is herdr (§Sessions are observed): nothing above it knows
-  herdr's socket, and nothing anywhere knows how to start a harness, because nothing does.
+  The one seam left behind is herdr (§Sessions are observed): nothing above it knows herdr's
+  socket. General harness startup remains absent; only the dedicated #35 synchronization API
+  may start its one OMP run, and it must not focus the run.
 
 ## Sessions are observed (2026-09-05, issue #26)
 
-Shape does not run coding agents; it watches them. There is no `Backend` seam, no adapter per
-harness, no `Launcher.launch`, no pty and no per-project harness choice —
+Shape does not run ordinary coding agents; it watches them. The dedicated #35 synchronization
+run is not an adoption or a general agent backend: it is one bounded OMP session used only to
+bring a newly watched or reactivated project's graph up to a pinned code head. There is no
+`Backend` seam, no adapter per harness, no general `Launcher.launch`, no pty and no
+per-project harness choice —
 `agent/backend/`, `agent/launcher/pty.ts`, `agent/pty.ts`, `agent/newproject.ts`,
 `shared/src/pty.ts` and the `--backend` / `--omp` / `--allow-terminal` flags are deleted.
-Three parts are left: what is installed, what is running, and how to get to a terminal.
+Three parts are left for ordinary observation: what is installed, what is running, and how to
+get to a terminal.
 
 **Detection** — `packages/bridge/src/agent/detect.ts`. `detectTools()` walks PATH in process
 (no `which` subprocess) for the launcher (`herdr`) and every harness Shape knows by name —
@@ -146,13 +161,14 @@ follows as the end of the exchange; a close BEFORE the answer is the failure. Th
 asserts `session.snapshot`'s `protocol` is 19 and otherwise logs and refuses rather than
 guessing at a protocol it does not know. `herdr status` is shelled out once first to autospawn
 the server — skipped when `HERDR_SOCKET_PATH` is set, because an operator or a test who named
-a socket owns what is listening on it. What is left of the client is what a read-only Shape
-needs: probe/connect, `workspaceOf` (the project's workspace by cached id, then by
+What is left of the client is what read-only observation and the dedicated catch-up path need:
+probe/connect, `workspaceOf` (the project's workspace by cached id, then by
 `worktree.repo_root` / `checkout_path`, then by label), `tabs()`, `agents()` (also the
-discovery scan's source of truth — §Projects and status), `closeTab`, focus-by-cwd for
-`focus_terminal`, `dispose`, and — since #5 — `prompt(paneId, text)` again, which is
+discovery scan's source of truth — §Projects and status), `closeTab`, focus-by-cwd for the
+existing terminal view, `dispose`, and — since #5 — `prompt(paneId, text)` again, which is
 `agent.prompt { target, text }`: injection writes the directive into panes Shape never opened,
-so it needs a way to speak to a pane without owning it (§Injection). `launch()`, `Launched`,
+so it needs a way to speak to a pane without owning it (§Injection). Since #35, `sync()` is
+the separate, fixed OMP catch-up operation described below. General `launch()`, `Launched`,
 `type`, `interrupt`, `kill`, the pty fallback and `open` (which existed for the manager tab
 Shape no longer opens — §`SessionInfo.manager`) are gone.
 `SHAPE_LAUNCHER` is no longer a choice between two launchers:
@@ -182,8 +198,10 @@ discovery scan, and `statusChangedAt` is the ISO time the status was last set. T
 sees the row as `ProjectSummary { projectId, label, cwd (the main worktree), status,
 liveSessions, manager, caughtUp, injected, lastSeen }`. It may switch between active rows,
 change a row's status, or add one existing Git repo through the connected local agent's
-directory chooser. There are still no project-creation, session-adoption or harness-launch
-frames.
+directory chooser. The browser receives catch-up state, not a harness-launch control: there
+are still no project-creation, session-adoption or general harness-launch frames. The
+dedicated catch-up request is an internal agent-side exception and cannot be selected as a
+general browser action.
 
 **A new row is ACTIVE** — operator decision, 2026-09-05. A repo somebody is working in is a
 repo they want to see, and a Shape that greeted a first session with a project it had decided
@@ -273,13 +291,48 @@ registry, opening a room for each active one:
 - `select_project` is accepted for an ACTIVE project only: inactive is `error` "project <id>
   is inactive", unknown is `error` "unknown project <id>".
 
-One `ProjectSummary` field is still a placeholder wired by another issue, on the wire now so
-the switcher's copy does not have to move later: `caughtUp` is true unless the room still owes
-a worktree its automatic map, and [#29](https://github.com/orrgal1/shape/issues/29) replaces
-it with the real catch-up signal. `injected` is real since #5: it is
+The project summary exposes catch-up rather than a guessed boolean. `catchUp` is the aggregate
+`CatchUpState` for the project's worktrees; each state is `idle | queued | running | failed`,
+with an optional failure `reason` and numeric `at` timestamp. `caughtUp` remains the concise
+projection and is true only when the aggregate state is `idle`. `hello` carries
+`catchUps` keyed by worktree, and `catch_up` transitions carry the worktree's state, so a
+newly watched or reactivated project can show missing/stale work and its progress. A graph is
+not caught up merely because a job was queued or finished: the matching job's canvas
+persistence must be recorded at the pinned `HEAD`; failures stay `failed` and visible.
+`injected` is real since #5: it is
 `AgentProject.injected.length` — how many of the project's herdr panes this bridge process has
 briefed with the Shape directive (§Injection) — and 0 for a row with no room, because an
 inactive project has no runtime briefing anybody.
+## Catch-up synchronization (2026-09-10, issue #35)
+
+Catch-up is the only operation that lets Shape start a coding harness. It applies to a newly
+watched or reactivated repository when a worktree has no stored Shape graph, or when its stored
+survey mark is absent/stale: the surveyed head does not match the current extracted reality
+and `HEAD`. A current graph at the current head launches nothing. The room exposes one
+`CatchUpState` per worktree and an aggregate project state:
+
+- `idle` means no catch-up is owed. `queued` means the worktree is waiting for its one run;
+  `running` means that run is active; `failed` means it could not complete, with the reason
+  and timestamp retained for the browser.
+- The server pins the worktree's current `HEAD` and extracted reality before queueing. It
+  sends one correlated `catch_up { worktree, id, prompt, since }` request to the selected
+  project runtime. The runtime may start exactly one OMP process through herdr in that
+  project's selected workspace, never through a general launcher and never for a current
+  graph.
+- The run creates an unfocused Shape-owned tab and starts OMP with the fixed read-only
+  invocation: `-p --no-session --no-extensions --mode=text --approval-mode=yolo
+  --tools=read,glob,grep,canvas -e <Shape extension> <prompt>`. No other harness, tool,
+  extension, focus action or interactive terminal is allowed. The job id travels on its
+  `canvas_call` writes, so ordinary sessions cannot satisfy this run accidentally.
+- Completion is accepted only when the matching job has exited successfully and its canvas
+  writes are persisted against the pinned head. The room then records `idle`; a changed head,
+  missing matching writes or any launch/canvas/persistence failure leaves the state visible
+  as `failed` rather than claiming catch-up.
+
+This exception does not change the browser's ordinary read-only boundary. Picker registration
+still only selects an existing repository, ordinary observation sessions are never launched or
+prompted, and `focus_terminal` only reveals a terminal session that was already running; no
+browser path can launch, prompt or focus an ordinary coding agent.
 
 ## Injection (2026-09-05, issue #5)
 

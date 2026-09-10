@@ -42,6 +42,8 @@ export interface LoopbackLinkOptions {
    * knows which projects are active at all.
    */
   route: ExternalIoOptions["route"];
+  /** A job capability never reaches ExternalIo or creates an observed session. */
+  jobCanvas?: (job: string, cwd: string, args: unknown) => Promise<{ text: string; isError: boolean }>;
 }
 
 export interface LoopbackLink {
@@ -91,7 +93,8 @@ export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptio
    */
   const refused = new Set<WebSocket>();
 
-  sockets.mount(LINK_WS_PATH, (socket) => {
+  sockets.mount(LINK_WS_PATH, (socket, request) => {
+    const job = new URL(request.url ?? LINK_WS_PATH, "http://127.0.0.1").searchParams.get("job");
     clients.add(socket);
     /**
      * The cwd of the session this socket greeted for, if any. A harness that
@@ -107,6 +110,18 @@ export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptio
       const msg = parseLinkMsg(data.toString());
       if (msg === null) {
         socket.send(REFUSAL);
+        return;
+      }
+      if (job !== null) {
+        if (msg.type !== "canvas_call") {
+          socket.send(REFUSAL);
+          return;
+        }
+        const answer = opts.jobCanvas?.(job, msg.cwd, msg.args) ??
+          Promise.resolve({ text: "Shape synchronization is unavailable", isError: true });
+        void answer.then((result) => {
+          if (socket.readyState === socket.OPEN) socket.send(JSON.stringify({ type: "canvas_result", id: msg.id, ...result }));
+        });
         return;
       }
       if (msg.type === "hello") {

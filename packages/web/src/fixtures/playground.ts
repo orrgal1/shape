@@ -420,6 +420,7 @@ const PLAYGROUND_PROJECT: ProjectSummary = {
   status: "active",
   liveSessions: 2,
   manager: true,
+  catchUp: { state: "idle", at: 0 },
   caughtUp: true,
   injected: 0,
   lastSeen: "2026-02-11T09:14:00.000Z",
@@ -442,6 +443,10 @@ export function startPlaygroundMock(): () => void {
     graphs: { [PLAYGROUND_ROOT]: playgroundGraph(), [PLAYGROUND_REMINDERS]: remindersGraph() },
     session: { ...PLAYGROUND_SESSION, worktrees: PLAYGROUND_SESSION.worktrees.map((entry) => ({ ...entry })) },
     agents: { [PLAYGROUND_ROOT]: "streaming", [PLAYGROUND_REMINDERS]: "streaming" },
+    catchUps: {
+      [PLAYGROUND_ROOT]: { state: "idle", at: 0 },
+      [PLAYGROUND_REMINDERS]: { state: "idle", at: 0 },
+    },
     projects: [{ ...PLAYGROUND_PROJECT }],
     projectId: PLAYGROUND_PROJECT.projectId,
     revisions: {},

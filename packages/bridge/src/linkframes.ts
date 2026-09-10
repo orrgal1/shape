@@ -20,6 +20,7 @@ import type {
   BackendCapabilities,
   BackendInfo,
   CanvasOp,
+  CatchUpState,
   ManagerHandle,
   ProjectTools,
   RealityEdge,
@@ -57,6 +58,26 @@ function isWorktree(value: unknown): value is string {
 /** the three states a harness can report */
 function isAgentState(value: unknown): value is AgentState {
   return value === "idle" || value === "streaming" || value === "compacting";
+}
+
+function parseCatchUpState(value: unknown): CatchUpState | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const state = value as Record<string, unknown>;
+  if (
+    state.state !== "idle" &&
+    state.state !== "queued" &&
+    state.state !== "running" &&
+    state.state !== "failed"
+  ) {
+    return null;
+  }
+  if (typeof state.at !== "number" || !Number.isFinite(state.at)) return null;
+  if (state.reason !== undefined && typeof state.reason !== "string") return null;
+  return {
+    state: state.state,
+    at: state.at,
+    ...(state.reason === undefined ? {} : { reason: state.reason }),
+  };
 }
 
 /**
@@ -517,8 +538,21 @@ export function parseAgentToServerMsg(raw: string): AgentToServerMsg | null {
     }
     case "canvas_call":
       if (!isWorktree(m.worktree) || !isId(m.id)) return null;
+      if (m.job !== undefined && !isId(m.job)) return null;
       // `args` is the harness's tool payload: validated by the canvas, not here
-      return { type: "canvas_call", worktree: m.worktree, id: m.id, args: m.args };
+      return {
+        type: "canvas_call",
+        worktree: m.worktree,
+        id: m.id,
+        args: m.args,
+        ...(m.job === undefined ? {} : { job: m.job }),
+      };
+    case "catch_up_state": {
+      if (!isWorktree(m.worktree) || !isId(m.id)) return null;
+      const catchUp = parseCatchUpState(m.catchUp);
+      if (catchUp === null) return null;
+      return { type: "catch_up_state", worktree: m.worktree, id: m.id, catchUp };
+    }
     case "reality": {
       if (!isWorktree(m.worktree)) return null;
       const reality = parseReality(m.reality);
@@ -610,6 +644,10 @@ export function parseServerToAgentMsg(raw: string): ServerToAgentMsg | null {
     case "extract_reality":
       if (!isWorktree(m.worktree)) return null;
       return { type: "extract_reality", worktree: m.worktree };
+    case "catch_up":
+      if (!isWorktree(m.worktree) || !isId(m.id) || typeof m.prompt !== "string") return null;
+      if (typeof m.since !== "number" || !Number.isFinite(m.since)) return null;
+      return { type: "catch_up", worktree: m.worktree, id: m.id, prompt: m.prompt, since: m.since };
     default:
       return null;
   }

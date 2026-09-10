@@ -872,6 +872,7 @@ export class ShapeServer {
         manager: row.project.manager !== null,
         // nothing is owed a project nothing is running for
         caughtUp: true,
+        catchUp: { state: "idle", at: Date.parse(row.lastSeen) || 0 },
         // what the row remembers: an inactive project has no runtime briefing
         // anyone, so the count is whatever its last active pass left behind
         injected: row.project.injected.length,

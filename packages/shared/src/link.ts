@@ -25,6 +25,7 @@ import type {
   AgentState,
   BackendInfo,
   CanvasOp,
+  CatchUpState,
   ManagerHandle,
   ProjectTools,
   RealityLayer,
@@ -234,7 +235,16 @@ export type AgentToServerMsg =
   | { type: "session_stopped"; worktree: string; reason: string }
   | { type: "agent_event"; worktree: string; event: AgentEvent }
   /** the harness (native host tool or loopback link) wants to write to the canvas */
-  | { type: "canvas_call"; worktree: string; id: string; args: unknown }
+  | {
+      type: "canvas_call";
+      worktree: string;
+      id: string;
+      args: unknown;
+      /** identifies a Shape-owned synchronization job */
+      job?: string;
+    }
+  /** synchronization state from the job answering `catch_up` with the same id */
+  | { type: "catch_up_state"; worktree: string; id: string; catchUp: CatchUpState }
   /** re-derived reality (startup, or HEAD moved while the agent went idle); per worktree, because HEADs differ */
   | { type: "reality"; worktree: string; reality: RealityLayer; head: string | null }
   /** answers `list_worktrees`; also pushed unsolicited when the agent notices a change */
@@ -280,4 +290,6 @@ export type ServerToAgentMsg =
   /** cancel a correlated operation that no browser is waiting for any longer */
   | { type: "cancel_request"; id: string }
   | { type: "extract_reality"; worktree: string }
+  /** explicitly synchronize one worktree; `since` is epoch milliseconds */
+  | { type: "catch_up"; worktree: string; id: string; prompt: string; since: number }
   | { type: "synthesize_skeleton"; worktree: string; id: string };

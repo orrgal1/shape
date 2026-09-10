@@ -2,11 +2,12 @@
  * The herdr client: a direct client of herdr's socket API, so Shape can see
  * the user's own terminal multiplexer and show them the tab a session runs in.
  *
- * Shape starts no sessions at all, the project's manager included. What it
- * uses herdr for is twofold: looking at what is live (`workspaceOf`, `tabs`,
- * `agents`) so the project's manager tab can be recognized (`../manager.ts`)
- * and so a repo somebody is working in is discovered at all; and bringing a
- * session's tab in front of the user (`focusCwd`).
+ * Shape starts no sessions in its ordinary launcher paths; the dedicated
+ * `sync` method is the narrow exception. What it uses herdr for is twofold:
+ * looking at what is live (`workspaceOf`, `tabs`, `agents`) so the project's
+ * manager tab can be recognized (`../manager.ts`) and so a repo somebody is
+ * working in is discovered at all; and bringing a session's tab in front of
+ * the user (`focusCwd`).
  *
  * Wire (agent://HerdrMap, re-verified against the real herdr 0.8.0, protocol
  * 19): newline-delimited JSON over a unix socket, `{id, method, params}` ->
@@ -19,10 +20,10 @@
  * comes back with `id: ""`, so the first response line on a connection
  * carrying one request is that request's answer.
  *
- * A project gets ONE workspace and Shape never creates it: `workspace.list` is
- * searched for one herdr says is a checkout of the project, then for one
- * carrying its name. Nothing matching means the user has no workspace for that
- * project, which is a real answer.
+ * A project gets ONE workspace for ordinary inspection, and the find-only
+ * path never creates it: `workspace.list` is searched for one herdr says is a
+ * checkout of the project, then for one carrying its name. Nothing matching
+ * means the user has no workspace for that project, which is a real answer.
  *
  * Focusing is two steps: `agent.focus` switches the tab INSIDE herdr, but the
  * terminal application hosting it is still behind the browser, so from the
@@ -57,6 +58,18 @@ const PS_TIMEOUT_MS = 3_000;
 
 /** raising a window either happens now or the user is already elsewhere */
 const OPEN_TIMEOUT_MS = 5_000;
+/** how long a Shape-owned sync may wait for its OMP pane to exit */
+const SYNC_TIMEOUT_MS = 15 * 60_000;
+
+/** herdr's own readiness ceiling for `agent.start` */
+const SYNC_START_TIMEOUT_MS = 60_000;
+
+/** how often a sync checks whether its pane has exited */
+const SYNC_POLL_MS = 250;
+
+/** the stable tab label for the one Shape-owned synchronization run */
+export const SYNC_TAB_LABEL = "shape-sync";
+
 
 /** `ps -axo` on a busy machine runs well past node's 1 MB default */
 const PS_MAX_BUFFER = 8 * 1024 * 1024;
@@ -92,6 +105,28 @@ function refusal(code: string, message: string): Error {
 function asId(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
+
+function requiredId(value: unknown, kind: string): string {
+  const id = asId(value);
+  if (id === null) throw new Error(`herdr created a ${kind} without an id`);
+  return id;
+}
+
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw abortReason(signal);
+}
+
+/** The tab and root pane returned by `tab.create` or `workspace.create`. */
+function tabAndPane(answer: Record<string, unknown>): { tabId: string; paneId: string } {
+  const tabId = asId(asRecord(answer.tab).tab_id);
+  const paneId = asId(asRecord(answer.root_pane).pane_id);
+  if (tabId === null || paneId === null) {
+    throw new Error("herdr created a tab without a pane id");
+  }
+  return { tabId, paneId };
+}
+
 
 /**
  * A directory as the filesystem sees it, for comparing what herdr reports a
@@ -380,6 +415,28 @@ export interface HerdrAgent {
   cwd: string | null;
 }
 
+/** The selected project and link used by Shape's one authorized sync run. */
+export interface HerdrSyncOptions {
+  cwd: string;
+  link: string;
+  extension: string;
+  prompt: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+/** A typed failure boundary for the dedicated Shape synchronization API. */
+export class HerdrSyncError extends Error {
+  readonly operation: "workspace" | "tab" | "agent" | "wait" | "cleanup";
+
+  constructor(operation: HerdrSyncError["operation"], message: string) {
+    super(`herdr sync ${operation} failed: ${message}`);
+    this.name = "HerdrSyncError";
+    this.operation = operation;
+  }
+}
+
+
 export class HerdrLauncher {
   readonly id = "herdr" as const;
   readonly label = "herdr";
@@ -549,17 +606,117 @@ export class HerdrLauncher {
   }
 
   /**
+   * Run Shape's one authorized, read-only OMP synchronization in this project.
+   *
+   * This is deliberately not a general launcher: it creates one tab without
+   * focus, starts exactly one `omp` agent with the fixed read-only invocation,
+   * waits for that pane to leave `agent.list`, and closes only the tab this
+   * method created. A workspace found by `workspaceOf` is user-owned and is
+   * never closed; a missing workspace is created only to provide the run's
+   * root tab, and is left empty after that tab is closed.
+   */
+  async sync(project: { path: string; label: string }, opts: HerdrSyncOptions): Promise<void> {
+    const timeoutMs =
+      opts.timeoutMs !== undefined && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
+        ? opts.timeoutMs
+        : SYNC_TIMEOUT_MS;
+    const env = { SHAPE_LINK: opts.link };
+    const args = [
+      "-p",
+      "--no-session",
+      "--no-extensions",
+      "--mode=text",
+      "--approval-mode=yolo",
+      "--tools=read,glob,grep,canvas",
+      "-e",
+      opts.extension,
+      opts.prompt,
+    ];
+
+    let tabId: string | null = null;
+    let paneId: string | null = null;
+    try {
+      throwIfAborted(opts.signal);
+      const existingWorkspace = await this.workspaceOf(project);
+      if (existingWorkspace !== null) {
+        let created: Record<string, unknown>;
+        try {
+          throwIfAborted(opts.signal);
+          created = await this.#call("tab.create", {
+            workspace_id: existingWorkspace,
+            cwd: opts.cwd,
+            label: SYNC_TAB_LABEL,
+            env,
+            focus: false,
+          });
+        } catch (err) {
+          throw new HerdrSyncError("tab", err instanceof Error ? err.message : String(err));
+        }
+        ({ tabId, paneId } = tabAndPane(created));
+      } else {
+        let created: Record<string, unknown>;
+        try {
+          throwIfAborted(opts.signal);
+          created = await this.#call("workspace.create", {
+            cwd: opts.cwd,
+            label: project.label,
+            env,
+            focus: false,
+          });
+        } catch (err) {
+          throw new HerdrSyncError("workspace", err instanceof Error ? err.message : String(err));
+        }
+        try {
+          throwIfAborted(opts.signal);
+          requiredId(asRecord(created.workspace).workspace_id, "workspace");
+          ({ tabId, paneId } = tabAndPane(created));
+          await this.#call("tab.rename", { tab_id: tabId, label: SYNC_TAB_LABEL });
+        } catch (err) {
+          throw new HerdrSyncError("workspace", err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      if (tabId === null || paneId === null) throw new HerdrSyncError("tab", "herdr did not return a tab and pane");
+      const launchedPaneId = paneId;
+      try {
+        throwIfAborted(opts.signal);
+        await this.#call(
+          "agent.start",
+          {
+            name: SYNC_TAB_LABEL,
+            kind: "omp",
+            pane_id: launchedPaneId,
+            args,
+            timeout_ms: SYNC_START_TIMEOUT_MS,
+          },
+          SYNC_START_TIMEOUT_MS + CALL_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw new HerdrSyncError("agent", err instanceof Error ? err.message : String(err));
+      }
+      await this.#waitForExit(launchedPaneId, timeoutMs, opts.signal);
+    } finally {
+      if (tabId !== null) {
+        try {
+          await this.closeTab(tabId);
+        } catch (err) {
+          throw new HerdrSyncError("cleanup", err instanceof Error ? err.message : String(err));
+        }
+      }
+    }
+  }
+  /**
    * Type a prompt into a LIVE pane: the harness running there reads it as if
    * the user had typed it, so this is how Shape reaches a session that started
    * before Shape did and therefore never loaded the omp extension.
    *
    * The pane must be one `mgr board` just named — no waiting, no polling for a
-   * harness to come up, because Shape starts no sessions of its own and every
-   * pane it prompts is one the manager already has an agent in. A refusal
-   * (`pane_not_found` after the session ended, an agent that is not accepting
-   * input) throws with herdr's own code in the message, and the CALLER logs
-   * it: one pane that would not take the directive is not a reason to stop
-   * briefing the rest.
+   * harness to come up, because outside the dedicated sync exception Shape
+   * starts no sessions of its own and every pane it prompts is one the manager
+   * already has an agent in. A refusal (`pane_not_found` after the session
+   * ended, an agent that is not accepting input) throws with herdr's own code
+   * in the message, and the CALLER logs it: one pane that would not take the
+   * directive is not a reason to stop briefing the rest.
    */
   async prompt(paneId: string, text: string): Promise<void> {
     await this.#call("agent.prompt", { target: paneId, text });
@@ -573,6 +730,47 @@ export class HerdrLauncher {
   /** every plain method: one connection, one answer, gone (see the header) */
   #call(method: string, params: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, unknown>> {
     return HerdrConnection.call(this.#path, method, params, timeoutMs);
+  }
+
+  /** Poll the global live-agent list until this sync's pane has exited. */
+  async #waitForExit(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      throwIfAborted(signal);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new HerdrSyncError("wait", `pane ${paneId} did not exit within ${String(timeoutMs)}ms`);
+      }
+      let listed: Record<string, unknown>;
+      try {
+        listed = await this.#call("agent.list", {}, Math.min(CALL_TIMEOUT_MS, remaining));
+      } catch (err) {
+        throw new HerdrSyncError("wait", err instanceof Error ? err.message : String(err));
+      }
+      throwIfAborted(signal);
+      const live = Array.isArray(listed.agents) ? listed.agents : [];
+      const present = live.some((raw) => asRecord(raw).pane_id === paneId);
+      if (!present) return;
+      const delay = Math.min(SYNC_POLL_MS, Math.max(1, deadline - Date.now()));
+      await new Promise<void>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const onAbort = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
+          reject(signal?.reason ?? new Error("herdr sync aborted"));
+        };
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        timer = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        }, delay);
+        timer.unref();
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    }
   }
 
   /**

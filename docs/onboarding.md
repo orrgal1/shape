@@ -1,10 +1,12 @@
-# The automatic map of an existing project (design, 2026-08-28; read-only since 2026-09-05)
+# The automatic map of an existing project (design, 2026-08-28; read-only since 2026-09-05,
+# with the narrow #35 catch-up exception)
 
 Brownfield entry: point Shape at a repo that already exists and get a trustworthy canvas
 without anyone asking for one. Two mechanical stages fill the picture and a third verifies it.
-Nothing here is a prompt — Shape sends no instruction to any agent; the meaning on top of the
-skeleton is written by whatever session is working in the repo, in the turns it spends on real
-work (§Where the meaning comes from).
+The ordinary pipeline is not a prompt — Shape sends no instruction to an observed session; the
+meaning on top of the skeleton is written by whatever session is working in the repo, in the
+turns it spends on real work (§Where the meaning comes from). Issue #35 adds one bounded
+catch-up run for a newly watched or reactivated project whose graph is missing or stale.
 
 ## Principle
 
@@ -49,13 +51,38 @@ at a file or a named part that is gone, and every package no bubble claims — t
 falsifiable-claim bar from docs/notes/understand.md, rendered instead of asserted. A reader
 looking at a glowing bubble is looking at the part of the map that has gone stale; refreshing
 it is work for a session in the terminal, not a button on the canvas.
+## Catch-up synchronization (issue #35)
+
+The automatic map remains mechanical and never starts or prompts an ordinary session. Catch-up
+is separate: when a newly watched or reactivated worktree has no stored Shape graph, or its
+surveyed head differs from the current extracted reality and `HEAD`, the project exposes
+`CatchUpState` instead of claiming it is current. The state is `idle`, `queued`, `running` or
+`failed`; a failure keeps its reason and timestamp visible. `catchUp` aggregates the worktree
+states for the project, while `caughtUp` is true only for the aggregate `idle` state.
+
+The server pins the current extracted reality and `HEAD`, then sends one correlated catch-up
+request. Exactly one OMP synchronization run may start through herdr in the selected project's
+workspace. It is unfocused and is not a general launcher: the run uses Shape's extension and
+the fixed read-only invocation
+`-p --no-session --no-extensions --mode=text --approval-mode=yolo
+--tools=read,glob,grep,canvas -e <Shape extension> <prompt>`. No other harness, tool,
+extension, focus action or interactive terminal is allowed, and a current graph launches
+nothing.
+
+Canvas writes carry the matching job id. Catch-up becomes `idle` only after that job's canvas
+persistence is recorded at the pinned head; a missing or stale graph, a changed head, or any
+launch, canvas or persistence failure remains visible as `failed` rather than being reported
+as caught up. The browser receives progress and failure state, not a launch control. Picker
+registration and ordinary observation sessions remain read-only: no ordinary browser or
+session path can launch, prompt or focus a coding agent.
 
 ## Where the meaning comes from
 
-A skeleton says what the parts ARE, never what they promise or what the product does. That
-half is written by an agent through the `canvas` tool while it works in the repo, and what is
-expected of it is stated in exactly two places, both of them read by the session and neither of
-them sent by Shape:
+An automatic skeleton says what the parts ARE, never what they promise or what the product
+does. In an ordinary session, that half is written through the `canvas` tool while the session
+works in the repo. The bounded #35 catch-up run may write the same intent layer under its fixed
+prompt and Shape extension; it is not a general session or an onboarding mode. For ordinary
+sessions, what is expected of them is stated in exactly two places:
 
 - `CANVAS_TOOL_DESCRIPTION` (`packages/shared/src/index.ts`), the text every channel hands the
   agent: the four layers, the three cross-layer links (`realizes`, `hosts`, `verifies`), one
@@ -63,7 +90,8 @@ them sent by Shape:
   owns files, `status` for what is happening right now.
 - the per-project directive, `~/.shape/server/projects/<key>/shape-directive.md`
   (`packages/bridge/src/agent/directive.ts`), which a session started by hand — or a builder
-  brief the manager writes — can be pointed at.
+  brief the manager writes — can be pointed at. Catch-up's fixed prompt does not broaden the
+  ordinary browser/session boundary.
 
 The rules that must hold whatever the agent believes are enforced by `applyOps` for every
 caller, not by an onboarding mode: layer walls, one top-level product bubble

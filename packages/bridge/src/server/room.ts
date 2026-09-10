@@ -21,6 +21,7 @@
  * served exactly like a local one.
  */
 
+import { randomUUID } from "node:crypto";
 import { basename, isAbsolute, relative, resolve } from "node:path";
 import { diffSnapshots } from "../../../shared/src/delta.ts";
 import { symbolRefOf } from "../../../shared/src/index.ts";
@@ -32,6 +33,7 @@ import type {
   AgentToServerMsg,
   BackendInfo,
   CanvasOp,
+  CatchUpState,
   ClientMsg,
   GraphDoc,
   ProjectSummary,
@@ -48,6 +50,7 @@ import type {
 import type { ServerEnd } from "../transport.ts";
 import { computeDrift } from "./drift.ts";
 import { importLegacyProject } from "./legacy.ts";
+import { composeSyncPrompt } from "./onboarding.ts";
 import { SnapshotStore } from "./snapshots.ts";
 import { mainWorktreeOf, type AuditBody, type Storage, type StoredProject } from "./storage.ts";
 import { GraphStore } from "./store.ts";
@@ -62,6 +65,15 @@ export type AgentFrame = Exclude<AgentToServerMsg, { type: "attach" }>;
  * watched-project registration belong to the server that owns every room.
  */
 export type RoomClientMsg = Extract<ClientMsg, { type: "focus_terminal" | "diff" }>;
+
+/** Equality of extracted reality excluding its observation timestamp and nothing else. */
+function sameReality(left: RealityLayer, right: RealityLayer): boolean {
+  const leftSemantic: Partial<RealityLayer> = { ...left };
+  const rightSemantic: Partial<RealityLayer> = { ...right };
+  delete leftSemantic.extractedAt;
+  delete rightSemantic.extractedAt;
+  return JSON.stringify(leftSemantic) === JSON.stringify(rightSemantic);
+}
 
 /**
  * One variation of the project: its canvas and everything that is true of that
@@ -85,21 +97,14 @@ interface WorktreeState {
   session: AgentSession | null;
   /** the harness's backend; null exactly when `session` is */
   backend: BackendInfo | null;
-  /**
-   * The skeleton has been seeded for the session reporting in from here. A
-   * session announces itself twice — once as a directory somebody is working
-   * in, again when the harness greets with its id — and a reconnect announces
-   * it a third time; none of those is a new start. Reset when the session
-   * stops, so the next one in this worktree is owed its own look.
-   */
-  autoMapped: boolean;
-  /**
-   * This worktree's canvas is owed the mechanical skeleton, and the room has
-   * asked the agent to read its code first: a canvas seeded before the
-   * extraction lands would have nothing in it. Consumed by the reality frame
-   * that answers (`#reality`).
-   */
-  autoMapPending: boolean;
+  catchUp: CatchUpState;
+  inspecting: boolean;
+  inspectionTimer: NodeJS.Timeout | null;
+  /** A material attach-time update that the following inspection must account for. */
+  realityChanged: boolean;
+  sync: { id: string; head: string | null; persisted: boolean } | null;
+  /** Serializes job writes and completion so persistence always precedes acknowledgement. */
+  writing: Promise<void>;
   /**
    * The assistant message being written right now, folded from `text_delta`.
    * Kept only until the turn ends: this is the live line under the canvas, not
@@ -154,15 +159,6 @@ const DIRECTORY_PICKER_UNAVAILABLE = "no connected local Shape agent can browse 
 /** Refusal for everything that needs the agent while none is attached. */
 const AGENT_GONE = "no agent is attached to this project — start `shape agent` in it";
 
-/**
- * Whether a session starting in a project whose canvas is still empty gets the
- * mechanical skeleton drawn for it: on unless a process says otherwise. The
- * knob exists for the smokes, which seed a workspace WITH code and then check
- * what an empty canvas looks like — a skeleton landing in the middle of that
- * would be drawing over what they are watching. It is read once, on the server
- * process.
- */
-const AUTO_MAP = process.env.SHAPE_AUTO_MAP !== "0";
 
 /**
  * How often the live "now" line may go out. The deltas of one message arrive
@@ -295,6 +291,12 @@ export class ProjectRoom {
 
   /** what the switcher shows for this project; a room means it is active */
   summary(): ProjectSummary {
+    const precedence = { idle: 0, queued: 1, running: 2, failed: 3 };
+    let catchUp: CatchUpState = { state: "idle", at: 0 };
+    for (const state of this.#states.values()) {
+      if (precedence[state.catchUp.state] > precedence[catchUp.state] ||
+          (state.catchUp.state === catchUp.state && state.catchUp.at > catchUp.at)) catchUp = state.catchUp;
+    }
     return {
       projectId: this.#project.key,
       label: this.#project.label,
@@ -302,9 +304,8 @@ export class ProjectRoom {
       status: "active",
       liveSessions: this.#liveSessions(),
       manager: this.#project.manager !== null,
-      // the room owes a project nothing else yet: the only thing it is still
-      // working through is a canvas whose code it has asked to have read to it
-      caughtUp: ![...this.#states.values()].some((state) => state.autoMapPending),
+      catchUp,
+      caughtUp: catchUp.state === "idle",
       injected: this.#project.injected.length,
       lastSeen: this.#lastSeen,
     };
@@ -354,8 +355,9 @@ export class ProjectRoom {
       const state = await this.#openState(info.id, info);
       // reality is per worktree: two variations sit on two HEADs
       const reality = attach.realities[info.id];
-      if (reality !== undefined && JSON.stringify(state.store.doc.reality) !== JSON.stringify(reality)) {
+      if (reality !== undefined && !sameReality(state.store.doc.reality, reality)) {
         state.store.setReality(reality, computeDrift(state.store.doc, reality));
+        state.realityChanged = true;
         await this.#graphChanged(state);
       }
     }
@@ -375,14 +377,7 @@ export class ProjectRoom {
     this.#lastSeen = new Date().toISOString();
     this.#link = link;
     this.#link.send({ type: "attached", projectId: project.key });
-    // and last of all, the sessions this attach announced: as far as this room
-    // is concerned they have just started, so each gets the same look at its
-    // canvas a `session_started` gets. After the link is bound above, because
-    // the reading it may ask for goes down it.
-    for (const running of attach.sessions) {
-      const state = this.#states.get(running.worktree);
-      if (state !== undefined) void this.#autoMap(state);
-    }
+    for (const state of this.#states.values()) this.#inspect(state);
   }
 
   /**
@@ -523,8 +518,10 @@ export class ProjectRoom {
     const graphs: Record<string, GraphDoc> = {};
     const agents: Record<string, AgentState> = {};
     const revisions: Record<string, RevisionInfo[]> = {};
+    const catchUps: Record<string, CatchUpState> = {};
     states.forEach((state, index) => {
       graphs[state.id] = state.store.doc;
+      catchUps[state.id] = state.catchUp;
       // a worktree with no session has no state to report: the client shows its
       // canvas rather than drawing it as idle
       if (state.session !== null) agents[state.id] = state.agent;
@@ -536,6 +533,7 @@ export class ProjectRoom {
       graphs,
       session: this.#sessionInfo(),
       agents,
+      catchUps,
       projects: this.#projects(),
       projectId: this.#project.key,
       revisions,
@@ -566,8 +564,7 @@ export class ProjectRoom {
       this.#setActivity(state, []);
       // whatever was being written stopped mid-sentence with the link
       this.#clearNow(state);
-      // the extraction the owed skeleton was waiting on is never coming
-      state.autoMapPending = false;
+      this.#cancelSync(state, line);
     }
     this.#broadcastSession();
     for (const id of [...this.#pending.keys()]) {
@@ -586,6 +583,7 @@ export class ProjectRoom {
    * nothing may fire onto a room the server has let go of.
    */
   async close(): Promise<void> {
+    for (const state of this.#states.values()) this.#cancelSync(state, "project is inactive");
     const line = `project ${this.#project.label} is inactive`;
     // marking a project inactive is a detach, and `lastSeen` is what orders it
     // among the inactive rows the switcher reveals
@@ -661,8 +659,12 @@ export class ProjectRoom {
       agent: "idle",
       session: null,
       backend: null,
-      autoMapped: false,
-      autoMapPending: false,
+      catchUp: { state: "idle", at: Date.now() },
+      inspecting: false,
+      inspectionTimer: null,
+      realityChanged: false,
+      sync: null,
+      writing: Promise.resolve(),
       now: "",
       nowTimer: null,
       nowDirty: false,
@@ -697,6 +699,8 @@ export class ProjectRoom {
     // a load still in flight would otherwise re-add its state after the clear
     await Promise.all([...this.#pendingStates.values()]);
     const states = [...this.#states.values()];
+    for (const state of states) this.#cancelSync(state, "project canvas is closing");
+    await Promise.all(states.map((state) => state.writing));
     this.#states.clear();
     this.#pendingStates.clear();
     // a throttle timer left behind would fire on a canvas this room no longer has
@@ -711,11 +715,19 @@ export class ProjectRoom {
    * authority on what is running, and its graph is still being written.
    */
   async #syncWorktrees(worktrees: WorktreeInfo[]): Promise<void> {
+    const previous = new Map(this.#worktrees.map((info) => [info.id, info.head]));
     this.#worktrees = worktrees;
-    for (const info of worktrees) await this.#openState(info.id, info);
+    for (const info of worktrees) {
+      const state = await this.#openState(info.id, info);
+      if (!previous.has(info.id) || previous.get(info.id) !== info.head) {
+        if (state.sync !== null && state.sync.head !== info.head) this.#cancelSync(state, "worktree HEAD changed");
+        this.#inspect(state);
+      }
+    }
     const listed = new Set(worktrees.map((info) => info.id));
     for (const [id, state] of [...this.#states]) {
       if (listed.has(id) || state.session !== null) continue;
+      this.#cancelSync(state, "worktree was removed");
       this.#states.delete(id);
       this.#clearNow(state);
       await state.store.persist();
@@ -833,25 +845,15 @@ export class ProjectRoom {
     }
   }
 
-  /**
-   * Draw the mechanical skeleton onto an empty canvas: one bubble per workspace
-   * package the agent found at this worktree's HEAD. It is the only thing the
-   * server writes onto a canvas by itself, and it exists because a project
-   * whose canvas nobody has drawn shows an empty stage under a strip of reality
-   * nobody asked for. Nothing is said to the session that occasioned it: what
-   * the harnesses draw from here on is theirs.
-   *
-   * It goes through the store like any other canvas call, so it lands as a
-   * revision with a receipt, and the canvas is marked as mapped at this HEAD.
-   */
+  /** Mechanical seed only: it never proves that a model has surveyed the project. */
   async #seedSkeleton(state: WorktreeState): Promise<void> {
     let ops: CanvasOp[];
     try {
       ops = await this.#request<CanvasOp[]>((id) => ({ type: "synthesize_skeleton", worktree: state.id, id }));
     } catch (err) {
-      this.#error(errText(err));
-      return;
+      throw new Error(`skeleton synthesis failed: ${errText(err)}`);
     }
+    if (!this.#agentConnected || this.#states.get(state.id) !== state || state.store.doc.nodes.length > 0) return;
 
     // a repo with no workspace packages in it has no skeleton to draw, and the
     // reader is told that rather than left wondering what the empty stage means
@@ -877,54 +879,105 @@ export class ProjectRoom {
     );
     this.#broadcast({ type: "transcript", worktree: state.id, role: "tool", text: outcome.transcript });
     if (outcome.changed) {
-      void this.#graphChanged(state);
+      await this.#graphChanged(state);
       this.#broadcast({ type: "graph", worktree: state.id, graph: state.store.doc });
     }
-    if (outcome.isError) this.#error(`skeleton synthesis rejected: ${outcome.text}`);
+    if (outcome.isError) throw new Error(`skeleton synthesis rejected: ${outcome.text}`);
     // the room's own record of the one write it makes without being asked
     this.#audit(state, { kind: "onboard", ops: ops.length });
-    this.#markSurveyed(state);
   }
 
-  /**
-   * The skeleton is drawn, so this canvas has been mapped against the code at
-   * this HEAD: the next session to start here finds it mapped and leaves it
-   * alone. It rides out as an ordinary revision, so the browsers hold the same
-   * mark the room decides from.
-   */
-  #markSurveyed(state: WorktreeState): void {
-    state.store.setSurveyed({ head: state.store.doc.reality.head, at: new Date().toISOString() });
-    void this.#graphChanged(state);
-    this.#broadcast({ type: "graph", worktree: state.id, graph: state.store.doc });
+  #setCatchUp(state: WorktreeState, catchUp: CatchUpState): void {
+    state.catchUp = catchUp;
+    this.#broadcast({ type: "catch_up", worktree: state.id, catchUp });
+    this.#onProjectsChanged();
   }
 
-  /**
-   * A session started reporting in from this worktree, and its canvas is still
-   * empty: the room draws the mechanical skeleton for it (`#seedSkeleton`). A
-   * canvas that has bubbles is left exactly as it is — what the code did since
-   * is shown on the picture as drift, and nobody is asked to redraw it.
-   *
-   * Once per session start, and never twice for the same session: the
-   * `session_started` a hello re-posts, or a reconnect repeats, is the same
-   * start. A worktree whose code the room has never had read to it is asked
-   * for it first — a skeleton drawn blind would be empty — and the seeding
-   * waits for that extraction to land (`#reality`).
-   */
-  async #autoMap(state: WorktreeState): Promise<void> {
-    if (!AUTO_MAP || !this.#agentConnected || !this.#project.targetHasCode) return;
-    if (state.session === null) return;
-    const doc = state.store.doc;
-    // The ask goes out once: a second caller finds the reading already owed.
-    if (doc.reality.extractedAt === null) {
-      if (!state.autoMapPending) this.#link.send({ type: "extract_reality", worktree: state.id });
-      state.autoMapPending = true;
+  #cancelSync(state: WorktreeState, reason: string): void {
+    clearTimeout(state.inspectionTimer ?? undefined);
+    state.inspectionTimer = null;
+    state.inspecting = false;
+    const job = state.sync;
+    state.sync = null;
+    if (job !== null && this.#agentConnected) this.#link.send({ type: "cancel_request", id: job.id });
+    if (state.catchUp.state === "queued" || state.catchUp.state === "running") {
+      this.#setCatchUp(state, { state: "failed", reason, at: Date.now() });
+    }
+  }
+
+  /** Attach/reactivation inspects every registered variation, with or without a live session. */
+  #inspect(state: WorktreeState): void {
+    if (!this.#agentConnected || state.inspecting || state.sync !== null || this.#closed !== null) return;
+    state.inspecting = true;
+    this.#setCatchUp(state, { state: "queued", at: Date.now() });
+    state.inspectionTimer = setTimeout(() => {
+      if (!state.inspecting) return;
+      state.inspecting = false;
+      state.inspectionTimer = null;
+      this.#setCatchUp(state, { state: "failed", reason: "reality extraction did not finish", at: Date.now() });
+    }, 60_000);
+    state.inspectionTimer.unref();
+    this.#link.send({ type: "extract_reality", worktree: state.id });
+  }
+
+  async #planSync(state: WorktreeState, realityChanged: boolean): Promise<void> {
+    const head = state.store.doc.reality.head;
+    if (!realityChanged && Object.keys(state.store.doc.drift).length === 0 &&
+        state.store.doc.nodes.length > 0 && state.store.doc.surveyed !== undefined &&
+        state.store.doc.surveyed !== null && state.store.doc.surveyed.head === head) {
+      this.#setCatchUp(state, { state: "idle", at: Date.now() });
       return;
     }
-    if (state.autoMapped || doc.nodes.length > 0) return;
-    // marked before the await: the hello behind this start re-enters here
-    // while the skeleton is still being synthesized
-    state.autoMapped = true;
-    await this.#seedSkeleton(state);
+    const job = { id: randomUUID(), head, persisted: false };
+    state.sync = job;
+    this.#setCatchUp(state, { state: "queued", at: Date.now() });
+    const survey = state.store.doc.nodes.length === 0;
+    try {
+      if (survey) await this.#seedSkeleton(state);
+      if (!this.#agentConnected || this.#closed !== null || state.sync !== job || this.#states.get(state.id) !== state) return;
+      if (state.store.doc.reality.head !== head) throw new Error("worktree HEAD changed while preparing synchronization");
+      const at = Date.parse(state.store.doc.surveyed?.at ?? "");
+      this.#link.send({
+        type: "catch_up", worktree: state.id, id: job.id,
+        prompt: composeSyncPrompt(state.store.doc, survey),
+        since: Number.isFinite(at) ? at : 0,
+      });
+    } catch (err) {
+      if (state.sync !== job) return;
+      state.sync = null;
+      this.#setCatchUp(state, { state: "failed", reason: errText(err), at: Date.now() });
+    }
+  }
+
+  async #syncState(state: WorktreeState, id: string, catchUp: CatchUpState): Promise<void> {
+    const job = state.sync;
+    if (job === null || job.id !== id || !this.#agentConnected || this.#closed !== null) return;
+    if (catchUp.state !== "idle") {
+      if (catchUp.state === "failed") state.sync = null;
+      this.#setCatchUp(state, catchUp);
+      return;
+    }
+    try {
+      if (!job.persisted) throw new Error("synchronization finished without persisting a canvas mutation");
+      if (state.store.doc.reality.head !== job.head) throw new Error("synchronization completed against a stale HEAD");
+      if (Object.keys(state.store.doc.drift).length > 0) throw new Error("synchronization completed with remaining drift");
+      // GraphStore.persist intentionally swallows errors. A completion receipt must not.
+      const doc = { ...state.store.doc, rev: state.store.doc.rev + 1, surveyed: { head: job.head, at: new Date().toISOString() } };
+      await this.#storage.saveGraph(this.#tenant, this.#project.key, state.id, doc);
+      if (state.sync !== job || !this.#agentConnected || this.#closed !== null) {
+        await this.#storage.saveGraph(this.#tenant, this.#project.key, state.id, state.store.doc);
+        return;
+      }
+      state.store.doc = doc;
+      void state.snapshots.save(doc).catch((err: unknown) => this.#error(`snapshot failed: ${errText(err)}`));
+      state.sync = null;
+      this.#broadcast({ type: "graph", worktree: state.id, graph: doc });
+      this.#setCatchUp(state, catchUp);
+    } catch (err) {
+      if (state.sync !== job) return;
+      state.sync = null;
+      this.#setCatchUp(state, { state: "failed", reason: errText(err), at: Date.now() });
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -945,9 +998,7 @@ export class ProjectRoom {
             backend: msg.backend,
           });
           this.#broadcastSession();
-          // a session in a project whose canvas is still empty has the
-          // mechanical skeleton drawn for it
-          void this.#autoMap(state);
+          if (state.catchUp.state === "idle" && state.store.doc.reality.extractedAt === null) this.#inspect(state);
         });
         return;
       case "session_stopped": {
@@ -956,10 +1007,6 @@ export class ProjectRoom {
         if (state === undefined) return;
         state.session = null;
         state.backend = null;
-        // the next session in this worktree is a new start: it is owed the
-        // skeleton even if the harness never named itself
-        state.autoMapped = false;
-        state.autoMapPending = false;
         this.#setAgent(state, "idle");
         this.#setActivity(state, []);
         // nothing is being written any more: the live line goes out empty
@@ -971,12 +1018,23 @@ export class ProjectRoom {
       case "agent_event":
         this.#withState(msg.worktree, (state) => this.#agentEvent(state, msg.event));
         return;
+      case "catch_up_state": {
+        const state = this.#states.get(msg.worktree);
+        if (state === undefined) return;
+        state.writing = state.writing.then(() => this.#syncState(state, msg.id, msg.catchUp));
+        return;
+      }
       case "canvas_call":
-        this.#withState(msg.worktree, (state) => this.#canvasCall(state, msg.id, msg.args));
+        this.#withState(msg.worktree, (state) => {
+          state.writing = state.writing.then(() => this.#canvasCall(state, msg.id, msg.args, msg.job));
+        });
         return;
       case "reality":
         this.#withState(msg.worktree, (state) => {
-          void this.#reality(state, msg.reality);
+          state.writing = state.writing.then(() => this.#reality(state, { ...msg.reality, head: msg.head })).catch((err: unknown) => {
+            this.#cancelSync(state, errText(err));
+            this.#setCatchUp(state, { state: "failed", reason: errText(err), at: Date.now() });
+          });
         });
         return;
       case "worktrees":
@@ -1133,34 +1191,57 @@ export class ProjectRoom {
   }
 
   /** Apply a canvas call to one worktree's graph and answer the caller with what landed. */
-  #canvasCall(state: WorktreeState, id: string, args: unknown): void {
+  async #canvasCall(state: WorktreeState, id: string, args: unknown, jobId?: string): Promise<void> {
+    const job = state.sync;
+    if (jobId !== undefined && (!this.#agentConnected || this.#closed !== null || job === null || job.id !== jobId || state.catchUp.state !== "running" || state.store.doc.reality.head !== job.head)) {
+      this.#link.send({ type: "canvas_result", id, text: "inactive, foreign or stale synchronization job", isError: true });
+      return;
+    }
+    try {
     const outcome = state.store.applyCanvasCall(args);
     this.#broadcast({ type: "transcript", worktree: state.id, role: "tool", text: outcome.transcript });
     if (outcome.changed) {
-      void this.#graphChanged(state);
+      state.store.doc.drift = computeDrift(state.store.doc, state.store.doc.reality);
+      if (jobId === undefined) await this.#graphChanged(state);
+      else {
+        await this.#storage.saveGraph(this.#tenant, this.#project.key, state.id, state.store.doc);
+        await state.snapshots.save(state.store.doc);
+        if (job !== null && state.sync === job && !outcome.isError) job.persisted = true;
+      }
       this.#broadcast({ type: "graph", worktree: state.id, graph: state.store.doc });
-      // The canvas is the interface, so the bubbles a call just wrote are where
-      // the agent is — a truer answer than the file paths a tool happened to
-      // open, and the only one there is before any file is touched. It replaces
-      // the file-derived set rather than joining it: the last thing written is
-      // the thing to look at.
-      this.#setActivity(state, outcome.touched);
+      if (jobId === undefined) {
+        // The canvas is the interface, so the bubbles an ordinary call just
+        // wrote are where the user session is. Synchronization is machine work
+        // and must never appear as ordinary session activity.
+        this.#setActivity(state, outcome.touched);
+      }
     }
     this.#link.send({ type: "canvas_result", id, text: outcome.text, isError: outcome.isError });
+    } catch (err) {
+      if (jobId !== undefined && state.sync?.id === jobId) {
+        this.#cancelSync(state, errText(err));
+        this.#setCatchUp(state, { state: "failed", reason: errText(err), at: Date.now() });
+      }
+      this.#link.send({ type: "canvas_result", id, text: `canvas persistence failed: ${errText(err)}`, isError: true });
+    }
   }
 
   /** Re-derived reality for one worktree: the agent decides when, on its own HEAD. */
   async #reality(state: WorktreeState, reality: RealityLayer): Promise<void> {
-    state.store.setReality(reality, computeDrift(state.store.doc, reality));
-    await this.#graphChanged(state);
-    this.#broadcast({ type: "graph", worktree: state.id, graph: state.store.doc });
-    // the skeleton this worktree is owed was waiting on exactly this: the room
-    // now knows what the code is, so it can draw the parts it found. Only an
-    // owed one runs here — an extraction arriving on its own is the code
-    // moving, and a canvas somebody is looking at is not redrawn under them.
-    if (state.autoMapPending) {
-      state.autoMapPending = false;
-      void this.#autoMap(state);
+    const changed = !sameReality(state.store.doc.reality, reality);
+    if (changed) {
+      state.store.setReality(reality, computeDrift(state.store.doc, reality));
+      await this.#graphChanged(state);
+      this.#broadcast({ type: "graph", worktree: state.id, graph: state.store.doc });
+    }
+    if (state.sync !== null && state.sync.head !== reality.head) this.#cancelSync(state, "worktree HEAD changed during synchronization");
+    if (state.inspecting) {
+      state.inspecting = false;
+      clearTimeout(state.inspectionTimer ?? undefined);
+      state.inspectionTimer = null;
+      const realityChanged = state.realityChanged || changed;
+      state.realityChanged = false;
+      await this.#planSync(state, realityChanged);
     }
   }
 

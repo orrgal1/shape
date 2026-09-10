@@ -14,6 +14,7 @@ import {
   type AgentSession,
   type AgentState,
   type BackendInfo,
+  type CatchUpState,
   type DriftMap,
   type EdgeKind,
   type EntityDelta,
@@ -449,6 +450,25 @@ function asSessionInfo(value: unknown): SessionInfo | null {
   };
 }
 
+function asCatchUpState(value: unknown): CatchUpState | null {
+  if (!isRecord(value)) return null;
+  if (
+    value.state !== "idle" &&
+    value.state !== "queued" &&
+    value.state !== "running" &&
+    value.state !== "failed"
+  ) {
+    return null;
+  }
+  if (typeof value.at !== "number" || !Number.isFinite(value.at)) return null;
+  if (value.reason !== undefined && typeof value.reason !== "string") return null;
+  return {
+    state: value.state,
+    at: value.at,
+    ...(value.reason === undefined ? {} : { reason: value.reason }),
+  };
+}
+
 /** one row of the switcher: a project this server knows, whatever its status */
 function asProjectSummary(value: unknown): ProjectSummary | null {
   if (!isRecord(value)) return null;
@@ -465,6 +485,8 @@ function asProjectSummary(value: unknown): ProjectSummary | null {
   if (typeof liveSessions !== "number" || !Number.isInteger(liveSessions)) return null;
   if (typeof injected !== "number" || !Number.isInteger(injected)) return null;
   if (typeof value.manager !== "boolean" || typeof value.caughtUp !== "boolean") return null;
+  const catchUp = asCatchUpState(value.catchUp);
+  if (catchUp === null || value.caughtUp !== (catchUp.state === "idle")) return null;
   return {
     projectId,
     label,
@@ -472,6 +494,7 @@ function asProjectSummary(value: unknown): ProjectSummary | null {
     status: value.status,
     liveSessions,
     manager: value.manager,
+    catchUp,
     caughtUp: value.caughtUp,
     injected,
     lastSeen,
@@ -508,11 +531,12 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
       const graphs = mapValues(raw.graphs, asGraphDoc);
       const session = asSessionInfo(raw.session);
       const agents = mapValues(raw.agents, asAgentState);
+      const catchUps = mapValues(raw.catchUps, asCatchUpState);
       const projects = mapAll(raw.projects, asProjectSummary);
       const projectId = asStr(raw.projectId);
       const revisions = mapValues(raw.revisions, (item) => mapAll(item, asRevisionInfo));
       const tools = asProjectTools(raw.tools);
-      if (graphs === null || session === null || agents === null) return null;
+      if (graphs === null || session === null || agents === null || catchUps === null) return null;
       if (revisions === null || projects === null || projectId === null) return null;
       if (tools === null) return null;
       return {
@@ -520,6 +544,7 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
         graphs,
         session,
         agents,
+        catchUps,
         projects,
         projectId,
         revisions,
@@ -560,6 +585,12 @@ export function parseServerMsg(raw: unknown): ServerMsg | null {
       const state = asAgentState(raw.state);
       if (worktree === null || state === null) return null;
       return { type: "agent", worktree, state };
+    }
+    case "catch_up": {
+      const worktree = asWorktreeId(raw.worktree);
+      const catchUp = asCatchUpState(raw.catchUp);
+      if (worktree === null || catchUp === null) return null;
+      return { type: "catch_up", worktree, catchUp };
     }
     case "activity": {
       const worktree = asWorktreeId(raw.worktree);

@@ -9,12 +9,15 @@
  * In local mode the other end is a `ProjectRoom` in this same process, which
  * is why every stderr line here still says `[bridge]`.
  *
- * SHAPE STARTS NOTHING. A session appears because something inside a worktree
- * of this repo spoke on the loopback link — the omp extension greeting, a
- * Claude Code hook firing, an MCP sidecar calling the canvas — and it
- * disappears when that session says goodbye. A browser may ask this Shape
- * runtime to show a directory chooser; that only returns validated Git facts
- * and never retargets the runtime, launches or instructs a coding harness.
+ * ORDINARY SESSION OBSERVATION STARTS NOTHING. A session appears because
+ * something inside a worktree of this repo spoke on the loopback link — the
+ * omp extension greeting, a Claude Code hook firing, an MCP sidecar calling
+ * the canvas — and it disappears when that session says goodbye. The dedicated
+ * watched-project synchronization request is the sole exception: it may start
+ * one isolated OMP run through the fleet's catch-up queue. A browser may ask
+ * this Shape runtime to show a directory chooser; that only returns validated
+ * Git facts and never retargets the runtime or instructs a user's coding
+ * session.
  *
  * ONE RUNTIME, ONE REPO, N WORKTREES; the fleet owns the loopback link and
  * hosts one runtime per active project. All the worktrees of a repo are one
@@ -48,6 +51,7 @@ import type {
 } from "../../../shared/src/link.ts";
 import type { AgentEnd } from "../transport.ts";
 import type { SocketServer } from "../wsserver.ts";
+import type { CatchUpQueue } from "./catchup.ts";
 import type { DetectedTools } from "./detect.ts";
 import { LINK_CLI, directivePath, renderDirective, writeDirective } from "./directive.ts";
 import type { AgentEvents, LinkHello, LinkTarget } from "./external.ts";
@@ -95,6 +99,7 @@ export interface AgentRuntimeOptions {
   /** what is installed on this machine; the fleet detects it once for every runtime */
   tools: DetectedTools;
   launcher: HerdrLauncher | null;
+  catchUps: CatchUpQueue;
   /** picker-created runtimes observe only: no manager, prompt, injection or terminal focus */
   observationOnly: boolean;
   /** project key of the runtime that selected this project */
@@ -117,9 +122,9 @@ export interface AgentRuntimeOptions {
 
 /**
  * One session Shape is watching, and everything that belongs to its worktree
- * alone. Shape starts nothing: the record appears when a caller from that
- * worktree first speaks on the link, and is dropped when the session says
- * goodbye.
+ * alone. Outside the dedicated watched-project synchronization path, Shape
+ * starts nothing: the record appears when a caller from that worktree first
+ * speaks on the link, and is dropped when the session says goodbye.
  */
 interface Observed {
   /** worktree id: the realpath of the directory the session runs in */
@@ -171,6 +176,8 @@ export class AgentRuntime {
    * no session here has a terminal Shape can reach.
    */
   readonly #launcher: HerdrLauncher | null;
+  readonly #catchUps: CatchUpQueue;
+  readonly #syncJobs = new Set<string>();
   /**
    * The panes the whole process has briefed, shared with every other runtime
    * (the fleet owns the set). Read and written by the injection pass alone.
@@ -241,7 +248,8 @@ export class AgentRuntime {
     this.#observationOnly = opts.observationOnly;
     this.#watcherKey = opts.watcherKey;
     this.#onWatchProject = opts.onWatchProject;
-    this.#launcher = opts.observationOnly ? null : opts.launcher;
+    this.#launcher = opts.launcher;
+    this.#catchUps = opts.catchUps;
     this.#isLinked = opts.isLinked;
     this.#briefed = opts.briefed;
     this.#onExit = opts.onExit;
@@ -301,6 +309,8 @@ export class AgentRuntime {
   #onLinkGap(reason: string): void {
     console.error(`[bridge] link to the Shape server dropped: ${reason}`);
     this.#outboxOpen = false;
+    for (const id of this.#syncJobs) this.#catchUps.cancel(id);
+    this.#syncJobs.clear();
     const pending = [...this.#calls.values()];
     this.#calls.clear();
     for (const settle of pending) settle({ text: SERVER_UNREACHABLE, isError: true });
@@ -459,7 +469,7 @@ export class AgentRuntime {
         // known only through the hooks and tool calls that reach the link
         events: harness === null ? "hooks" : "native",
         resume: false,
-        terminal: this.#launcher === null ? "none" : "external",
+        terminal: this.#observationOnly || this.#launcher === null ? "none" : "external",
       },
     };
   }
@@ -562,7 +572,7 @@ export class AgentRuntime {
         // project nobody is working in right now
         backend: sessions[0]?.backend ?? null,
         tools: {
-          launcher: this.#launcher?.id ?? null,
+          launcher: this.#observationOnly ? null : this.#launcher?.id ?? null,
           launchers: this.#tools.launchers,
           harnesses: this.#tools.harnesses,
           directoryPicker: directoryPickerAvailable(),
@@ -590,6 +600,11 @@ export class AgentRuntime {
   #teardown(reason: string | null): void {
     if (this.#stopped) return;
     this.#stopped = true;
+    for (const id of this.#syncJobs) this.#catchUps.cancel(id);
+    this.#syncJobs.clear();
+    for (const settle of this.#calls.values()) settle({ text: SERVER_UNREACHABLE, isError: true });
+    this.#calls.clear();
+    this.#queue = [];
     // start() may still be waiting for an `attached` that will never come now
     this.#attachGate.resolve();
     this.#sessions.clear();
@@ -698,11 +713,12 @@ export class AgentRuntime {
    * the link goes through here, so one counter is enough to correlate every
    * answer, and the worktree it was made in travels with it.
    */
-  #canvasCall(worktree: string, args: unknown): Promise<{ text: string; isError: boolean }> {
+  #canvasCall(worktree: string, args: unknown, job?: string): Promise<{ text: string; isError: boolean }> {
+    if (this.#stopped) return Promise.resolve({ text: SERVER_UNREACHABLE, isError: true });
     const id = `call-${++this.#callSeq}`;
     const { promise, resolve: settle } = Promise.withResolvers<{ text: string; isError: boolean }>();
     this.#calls.set(id, settle);
-    this.#post({ type: "canvas_call", worktree, id, args });
+    this.#post({ type: "canvas_call", worktree, id, args, ...(job === undefined ? {} : { job }) });
     return promise;
   }
 
@@ -776,6 +792,33 @@ export class AgentRuntime {
         settle({ text: msg.text, isError: msg.isError });
         return;
       }
+      case "catch_up": {
+        if (this.#stopped || this.#syncJobs.has(msg.id)) return;
+        const info = this.#worktrees.find((entry) => entry.id === msg.worktree);
+        const reality = this.#realities.get(msg.worktree);
+        if (info === undefined || reality === undefined) {
+          this.#post({ type: "catch_up_state", worktree: msg.worktree, id: msg.id, catchUp: { state: "failed", reason: "worktree has no extracted reality", at: Date.now() } });
+          return;
+        }
+        const pinned = reality.head;
+        this.#syncJobs.add(msg.id);
+        this.#catchUps.enqueue({
+          id: msg.id,
+          worktree: info.path,
+          project: { path: this.#projectCwd, label: basename(this.#projectCwd) },
+          prompt: msg.prompt,
+          since: msg.since,
+          link: `ws://127.0.0.1:${this.#sockets.port}${LINK_WS_PATH}`,
+          launcher: this.#launcher,
+          current: async () => !this.#stopped && (await this.#gitHead(info.path)) === pinned,
+          canvas: (args) => this.#canvasCall(msg.worktree, args, msg.id),
+          state: (catchUp) => {
+            if (catchUp.state === "idle" || catchUp.state === "failed") this.#syncJobs.delete(msg.id);
+            if (!this.#stopped) this.#post({ type: "catch_up_state", worktree: msg.worktree, id: msg.id, catchUp });
+          },
+        });
+        return;
+      }
       case "focus_terminal":
         void this.#focusTerminal(msg.worktree);
         return;
@@ -814,6 +857,10 @@ export class AgentRuntime {
         return;
       }
       case "cancel_request": {
+        if (this.#syncJobs.has(msg.id)) {
+          this.#catchUps.cancel(msg.id);
+          return;
+        }
         const picker = this.#picker;
         if (picker?.id !== msg.id) return;
         this.#picker = null;
