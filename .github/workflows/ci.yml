@@ -36,6 +36,13 @@ jobs:
       #     processes; run them locally before a PR that touches split mode.
       #   smoke:adopt  — scans the host's real running agent sessions, so its
       #     result depends on the machine and means nothing on a runner.
+      #
+      # A failed step stops the ones after it, and a check that never executes
+      # proves nothing, so the quick hermetic ones that keep regressing come
+      # first — the watched-project smoke owns the synchronization path.
+      - name: watched-project smoke
+        run: pnpm --filter @shape/bridge smoke:watched-project
+
       - name: shared contract smoke
         run: pnpm smoke:shared
 
@@ -47,9 +54,6 @@ jobs:
 
       - name: bridge end-to-end smoke
         run: pnpm --filter @shape/bridge smoke
-
-      - name: watched-project smoke
-        run: pnpm --filter @shape/bridge smoke:watched-project
 
       - name: link omp extension selftest
         run: pnpm --filter @shape/link selftest:omp
