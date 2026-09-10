@@ -16,7 +16,7 @@ jobs:
 
       # No version pin: pnpm/action-setup reads `packageManager` from package.json,
       # so the runner and a developer machine use the same pnpm.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
       - uses: actions/setup-node@v4
         with:
