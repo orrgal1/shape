@@ -38,7 +38,7 @@ const PICK_DIRECTORY_JXA = [
   "panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false;",
   'panel.message = "Add a watched project to Shape"; panel.prompt = "Add";',
   'panel.directoryURL = $.NSURL.fileURLWithPath($("~").stringByExpandingTildeInPath);',
-  "if (panel.runModal() !== $.NSModalResponseOK) $.exit(1);",
+  "if (panel.runModal !== $.NSModalResponseOK) $.exit(1);",
   "ObjC.unwrap(panel.URLs.objectAtIndex(0).path);",
 ].join(" ");
 
