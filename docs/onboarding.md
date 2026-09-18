@@ -35,6 +35,8 @@ These phrases are harness prompts. The installed skills call the checkout-local
   not switch the checkout or include dirty, staged, or untracked files.
 - The first map describes the whole branch. Later maps use the commit delta when ancestry is
   trustworthy and automatically fall back to a full map after rebases or missing history.
+- Binary changes remain named in `changedPaths` and appear as binary-difference markers; Shape omits
+  encoded binary patch bodies so large assets cannot exhaust the mapping process's output buffer.
 - A map becomes durable only after its final atomic commit. A stale or invalid update changes
   nothing.
 - Live semantic changes are visibly uncommitted. They do not rewrite the committed map or advance

@@ -101,8 +101,10 @@ export async function mapDiffContext(repoRoot, mappedCommit, toCommit, hasMap, h
   const fromTree = fromCommit ?? await emptyTree(repoRoot);
   const [names, patch] = await Promise.all([
     gitResult(repoRoot, ["diff", "--name-only", "-z", "--find-renames", fromTree, toCommit, "--"]),
+    // Keep --binary absent: semantic mapping needs text hunks and change markers,
+    // while encoded binary patch bodies can exceed the child-process output bound.
     gitResult(repoRoot, [
-      "diff", "--no-ext-diff", "--no-textconv", "--binary", "--full-index",
+      "diff", "--no-ext-diff", "--no-textconv", "--full-index",
       "--find-renames", fromTree, toCommit, "--",
     ]),
   ]);
