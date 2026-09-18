@@ -1,43 +1,38 @@
-# Skills
+# Shape skills
 
-Shape ships three coding-harness skills. They are operational instructions loaded by a harness,
-not general documentation:
+Shape installs three coding-harness skills:
 
-- **shape-serve** discovers known Shape services first, then connects to a verified service or
-  starts one in the foreground under harness process supervision. Its wizard covers local or
-  remote placement, port, storage, authentication, and the TLS-or-loopback-SSH trust boundary.
-- **shape-map** prepares an immutable snapshot of the original repository's requested branch
-  (`main` by default), has the model author honest semantic canvas operations from the
-  snapshot, diff, reality, and prior document, and then atomically finishes or explicitly
-  aborts. Prepare alone is not a completed map.
-- **shape-live** explicitly starts reporting for the current session, emits meaningful activity
-  and optional uncommitted semantic operations, and stops with the returned session handle. It
-  does not claim to retrofit native hooks into an already-running harness.
+- **shape-serve** — connect to or start the server.
+- **shape-map** — map a committed branch (`main` by default).
+- **shape-live** — report the current session on an already-mapped branch.
 
-## Installation
+## Install
 
-Run Shape's installer from its stable checkout:
+From a stable Shape checkout:
 
 ```bash
-pnpm shape install
+pnpm shape install omp       # OMP
+pnpm shape install claude    # Claude Code
+pnpm shape install           # both
 ```
 
-The default (equivalently, `pnpm shape install all`) installs all three skills into both actual
-standard skill roots:
+For another harness:
+
+```bash
+pnpm shape install --custom-dir /absolute/path/to/skills
+```
+
+Standard targets:
 
 - OMP: `~/.omp/agent/skills`
 - Claude Code: `~/.claude/skills`
 
-Use `pnpm shape install omp` or `pnpm shape install claude` to target one standard root. For a
-harness with another skill root, use `pnpm shape install --custom-dir <directory>`; add `all`
-before that option to install the standard roots as well. Installation is idempotent, preserves
-unrelated files, and refuses to overwrite an unowned same-name skill directory.
+The installer preserves unrelated files and refuses to overwrite an unowned same-name skill. Each
+installed skill points to this checkout's absolute `scripts/shape.mjs` path, so keep the checkout in
+place or reinstall after moving it.
 
-The installer writes a safely JSON-encoded, structured-argv **absolute** path to this checkout's
-`scripts/shape.mjs` into every installed skill. Consequently the skills work from the target
-repository—or any other current working directory—without a hardcoded user path in the source
-skill documents. Move the Shape checkout only by reinstalling the skills from its new stable
-location.
+Skills are normally loaded when a harness session starts. Installing them does not retrofit the
+current process. During the installation session, read the checked-in `skills/<name>/SKILL.md`
+directly; use the installed prompt in later sessions.
 
-See [`docs/onboarding.md`](../docs/onboarding.md) for the complete serve → map → live workflow,
-transaction boundaries, branch baseline/live overlay model, and remote trust requirements.
+See [`docs/onboarding.md`](../docs/onboarding.md) for the short serve → map → live workflow.
