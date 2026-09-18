@@ -17,10 +17,12 @@
  * session is reporting in from it.
  *
  * Run: node src/index.ts [--cwd <dir>] [--port <n>] [--db <file>]
+ *                           [--web-dir <dir>]
  */
 
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { BRIDGE_PORT, BRIDGE_WS_PATH } from "../../shared/src/index.ts";
 import { AgentFleet } from "./agent/fleet.ts";
 import { LOCAL_TENANT } from "./server/auth.ts";
@@ -39,6 +41,8 @@ interface Cli {
   port: number;
   /** `--db <file>`: the database every project's canvas is kept in */
   db: string;
+  /** `--web-dir <dir>`: production canvas assets served on the bridge port */
+  webDir: string;
 }
 
 function parseArgv(argv: string[]): Cli {
@@ -46,6 +50,7 @@ function parseArgv(argv: string[]): Cli {
     cwd: null,
     port: BRIDGE_PORT,
     db: join(process.env.SHAPE_HOME ?? homedir(), ".shape", "shape.db"),
+    webDir: fileURLToPath(new URL("../../web/dist/", import.meta.url)),
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -63,6 +68,9 @@ function parseArgv(argv: string[]): Cli {
     } else if (arg === "--db" && next !== undefined) {
       cli.db = resolve(next);
       i++;
+    } else if (arg === "--web-dir" && next !== undefined) {
+      cli.webDir = resolve(next);
+      i++;
     } else {
       throw new Error(`unknown argument ${arg}`);
     }
@@ -75,7 +83,7 @@ function parseArgv(argv: string[]): Cli {
 try {
   const cli = parseArgv(process.argv.slice(2));
   const mgr = process.env.SHAPE_MGR;
-  const sockets = new SocketServer({ port: cli.port });
+  const sockets = new SocketServer({ port: cli.port, webDir: cli.webDir });
   // one database for every project this user opens, keyed by project AND
   // worktree, so every variation of a repo keeps its own canvas on the one
   // canvas they are merged onto

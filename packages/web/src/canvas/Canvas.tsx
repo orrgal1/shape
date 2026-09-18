@@ -14,7 +14,7 @@ import { useEffect, useMemo } from "react";
 import { buildDeltaView } from "../deltaView.ts";
 import { selectGhosts, selectLayer } from "../layer.ts";
 import { STRIP_ID } from "../layout.ts";
-import { branchOf, NO_WORKTREES, selectThinking, toneOf, useApp } from "../store.ts";
+import { branchOf, NO_BRANCHES, selectThinking, toneOf, useApp } from "../store.ts";
 import { BubbleNode } from "./BubbleNode.tsx";
 import { GhostNode, StripNode } from "./GhostNode.tsx";
 import { RelationEdge } from "./RelationEdge.tsx";
@@ -63,7 +63,7 @@ export function Canvas() {
   const activityBy = useApp((state) => state.activity);
   const where = useApp((state) => state.where);
   const worktreeIds = useApp((state) => state.worktreeIds);
-  const worktrees = useApp((state) => state.session?.worktrees ?? NO_WORKTREES);
+  const branches = useApp((state) => state.session?.branches ?? NO_BRANCHES);
   const filter = useApp((state) => state.filter);
   const liveShowReality = useApp((state) => state.showReality);
   const liveFocus = useApp((state) => state.focus);
@@ -188,16 +188,16 @@ export function Canvas() {
    * apart either.
    */
   const shown = useMemo(
-    () => worktrees.filter((entry) => filter === null || filter.has(entry.id)),
-    [worktrees, filter],
+    () => branches.filter((entry) => filter === null || filter.has(entry.id)),
+    [branches, filter],
   );
   const variations = useMemo(() => {
     const looks: Record<string, { branch: string; tone: number }> = {};
     for (const entry of shown) {
-      looks[entry.id] = { branch: branchOf(worktrees, entry.id), tone: toneOf(worktreeIds, entry.id) };
+      looks[entry.id] = { branch: branchOf(branches, entry.id), tone: toneOf(worktreeIds, entry.id) };
     }
     return { merged: !comparing && shown.length > 1, looks, where, activity: activityBy };
-  }, [comparing, shown, worktrees, worktreeIds, where, activityBy]);
+  }, [comparing, shown, branches, worktreeIds, where, activityBy]);
 
   const { nodes, edges } = useMemo(
     () =>

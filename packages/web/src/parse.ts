@@ -13,6 +13,7 @@ import {
   type NodeKind,
   type AgentSession,
   type AgentState,
+  type CanvasBranchInfo,
   type BackendInfo,
   type CatchUpState,
   type DriftMap,
@@ -324,7 +325,21 @@ function asWorktree(value: unknown): WorktreeInfo | null {
   return { id, path, branch, head };
 }
 
-const BACKEND_EVENT_KINDS: readonly string[] = ["native", "hooks", "transcript", "none"];
+function asCanvasBranchInfo(value: unknown): CanvasBranchInfo | null {
+  if (!isRecord(value)) return null;
+  if (value.head === undefined || value.mappedCommit === undefined || value.path === undefined) return null;
+  const id = asStr(value.id);
+  const branch = asStr(value.branch);
+  const head = asNullableStr(value.head);
+  const mappedCommit = asNullableStr(value.mappedCommit);
+  const path = asNullableStr(value.path);
+  if (id === null || id === "" || branch === null || branch === "") return null;
+  if (head === undefined || mappedCommit === undefined || path === undefined) return null;
+  if (typeof value.live !== "boolean" || typeof value.isDefault !== "boolean") return null;
+  return { id, branch, head, mappedCommit, live: value.live, path, isDefault: value.isDefault };
+}
+
+const BACKEND_EVENT_KINDS: readonly string[] = ["native", "hooks", "reported", "transcript", "none"];
 const BACKEND_TERMINALS: readonly string[] = ["external", "none"];
 
 /** one tool found on the machine the agent runs on: a launcher or a harness */
@@ -432,8 +447,9 @@ function asSessionInfo(value: unknown): SessionInfo | null {
   if (!isRecord(value)) return null;
   const cwd = asStr(value.cwd);
   const worktrees = mapAll(value.worktrees, asWorktree);
+  const branches = mapAll(value.branches, asCanvasBranchInfo);
   const sessions = mapAll(value.sessions, asWorktreeSession);
-  if (cwd === null || worktrees === null || sessions === null) return null;
+  if (cwd === null || worktrees === null || branches === null || sessions === null) return null;
   if (typeof value.targetHasCode !== "boolean") return null;
   if (typeof value.agentConnected !== "boolean") return null;
   // an older bridge wrote no directive: nothing for a launcher to read
@@ -443,6 +459,7 @@ function asSessionInfo(value: unknown): SessionInfo | null {
     cwd,
     targetHasCode: value.targetHasCode,
     worktrees,
+    branches,
     sessions,
     agentConnected: value.agentConnected,
     directivePath,

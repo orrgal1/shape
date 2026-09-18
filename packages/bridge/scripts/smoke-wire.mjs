@@ -13,11 +13,10 @@
  *      left, including watched-project registration and active/inactive status
  *      — plus the removed steering, launching and old picker frames, which
  *      still do not parse
- *   3. `openSqliteStorage`: worktree-keyed graphs, revisions and audit lines,
- *      the v1 → v2 → v3 migrations (a v1 database walks both steps, a v2 one
- *      only the second) that put a pre-worktree canvas on the main worktree of
- *      its project and give every stored project a status, and
- *      `adoptLegacyKey` moving a canvas off the project key an older Shape
+ *   3. `openSqliteStorage`: durable repository+branch graphs, revisions and
+ *      audit lines, the v1 → v2 → v3 → v4 migrations that preserve legacy
+ *      effective graphs without inventing committed baselines, atomic map/live
+ *      batches, and `adoptLegacyKey` moving a canvas off an older project key
  *      derived from a worktree's directory
  *   4. every loopback frame through `parseLinkMsg`, including the `delivered`
  *      receipt a harness on an older integration still sends: it parses, and
@@ -448,7 +447,7 @@ for (const [label, frame] of [
 }
 
 // ---------------------------------------------------------------------------
-// 4. Storage: worktree-keyed rows
+// 4. Storage: legacy compatibility and durable branch rows
 // ---------------------------------------------------------------------------
 
 const dir = mkdtempSync(join(tmpdir(), "vh-wire-"));
@@ -530,12 +529,183 @@ const dir = mkdtempSync(join(tmpdir(), "vh-wire-"));
     JSON.stringify(audit),
   );
   const version = db.prepare("PRAGMA user_version").get();
-  check("a fresh database is written at schema 3", version.user_version === 3, JSON.stringify(version));
+  check("a fresh database is written at schema 4", version.user_version === 4, JSON.stringify(version));
   db.close();
 }
 
+{
+  const storage = openSqliteStorage(join(dir, "branch-domain.db"));
+  const repository = { id: "repo-map", label: "mapped repo", path: "/display-only/repo" };
+  const branch = "refs/heads/main";
+  const reality = { nodes: [], edges: [], symbols: [], infra: [], verification: [], extractedAt: null, head: null };
+  const registration = {
+    project: { ...PROJECT, key: repository.id, cwd: repository.path },
+    tenant: "local",
+    worktrees: [],
+    sessions: [],
+    controlOnly: true,
+    liveSessions: 0,
+    status: "active",
+    statusChangedAt: "2026-01-01T00:00:00.000Z",
+    lastSeen: "2026-01-01T00:00:00.000Z",
+  };
+  await storage.upsertBranch("local", repository.id, {
+    id: branch,
+    branch: "main",
+    head: null,
+    mappedCommit: null,
+    live: false,
+    path: repository.path,
+    isDefault: true,
+  });
+  await storage.saveGraph("local", repository.id, branch, {
+    rev: 0,
+    nodes: [],
+    edges: [],
+    reality,
+    drift: {},
+  });
+  check(
+    "a pristine unmapped checkout is not an uncommitted live overlay",
+    (await storage.readBranch("local", repository.id, branch))?.info.live === false,
+  );
+  const node = (id, parentId = null) => ({
+    id,
+    parentId,
+    label: id,
+    summary: `The ${id} capability`,
+    phase: "idea",
+    layer: "build",
+  });
+  const firstCommit = "a".repeat(40);
+  const mapped = await storage.mapCommit("local", {
+    type: "map_commit",
+    requestId: "map-1",
+    repository,
+    branch,
+    expectedRevision: 0,
+    expectedMappedCommit: null,
+    commit: firstCommit,
+    mode: "initial",
+    ops: [{ op: "upsert_node", node: node("root") }],
+    reality,
+  }, registration);
+  check("an initial map atomically creates the committed and effective branch", mapped.type === "map_committed");
+  check("the first map makes its project restart-visible in the same transaction", await storage.hasProject("local", repository.id));
+  const committed = await storage.readBranch("local", repository.id, branch);
+  check(
+    "the committed baseline and effective graph land together",
+    committed?.baseline?.nodes[0]?.id === "root" &&
+      committed.effective.nodes[0]?.id === "root" &&
+      committed.info.mappedCommit === firstCommit,
+    JSON.stringify(committed),
+  );
+
+  const beforeConflict = JSON.stringify(committed);
+  const checkpointConflict = await storage.mapCommit("local", {
+    type: "map_commit",
+    requestId: "map-stale-checkpoint",
+    repository,
+    branch,
+    expectedRevision: committed?.effective.rev ?? -1,
+    expectedMappedCommit: "b".repeat(40),
+    commit: "c".repeat(40),
+    mode: "incremental",
+    ops: [],
+    reality,
+  });
+  check(
+    "a stale checkpoint rejects the whole map without touching state",
+    checkpointConflict.type === "control_error" &&
+      checkpointConflict.code === "conflict" &&
+      JSON.stringify(await storage.readBranch("local", repository.id, branch)) === beforeConflict,
+  );
+
+  const invalidBatch = await storage.mapCommit("local", {
+    type: "map_commit",
+    requestId: "map-invalid",
+    repository,
+    branch,
+    expectedRevision: committed?.effective.rev ?? -1,
+    expectedMappedCommit: firstCommit,
+    commit: "d".repeat(40),
+    mode: "incremental",
+    ops: [
+      { op: "upsert_node", node: node("would-have-landed") },
+      { op: "upsert_node", node: node("bad-child", "missing-parent") },
+    ],
+    reality,
+  });
+  check(
+    "one invalid op rejects a mixed batch without applying its valid prefix",
+    invalidBatch.type === "control_error" &&
+      invalidBatch.code === "invalid" &&
+      JSON.stringify(await storage.readBranch("local", repository.id, branch)) === beforeConflict,
+  );
+
+  const live = await storage.liveUpdate("local", {
+    type: "live_update",
+    requestId: "live-1",
+    repository,
+    branch,
+    sessionId: "session-1",
+    state: "working",
+    ops: [{ op: "upsert_node", node: node("live-only") }],
+  });
+  const liveState = await storage.readBranch("local", repository.id, branch);
+  check(
+    "live ops advance only the effective graph and live metadata",
+    live.type === "live_updated" &&
+      liveState?.effective.nodes.some((entry) => entry.id === "live-only") === true &&
+      liveState.baseline?.nodes.some((entry) => entry.id === "live-only") === false &&
+      liveState.info.mappedCommit === firstCommit &&
+      liveState.info.live,
+    JSON.stringify(liveState),
+  );
+  const beforeStaleRevision = JSON.stringify(liveState);
+  const revisionConflict = await storage.mapCommit("local", {
+    type: "map_commit",
+    requestId: "map-stale-revision",
+    repository,
+    branch,
+    expectedRevision: committed?.effective.rev ?? -1,
+    expectedMappedCommit: firstCommit,
+    commit: "e".repeat(40),
+    mode: "incremental",
+    ops: [],
+    reality,
+  });
+  check(
+    "a live graph change makes a prepared map revision stale without touching state",
+    revisionConflict.type === "control_error" &&
+      revisionConflict.code === "conflict" &&
+      JSON.stringify(await storage.readBranch("local", repository.id, branch)) === beforeStaleRevision,
+  );
+  const emptyFull = await storage.mapCommit("local", {
+    type: "map_commit",
+    requestId: "map-empty-full",
+    repository,
+    branch,
+    expectedRevision: liveState?.effective.rev ?? -1,
+    expectedMappedCommit: firstCommit,
+    commit: "f".repeat(40),
+    mode: "full",
+    ops: [],
+    reality,
+  });
+  const emptyState = await storage.readBranch("local", repository.id, branch);
+  check(
+    "an empty full mapping is a legitimate committed checkpoint",
+    emptyFull.type === "map_committed" &&
+      emptyState?.baseline?.nodes.length === 0 &&
+      emptyState.info.mappedCommit === "f".repeat(40),
+    JSON.stringify(emptyState),
+  );
+  storage.close();
+}
+
 // ---------------------------------------------------------------------------
-// 5. Storage: the v1 → v3 migration, walked in two steps
+// 5. Storage: the v1 → v4 migration, walked in order
 // ---------------------------------------------------------------------------
 
 {
@@ -604,17 +774,23 @@ CREATE TABLE audit (
   old.close();
 
   const storage = openSqliteStorage(file);
-  const migrated = await storage.loadGraph("local", "k-old", real);
+  const branch = "refs/heads/main";
+  const migrated = await storage.readBranch("local", "k-old", branch);
   check(
-    "a pre-worktree canvas is readable as the main worktree's",
-    migrated?.nodes[0]?.id === "old-bubble",
+    "a pre-worktree canvas is readable as the named main branch's effective graph",
+    migrated?.effective.nodes[0]?.id === "old-bubble",
     JSON.stringify(migrated),
   );
   check(
-    "the migrated canvas is NOT readable under some other worktree",
-    (await storage.loadGraph("local", "k-old", "/repo/feature")) === null,
+    "legacy effective data is not promoted to a committed mapping",
+    migrated?.baseline === null && migrated.info.mappedCommit === null,
+    JSON.stringify(migrated),
   );
-  const revs = await storage.listRevisions("local", "k-old", real);
+  check(
+    "the migrated canvas is NOT readable under some other branch",
+    (await storage.loadGraph("local", "k-old", "refs/heads/feature")) === null,
+  );
+  const revs = await storage.listRevisions("local", "k-old", branch);
   check("its revisions moved with it", revs.map((r) => r.rev).join() === "3", JSON.stringify(revs));
   const orphan = await storage.loadGraph("local", "k-orphan", "k-orphan");
   check(
@@ -641,11 +817,11 @@ CREATE TABLE audit (
   );
 
   // a write after the migration must land on the same row, not beside it
-  await storage.saveGraph("local", "k-old", real, { rev: 4, nodes: [], edges: [] });
+  await storage.saveGraph("local", "k-old", branch, { rev: 4, nodes: [], edges: [] });
   storage.close();
 
   const db = new DatabaseSync(file);
-  check("the migrated database reports schema 3", db.prepare("PRAGMA user_version").get().user_version === 3);
+  check("the migrated database reports schema 4", db.prepare("PRAGMA user_version").get().user_version === 4);
   check(
     "a post-migration save updates the migrated row instead of adding one",
     db.prepare("SELECT count(*) AS n FROM graphs WHERE tenant = ? AND key = ?").get("local", "k-old").n === 1,
@@ -658,15 +834,15 @@ CREATE TABLE audit (
   );
   db.close();
 
-  // re-opening a database already at 3 must not migrate a second time
+  // re-opening a database already at 4 must not migrate a second time
   const reopened = openSqliteStorage(file);
-  const again = await reopened.loadGraph("local", "k-old", real);
+  const again = await reopened.loadGraph("local", "k-old", branch);
   check("re-opening a migrated database is a no-op", again?.rev === 4, JSON.stringify(again));
   reopened.close();
 }
 
 // ---------------------------------------------------------------------------
-// 6. Storage: the v2 → v3 migration
+// 6. Storage: the v2 → v4 migration
 // ---------------------------------------------------------------------------
 
 {
@@ -810,15 +986,22 @@ CREATE TABLE audit (
     saved?.liveSessions === 2 && saved?.lastSeen === "2026-02-01T00:00:00.000Z",
     JSON.stringify([saved?.liveSessions, saved?.lastSeen]),
   );
-  const graph = await storage.loadGraph("local", "k-v2", WT);
-  check("a canvas stored under v2 comes through the migration untouched", graph?.rev === 7 && graph?.nodes[0]?.id === "v2-bubble", JSON.stringify(graph));
+  const graph = await storage.readBranch("local", "k-v2", "refs/heads/main");
+  check(
+    "a canvas stored under v2 becomes an uncommitted effective branch graph",
+    graph?.effective.rev === 7 &&
+      graph.effective.nodes[0]?.id === "v2-bubble" &&
+      graph.baseline === null &&
+      graph.info.mappedCommit === null,
+    JSON.stringify(graph),
+  );
   storage.close();
 
   const db = new DatabaseSync(file);
-  check("the migrated database reports schema 3", db.prepare("PRAGMA user_version").get().user_version === 3);
+  check("the migrated database reports schema 4", db.prepare("PRAGMA user_version").get().user_version === 4);
   db.close();
 
-  // re-opening a database already at 3 must not migrate a second time: the
+  // re-opening a database already at 4 must not migrate a second time: the
   // columns the step adds are already there
   const reopened = openSqliteStorage(file);
   const after = await reopened.listProjects();
@@ -831,7 +1014,7 @@ CREATE TABLE audit (
   );
   reopened.close();
   const reread = new DatabaseSync(file);
-  check("and it is still at schema 3", reread.prepare("PRAGMA user_version").get().user_version === 3);
+  check("and it is still at schema 4", reread.prepare("PRAGMA user_version").get().user_version === 4);
   reread.close();
 }
 
@@ -882,6 +1065,21 @@ CREATE TABLE audit (
     "the legacy canvas of another worktree is not this worktree's to adopt",
     (await storage.adoptLegacyKey("local", OLD, NEW, WT2)) === false,
   );
+  const checkoutless = "refs/heads/release";
+  await storage.upsertBranch("local", OLD, {
+    id: checkoutless,
+    branch: "release",
+    head: "1".repeat(40),
+    mappedCommit: null,
+    live: true,
+    path: null,
+    isDefault: false,
+  });
+  await storage.saveGraph("local", OLD, checkoutless, {
+    rev: 5,
+    nodes: [{ ...bubble("checkoutless"), layer: "verify" }],
+    edges: [],
+  });
   check("a canvas under an older project key is adopted", (await storage.adoptLegacyKey("local", OLD, NEW, WT)) === true);
 
   const graph = await storage.loadGraph("local", NEW, WT);
@@ -891,6 +1089,14 @@ CREATE TABLE audit (
     JSON.stringify(graph),
   );
   check("the legacy key no longer holds it", (await storage.loadGraph("local", OLD, WT)) === null);
+  const adoptedCheckoutless = await storage.readBranch("local", NEW, checkoutless);
+  check(
+    "repository-key adoption moves a checkout-less durable branch without fabricating a baseline",
+    adoptedCheckoutless?.effective.nodes[0]?.layer === "correctness" &&
+      adoptedCheckoutless.baseline === null &&
+      (await storage.readBranch("local", OLD, checkoutless)) === null,
+    JSON.stringify(adoptedCheckoutless),
+  );
   const revs = await storage.listRevisions("local", NEW, WT);
   check("its revisions moved with it", revs.map((r) => r.rev).join() === "1,11", JSON.stringify(revs));
   const rev1 = await storage.loadRevision("local", NEW, WT, 1);
@@ -901,8 +1107,8 @@ CREATE TABLE audit (
   );
   check("the legacy key keeps no revisions", (await storage.listRevisions("local", OLD, WT)).length === 0);
   check(
-    "the legacy registry row is gone: one project, listed once",
-    (await storage.listProjects()).every((row) => row.project.key !== OLD),
+    "the legacy registry row is gone only after neither graphs nor branch rows remain",
+    !(await storage.hasProject("local", OLD)),
     JSON.stringify((await storage.listProjects()).map((row) => row.project.key)),
   );
 

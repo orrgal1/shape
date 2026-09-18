@@ -138,9 +138,10 @@ export function mountLoopbackLink(sockets: SocketServer, opts: LoopbackLinkOptio
       const routed = io.handle(msg, (out) => {
         if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(out));
       });
-      // only a hello asks for a session; the verdict on the others is this
-      // one's, and re-dialling would not change it
-      if (msg.type !== "hello") return;
+      // Any valid frame can discover that a previously greeted caller no
+      // longer has an active runtime (for example while its project is
+      // parked). Remember the routing refusal so reactivation can hang up the
+      // stale socket and let the harness re-dial and greet the new runtime.
       if (routed) refused.delete(socket);
       else refused.add(socket);
     });

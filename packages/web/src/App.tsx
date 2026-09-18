@@ -2,13 +2,14 @@ import { ReactFlowProvider } from "@xyflow/react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   layerOf,
+  type CanvasBranchInfo,
   type ManagerHandle,
   type ProjectStatus,
   type ProjectSummary,
   type ProjectTools,
-  type WorktreeInfo,
 } from "../../shared/src/index.ts";
 import { Compare } from "./Compare.tsx";
+import { ConnectionSetup } from "./ConnectionSetup.tsx";
 import { SidePanel } from "./SidePanel.tsx";
 import { Canvas } from "./canvas/Canvas.tsx";
 import { useDismissable } from "./dismiss.ts";
@@ -25,11 +26,10 @@ import {
 import { isMockMode, isSwitcherVariant, startMock } from "./mock.ts";
 import {
   branchOf,
+  NO_BRANCHES,
   NO_NOW,
   NO_RUNNING,
-  NO_WORKTREES,
   runsIn,
-  selectAgent,
   selectCurrentProject,
   selectGhostCount,
   selectNow,
@@ -347,13 +347,12 @@ function ProjectSwitcher() {
 /**
  * Which variations of the project are on the canvas.
  *
- * Every variation of a repo is on one canvas, merged: this is what narrows it,
- * and the way over to the terminal of whichever session is working in one. The
- * word "worktree" never appears — the register rule applies to everything a
- * reader sees, and a variation is its branch to them.
+ * Every mapped branch of a repo is on one canvas, merged: this narrows the
+ * reading, and offers the way over to a terminal only when a live harness
+ * explicitly reports one. A variation may be mapped without a local checkout.
  */
 function VariationFilter() {
-  const worktrees = useApp((state) => state.session?.worktrees ?? NO_WORKTREES);
+  const branches = useApp((state) => state.session?.branches ?? NO_BRANCHES);
   const running = useApp((state) => state.session?.sessions ?? NO_RUNNING);
   const worktreeIds = useApp((state) => state.worktreeIds);
   const filter = useApp((state) => state.filter);
@@ -364,17 +363,16 @@ function VariationFilter() {
   const [open, setOpen] = useState(false);
   const menuRef = useDismissable(open, setOpen);
 
-  if (worktrees.length === 0) return null;
+  if (branches.length === 0) return null;
 
-  const shown = worktrees.filter((entry) => filter === null || filter.has(entry.id));
-  const isRunning = (id: string): boolean => running.some((entry) => entry.worktree === id);
+  const shown = branches.filter((entry) => filter === null || filter.has(entry.id));
   /** where that variation's session runs, or null when nothing runs there */
   const terminalOf = (id: string): "external" | "none" | null =>
     running.find((entry) => entry.worktree === id)?.backend.capabilities.terminal ?? null;
   /**
    * Going to a variation's terminal makes it the one the header and the
    * revision picker are about: reading one branch's shell while the pills name
-   * another is how a reader ends up attributing work to the wrong checkout.
+   * another is how a reader ends up attributing work to the wrong branch.
    */
   const goTerminal = (id: string): void => {
     setTarget(id);
@@ -382,16 +380,16 @@ function VariationFilter() {
     notify("opened in your terminal");
     setOpen(false);
   };
-  const nameOf = (entry: WorktreeInfo): string => branchOf(worktrees, entry.id);
+  const nameOf = (entry: CanvasBranchInfo): string => branchOf(branches, entry.id);
   // the pill says what is on the canvas: one variation by name, every variation,
   // or how many of how many
   const only = shown.length === 1 ? shown[0] : undefined;
   const label =
     only !== undefined
-      ? branchOf(worktrees, only.id)
+      ? branchOf(branches, only.id)
       : filter === null
         ? "all"
-        : `${shown.length} of ${worktrees.length}`;
+        : `${shown.length} of ${branches.length}`;
 
   /** a checkbox click narrows to, or widens back over, that one variation */
   const toggle = (id: string): void => {
@@ -411,7 +409,7 @@ function VariationFilter() {
         onClick={() => setOpen((value) => !value)}
         title={
           filter === null
-            ? `every variation is on the canvas: ${worktrees.map(nameOf).join(", ")}`
+            ? `every variation is on the canvas: ${branches.map(nameOf).join(", ")}`
             : `on the canvas: ${shown.map(nameOf).join(", ")}`
         }
       >
@@ -424,29 +422,34 @@ function VariationFilter() {
         <div className="project-menu">
           <p className="project-menu-title">variations of this project</p>
           <p className="tl-empty">
-            Separate copies of the same project, drawn on one canvas. A bubble carries a dot per variation that has
+            Mapped branches of the same project, drawn on one canvas. A bubble carries a dot per variation that has
             it, hollow where that variation says something else.
           </p>
           <ul className="project-recents variation-list">
-            {worktrees.map((entry) => {
+            {branches.map((entry) => {
               const on = filter === null || filter.has(entry.id);
-              const live = isRunning(entry.id);
               return (
                 <li key={entry.id} className="variation-row">
-                  <label className="variation-pick" title={entry.path}>
+                  <label className="variation-pick" title={entry.path ?? undefined}>
                     <input type="checkbox" checked={on} onChange={() => toggle(entry.id)} />
                     <span
                       className="variation-swatch"
                       style={{ ["--wt" as string]: `var(--wt-${toneOf(worktreeIds, entry.id)})` }}
                     />
                     <span className="project-recent-name">{nameOf(entry)}</span>
-                    {entry.branch === null ? <span className="variation-detached">no branch</span> : null}
-                    <span className="variation-live" data-on={live}>
-                      <span className="dot" />
-                      {live ? "working here" : "no session"}
-                    </span>
+                    {entry.mappedCommit === null ? null : (
+                      <span className="variation-checkpoint" title={`mapped checkpoint ${entry.mappedCommit}`}>
+                        mapped · {entry.mappedCommit.slice(0, 8)}
+                      </span>
+                    )}
+                    {entry.live ? (
+                      <span className="variation-live">
+                        <span className="dot" />
+                        live · uncommitted
+                      </span>
+                    ) : null}
                   </label>
-                  {offline || !live || terminalOf(entry.id) !== "external" ? null : (
+                  {offline || terminalOf(entry.id) !== "external" ? null : (
                     <button
                       type="button"
                       className="variation-act"
@@ -663,7 +666,7 @@ function LayerSwitch() {
 function TerminalButton() {
   const target = useApp(selectTarget);
   const running = useApp(selectRunningSession);
-  const worktrees = useApp((state) => state.session?.worktrees ?? NO_WORKTREES);
+  const branches = useApp((state) => state.session?.branches ?? NO_BRANCHES);
   const notify = useApp((state) => state.notify);
   const terminal = running?.backend.capabilities.terminal ?? null;
 
@@ -672,7 +675,7 @@ function TerminalButton() {
   // variation with no session reporting in at all.
   if (target === null || terminal !== "external") return null;
 
-  const branch = worktrees.length < 2 ? null : branchOf(worktrees, target);
+  const branch = branches.length < 2 ? null : branchOf(branches, target);
 
   return (
     <button
@@ -738,7 +741,7 @@ function Header() {
   // to name.
   const running = useApp(selectRunningSession);
   const target = useApp(selectTarget);
-  const branch = session === null || target === null ? null : branchOf(session.worktrees, target);
+  const branch = session === null || target === null ? null : branchOf(session.branches, target);
   const model = running?.session.model ?? null;
   const backend = running?.backend;
   // The manager pill is project-wide, not per variation: one manager per
@@ -789,10 +792,14 @@ function Header() {
           <span className={`pill-manager-state${manager.muted ? " pill-manager-none" : ""}`}>{manager.label}</span>
         </span>
       )}
-      {/* the canvas still reads without an agent, but nothing on it will move
-          again — said next to the harness that would have moved it */}
-      {session === null || session.agentConnected ? null : (
-        <span className="pill pill-offline" title="No agent is attached to this project — the picture is frozen">
+      {/* A physical checkout means an observation agent is expected. A room
+          created only through map/live control has no physical worktrees and
+          needs no local agent, so its healthy direct session is not "offline". */}
+      {session === null || session.worktrees.length === 0 || session.agentConnected ? null : (
+        <span
+          className="pill pill-offline"
+          title="The physical observation agent for this project is disconnected"
+        >
           <span className="dot" />
           agent offline
         </span>
@@ -892,10 +899,6 @@ function StageTools() {
  * An empty canvas is three different situations, and only one of them is the
  * blank page the big card was written for.
  *
- * A survey is landing: the room maps a coded checkout by itself the moment a
- * session starts in it, so the card's whole job is to say that and get out of
- * the way — bubbles are on their way in.
- *
  * The code already drew itself: the reality strip is on the canvas, which is
  * the answer to "is anything here", so a full-height splash across it is
  * covering its own evidence. One line, off to the side.
@@ -905,7 +908,6 @@ function StageTools() {
  */
 function EmptyState() {
   const conn = useApp((state) => state.conn);
-  const targetHasCode = useApp((state) => state.session?.targetHasCode === true);
   // nothing is reporting in from this variation yet, which is what the copy
   // promises will change once something does
   const asleep = useApp((state) => !runsIn(state.session, selectTarget(state)));
@@ -913,28 +915,12 @@ function EmptyState() {
   // reality strip IS the canvas, and a full-height splash across the middle of
   // it reads as a screen that never went away.
   const ghostCount = useApp(selectGhostCount);
-  // A coded checkout maps itself the moment a session starts in it, so a
-  // working harness over an empty canvas is that survey landing — the one thing
-  // worth saying while it runs.
-  const agent = useApp(selectAgent);
-  const mapping = targetHasCode && agent !== "idle";
-
-  if (mapping) {
-    return (
-      <div className="empty empty-compact">
-        <p className="empty-kicker">mapping this project</p>
-        <p className="empty-body">Reading the code and drawing it here — bubbles appear as it goes.</p>
-      </div>
-    );
-  }
-
   if (ghostCount > 0) {
     return (
       <div className="empty empty-compact">
         <p className="empty-kicker">not mapped yet</p>
         <p className="empty-body">
-          These are the packages the code declares. A session starting in this checkout maps them into bubbles by
-          itself.
+          These are the packages the code declares. Use the <code>shape-map</code> skill to map them into bubbles.
         </p>
       </div>
     );
@@ -953,9 +939,8 @@ function EmptyState() {
       <p className="empty-body">
         {asleep ? (
           <>
-            Shape draws what the coding agents are doing, and nothing is reporting in from this checkout yet. Start
-            a session in it the way you always do — a tab in your own terminal — and everything it does draws itself
-            here, one bubble per promise it can state in a sentence.
+            Shape draws what coding agents report, and nothing is reporting in from this variation yet. Live agent
+            activity appears here as bubbles, one per promise it can state in a sentence.
           </>
         ) : (
           <>
@@ -1200,6 +1185,7 @@ export function App() {
           container, so giving it a smaller box is what keeps fitView honest */}
       <div className="stage">
         <Header />
+        <ConnectionSetup />
         <StageTools />
         <FocusCard />
         <div className="canvas-row">

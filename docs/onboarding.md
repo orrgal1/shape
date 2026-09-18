@@ -1,110 +1,162 @@
-# The automatic map of an existing project (design, 2026-08-28; read-only since 2026-09-05,
-# with the narrow #35 catch-up exception)
+# Mapping and live onboarding
 
-Brownfield entry: point Shape at a repo that already exists and get a trustworthy canvas
-without anyone asking for one. Two mechanical stages fill the picture and a third verifies it.
-The ordinary pipeline is not a prompt — Shape sends no instruction to an observed session; the
-meaning on top of the skeleton is written by whatever session is working in the repo, in the
-turns it spends on real work (§Where the meaning comes from). Issue #35 adds one bounded
-catch-up run for a newly watched or reactivated project whose graph is missing or stale.
+Shape's onboarding surface is three installed harness skills:
 
-## Principle
+- **shape serve** finds or starts the Shape service and returns its real canvas URL.
+- **shape map** builds or updates the committed semantic map for one repository branch.
+- **shape live** reports the current harness session and its uncommitted semantic edits over
+  that committed map.
 
-The agent never invents the skeleton. Mechanics produce the graph; the model produces the
-meaning; drift rendering verifies the result. Survey, not diary
-(docs/notes/understand.md §self-report).
+The browser is the resulting view, not an orchestration console. It does not prompt, launch,
+type into, or otherwise steer a coding harness.
 
-## Pipeline
+## End-to-end flow
 
-### Stage 1 — reality extraction
+Keep the repository being mapped as the **original repository** throughout setup. Shape itself
+can be cloned to any stable, separate location; its dependencies, built web client, and skills
+belong to that checkout. The installed skills retain the checkout's absolute entrypoint, so
+they work when the harness is later running in the original repository or any other working
+directory.
 
-The server asks the agent for `extract_reality` on the worktree of a session that has just
-reported in, when that worktree has no reality yet, and again whenever a session in it goes
-idle on a new `HEAD`. Reality is the mechanical layer: workspace packages, the imports between
-them, the infrastructure the configuration files prove, the verifications the test and smoke
-files perform, the top-level classes and functions of each file
-(CONTRACTS.md §Reality layer + drift). It costs no model tokens and is agent-read-only.
+Run the skills in this order:
 
-### Stage 2 — mechanical skeleton (instant, zero model cost)
+1. **shape serve** discovers existing configured and local Shape endpoints first. The user can
+   connect to a verified existing service or start a new one. Starting is an explicit,
+   foreground process supervised by the harness's process tool, not a detached daemon.
+2. **shape map** targets the original repository and the requested branch (`main` by default).
+   It prepares an immutable snapshot, performs the semantic mapping work, and finishes the
+   transaction. Preparation alone is not a completed map.
+3. Open the actual canvas URL returned by Shape. Use **shape live** in an already-running
+   coding session to report work and temporary semantic changes as that session proceeds.
 
-When a worktree's reality lands and its intent layer is EMPTY, the server asks the agent for
-`synthesize_skeleton` (`packages/bridge/src/agent/onboarding-fs.ts`) and applies the ops
-itself:
+## Serving and connection trust
 
-- one `component` node per workspace package: id `slug(pkgName)`, `phase: "built"`,
-  `codeRefs: [pkgDir]`, label = short package name, summary = the package's `package.json`
-  `description`, or a placeholder naming the directory when it has none.
-- one `depends` intent edge per cross-package reality edge.
+The serve wizard asks whether the service is local or remote, which port and storage location
+to use, and whether authentication is required. It checks runtime and web-build prerequisites,
+then verifies Shape health and an authenticated control connection before saving a selected
+endpoint. Discovery is deliberately first: it uses known, configured endpoints and bounded
+probes, never a blind network scan and never silently starts a second service.
 
-Level 1 = boundaries enforced by mechanism (workspace packages), per
-docs/notes/understand.md's depth answer. The canvas fills with ground truth before any model
-says a word, and it is deliberately FLAT: mechanics know packages, not domains. The room
-records the seeding as one audit line (`kind: "onboard"`, with how many ops landed) and marks
-the canvas as mapped, so a project is seeded once and a canvas somebody has drawn is never
-overwritten.
+`shape serve connect` saves credentials for CLI control clients; it does not authenticate a
+fresh browser. Open the clean canvas URL. If authentication or connection fails, the canvas
+presents its own token form; the user enters the token securely in the page, which binds it to
+the selected server origin in local storage and retries `/ws`. The token never belongs in a
+URL, chat, command output, or tool output. Verify the browser's WebSocket connection and
+continue reporting only the clean canvas URL.
 
-### Stage 3 — verification render
+For remote setup, the harness may use its SSH and supervised-process tools to install and run
+Shape on the chosen host. Credentials may cross a remote connection only over TLS, or through
+an explicit SSH tunnel whose Shape endpoint is loopback. Shape does not claim native TLS
+termination; use a trusted TLS reverse proxy or the loopback tunnel. Tokens are not placed in
+logged commands or prose. Saved CLI credentials remain in `~/.shape/servers.json` with private
+permissions; browser credentials remain bound to their selected server.
 
-Reality and drift are recomputed on the same trigger as extraction. Drift glow immediately
-marks every bubble whose declared edges disagree with actual imports, whose `codeRefs` point
-at a file or a named part that is gone, and every package no bubble claims — the
-falsifiable-claim bar from docs/notes/understand.md, rendered instead of asserted. A reader
-looking at a glowing bubble is looking at the part of the map that has gone stale; refreshing
-it is work for a session in the terminal, not a button on the canvas.
-## Catch-up synchronization (issue #35)
+## Mapping is a transaction
 
-The automatic map remains mechanical and never starts or prompts an ordinary session. Catch-up
-is separate: when a newly watched or reactivated worktree has no stored Shape graph, or its
-surveyed head differs from the current extracted reality and `HEAD`, the project exposes
-`CatchUpState` instead of claiming it is current. The state is `idle`, `queued`, `running` or
-`failed`; a failure keeps its reason and timestamp visible. `catchUp` aggregates the worktree
-states for the project, while `caughtUp` is true only for the aggregate `idle` state.
+`shape map prepare [branch] --repo <path>` resolves the named local branch to an exact commit;
+it does not switch the checkout or implicitly substitute the current branch. It materializes
+an immutable owned snapshot under Shape's home, derives the mechanical reality layer there,
+and reads the current server state. The preparation records:
 
-The server pins the current extracted reality and `HEAD`, then sends one correlated catch-up
-request. Exactly one OMP synchronization run may start through herdr in the selected project's
-workspace. It is unfocused and is not a general launcher: the run uses Shape's extension and
-the fixed read-only invocation
-`-p --no-session --no-extensions --mode=text --approval-mode=yolo
---tools=read,glob,grep,canvas -e <Shape extension> <prompt>`. No other harness, tool,
-extension, focus action or interactive terminal is allowed, and a current graph launches
-nothing.
+- a preparation ID and snapshot path;
+- canonical repository identity and branch;
+- the pinned destination commit and, when usable, the prior mapped commit;
+- the current effective revision and committed map document;
+- changed paths, a commit-to-commit diff, and extracted reality; and
+- the selected `initial`, `incremental`, or `full` mode.
 
-Canvas writes carry the matching job id. Catch-up becomes `idle` only after that job's canvas
-persistence is recorded at the pinned head; a missing or stale graph, a changed head, or any
-launch, canvas or persistence failure remains visible as `failed` rather than being reported
-as caught up. The browser receives progress and failure state, not a launch control. Picker
-registration and ordinary observation sessions remain read-only: no ordinary browser or
-session path can launch, prompt or focus a coding agent.
+The model then reads that frozen snapshot and existing committed document and chooses honest,
+code-reference-aware semantic operations. An initial or full mapping describes the repository
+from the snapshot rather than manufacturing generic summaries. An incremental mapping updates
+stable entities and removes entities made obsolete by the diff. A legitimate no-diff path
+needs neither a fake operation nor a claim that Shape wrote a new checkpoint.
 
-## Where the meaning comes from
+For an exact incremental no-diff, an empty operation batch is normal and returns
+`committed: false`. An initial or full empty batch is valid only for a genuinely empty mapping
+or an explicit, evidence-backed clear; it is never a shortcut for mapping a nonempty
+repository.
 
-An automatic skeleton says what the parts ARE, never what they promise or what the product
-does. In an ordinary session, that half is written through the `canvas` tool while the session
-works in the repo. The bounded #35 catch-up run may write the same intent layer under its fixed
-prompt and Shape extension; it is not a general session or an onboarding mode. For ordinary
-sessions, what is expected of them is stated in exactly two places:
+`shape map finish <preparation-id> --ops <json-file>` is the commit point. Before sending, the
+local map client revalidates the pinned local branch tip and snapshot. The remote server does
+not interpret or validate a local repository path; it checks the expected effective revision,
+prior checkpoint, and entire semantic operation batch. A stale revision/checkpoint or invalid
+operation rejects the whole batch without advancing the checkpoint. An accepted batch
+atomically stores the committed document, checkpoint, visible graph, reality, and revision.
 
-- `CANVAS_TOOL_DESCRIPTION` (`packages/shared/src/index.ts`), the text every channel hands the
-  agent: the four layers, the three cross-layer links (`realizes`, `hosts`, `verifies`), one
-  product root with its 3–5 capabilities beneath it, plain English, `codeRefs` on anything that
-  owns files, `status` for what is happening right now.
-- the per-project directive, `~/.shape/server/projects/<key>/shape-directive.md`
-  (`packages/bridge/src/agent/directive.ts`), which a session started by hand — or a builder
-  brief the manager writes — can be pointed at. Catch-up's fixed prompt does not broaden the
-  ordinary browser/session boundary.
+A transport error or missing acknowledgement after the request was sent is ambiguous: the
+server may already have accepted and committed it. Do not blindly retry or report the
+repository as mapped or unmapped. Run a fresh prepare, which reads current map state, and
+reconcile the returned mapped commit and effective revision before retrying or reporting
+success. Preparation and an unconfirmed client outcome are never proof of a new map.
 
-The rules that must hold whatever the agent believes are enforced by `applyOps` for every
-caller, not by an onboarding mode: layer walls, one top-level product bubble
-(`op/second-root`), `realizes`/`hosts`/`verifies` only on their own layer and only onto build
-nodes, `codeRefs` shape. See CONTRACTS.md §`canvas` tool. The altitude rule (3–5 bubbles per
-layer, named parent groups beyond that, never a flat sprawl) is advice in the tool description
-and a rendering cap in the client (CONTRACTS.md §Canvas navigation), not a validation error.
+A cleanup failure after the client has confirmed a commit or legitimate no-diff result is not
+ambiguous. Finish returns the confirmed receipt with `cleanupPending: true`, `preparationId`,
+and `cleanupError`; the reported checkpoint is confirmed. Run `shape map abort
+<preparation-id>` to retry cleanup only. Abort discards Shape's owned preparation resources
+and never rolls back a server commit. It is also appropriate for an unsent or abandoned
+preparation; ordinary successful finish cleans the resources itself.
 
-## Degradation and non-goals
+## Incremental versus full
 
-- Non-pnpm/TS repos: the skeleton is empty, so the canvas starts blank and stays blank until an
-  agent draws it; no drift verification until a per-language extractor exists. Accepted scope.
-- No subagent fan-out per package (candidate for large monorepos later).
-- Re-summarization after a commit delta: reality re-extraction keeps drift honest by itself, so
-  a stale bubble is always visible. Rewording it is an ordinary piece of work for a session,
-  asked for where sessions are asked for things — the terminal, or the manager beside it.
+The first map for a repository branch is `initial`. A later map is `incremental` only when the
+stored mapped commit exists locally and is an ancestor of the requested branch tip, allowing
+Shape to pin an exact commit delta. Missing commits or checkpoints, divergent/rebased history,
+or otherwise unverifiable ancestry selects `full`. Full mapping starts the semantic document
+from empty while still preserving the repository/branch history in Shape's store; it does not
+pretend an unsafe delta is incremental.
+
+Reality extraction is mechanical evidence. The model-owned semantic operations express what
+the product and its components mean. Drift compares those claims to reality. These layers are
+related but not interchangeable: installing the skill, extracting reality, or preparing a
+snapshot does not itself create a semantic map.
+
+## Committed baseline and live overlay
+
+Persistent canvas identity is **repository plus branch**, not a checkout or worktree path. Each
+branch has a committed mapped document and exact mapped-commit checkpoint. That pair is the
+trusted baseline produced only by a successful map finish.
+
+Live events produce the effective graph shown on the canvas. Their semantic operations and
+activity form an uncommitted overlay over the branch's mapped baseline and advance the
+effective revision, but they never rewrite the committed document or mapped checkpoint. Map
+prepare reads the committed baseline while also pinning the current effective revision; if a
+live update lands before finish, optimistic concurrency makes the prepared map stale instead
+of silently overwriting the new work.
+
+The browser's branch selector is backed by these durable repository/branch records, even when
+no agent is connected. It identifies the default branch, mapped commit, current head when
+known, and whether live uncommitted state is present. A physical worktree remains useful for
+agent routing, but it is not the map's storage identity.
+
+## Explicit live reporting
+
+The live skill joins an already-running harness session:
+
+1. `shape live start` resolves the current repository and attached branch, persists a pending
+   session handle under Shape's home, and sends an explicit start event. Success returns that
+   handle plus the canvas URL. If acknowledgement is ambiguous, the handle and session are
+   retained so the caller can recover with a matching stop instead of inventing a new session.
+2. `shape live emit --session <handle>` sends meaningful work/idle state, notes, tools, files,
+   and optional atomic canvas operations as the work happens.
+3. `shape live stop --session <handle>` sends the matching stop event. A confirmed stop records
+   a stopped tombstone under Shape's home rather than deleting the handle. A repeat stop is
+   reported as already stopped only for a known, confirmed tombstone; an unknown handle is an
+   error.
+
+Handles and tombstones live under Shape's home, never in the target repository. Detached
+`HEAD` is rejected with guidance to select a branch, and live reporting requires that branch
+to have a committed map. Live operations are honest source-origin events; the skill does not
+fabricate model output or synthetic native harness events.
+
+An installed skill cannot retrofit hooks or an extension into a harness process that is
+already running. Native OMP or Claude activity integration may be reused when that integration
+was already loaded, but the portable workflow is the explicit start/emit/stop protocol above.
+
+## Browser boundary
+
+The canvas reads the committed baseline, the live effective overlay, reality, drift, revisions,
+and session activity. It can select branches and retain the project registry's active/inactive
+state. Mapping and live writes arrive through authenticated control clients and harness
+skills—not browser graph editing. The browser never receives credentials for a repository
+host, never treats a displayed repository path as server filesystem authority, and never
+launches, prompts, types into, or sends work to a coding session.

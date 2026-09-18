@@ -14,7 +14,7 @@
  *                               it, and nothing else is drawn
  *   agent restart             — the room outlives the agent and re-greets it
  *   a second agent            — two projects, select_project joins the other one
- *   remote storage            — a graph row per variation and a registry in <data-dir>/shape.db
+ *   remote storage            — a graph row per branch and a registry in <data-dir>/shape.db
  *   server restart            — the rooms come back; live agents re-bind them
  *   a parked project          — set_project_status closes its room, refuses the
  *                               agent behind it, and survives the next restart
@@ -36,6 +36,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import WebSocket from "ws";
+import { requestControl } from "../../../scripts/lib/client.mjs";
 
 /** the harness stub, by absolute path: a session runs with its worktree as cwd */
 const FAKE_OMP_TUI = join(dirname(fileURLToPath(import.meta.url)), "fake-omp-tui.mjs");
@@ -108,8 +109,7 @@ const ompLogIn = (dir) => join(dir, "fake-omp.log");
 
 /**
  * A committed pnpm workspace: gives the agent a real git HEAD and two packages,
- * so reality extraction succeeds and the two targets are distinguishable on the
- * wire (@<scope>/auth, @<scope>/db).
+ * so the targets are distinguishable on the wire.
  */
 async function seedWorkspace(dir, scope) {
   await mkdir(join(dir, "packages", "auth", "src"), { recursive: true });
@@ -140,12 +140,11 @@ await seedWorkspace(targetA, "ra");
 await seedWorkspace(targetB, "rb");
 
 /**
- * The one variation each target has. A fresh repo nobody ran `git worktree add`
- * in is a single worktree, and its id — what every worktree-scoped frame and
- * every stored row is keyed by — is the realpath of its directory. It is also
- * what the server reports as the project's cwd, which is not the spelling
- * mkdtemp handed out on a machine whose temp dir is a symlink.
+ * Both fixtures use the same public branch id. Physical checkout paths remain
+ * in agent-link routing and worktree inventory, while browser sessions and
+ * canvases use that branch identity.
  */
+const branchId = "refs/heads/smoke";
 const mainA = realpathSync(targetA);
 const mainB = realpathSync(targetB);
 
@@ -160,15 +159,11 @@ let socket = null;
  * real home). Returns a handle whose `log` accumulates the child's stderr —
  * the banners the steps wait on, including the loopback link URL a session
  * dials. cwd stays packages/bridge: the binaries are named relative to it.
- *
- * SHAPE_AUTO_MAP=0 goes to every child: the server is the one that reads it, and
- * the targets below are seeded WITH code and an empty canvas — a room that maps
- * them by itself would write bubbles none of these steps asked for.
  */
 function launch(label, args, extraEnv = {}) {
   const child = spawn(process.execPath, args, {
     cwd: process.cwd(),
-    env: { ...process.env, SHAPE_AUTO_MAP: "0", SHAPE_HOME: fakeHome, ...extraEnv },
+    env: { ...process.env, SHAPE_HOME: fakeHome, ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const handle = { label, child, log: "" };
@@ -346,9 +341,18 @@ try {
     `${String(hello.projectId)} vs ${String(hello.projects?.[0]?.projectId)}`,
   );
   check(
-    "hello serves the remote agent's target as the session cwd and its first variation",
+    "hello serves the remote agent's physical target as project cwd and worktree inventory",
     hello.session.cwd === mainA && hello.session.worktrees[0]?.path === mainA,
     `${hello.session.cwd} / ${JSON.stringify(hello.session.worktrees)}`,
+  );
+  const publicBranch = hello.session.branches.find((branch) => branch.id === branchId);
+  check(
+    "hello exposes the remote checkout as public branch metadata",
+    publicBranch?.branch === "smoke" &&
+      publicBranch.path === mainA &&
+      publicBranch.isDefault === true &&
+      publicBranch.mappedCommit === null,
+    JSON.stringify(hello.session.branches),
   );
   check(
     "an agent that started nothing attaches a project with no session in it",
@@ -356,9 +360,36 @@ try {
     JSON.stringify(hello.session.sessions),
   );
   check(
-    "hello carries the reality layer extracted from the target workspace",
-    hello.graphs[mainA].reality.nodes.map((n) => n.id).sort().join(",") === "r:@ra/auth,r:@ra/db",
-    JSON.stringify(hello.graphs[mainA].reality.nodes.map((n) => n.id)),
+    "hello exposes an empty branch canvas without unsolicited mapping",
+    hello.graphs[branchId].nodes.length === 0 && hello.graphs[branchId].edges.length === 0,
+    JSON.stringify(hello.graphs[branchId]),
+  );
+  const repositoryA = { id: hello.projectId, label: hello.projects[0].label, path: mainA };
+  const mapStateA = await requestControl(
+    { type: "map_read", requestId: "remote-baseline-read", repository: repositoryA, branch: branchId },
+    { server: SERVER_URL },
+  );
+  const headA = execFileSync("git", ["rev-parse", "HEAD"], { cwd: mainA, encoding: "utf8" }).trim();
+  const mappedA = await requestControl(
+    {
+      type: "map_commit",
+      requestId: "remote-baseline-commit",
+      repository: repositoryA,
+      branch: branchId,
+      expectedRevision: mapStateA.revision,
+      expectedMappedCommit: mapStateA.mappedCommit,
+      commit: headA,
+      mode: "initial",
+      ops: [],
+      reality: hello.graphs[branchId].reality,
+      note: "remote smoke empty committed baseline",
+    },
+    { server: SERVER_URL },
+  );
+  check(
+    "the remote branch is explicitly mapped before live session edits",
+    mappedA.type === "map_committed" && mappedA.branch === branchId && mappedA.mappedCommit === headA,
+    JSON.stringify(mappedA),
   );
 
   // --- 3. a session reports in from the target, over the agent's own link ----
@@ -367,11 +398,11 @@ try {
   let sessionA = await startSession("omp-a", agentA, mainA);
   const started = await frameAfter(
     sessionAt,
-    (f) => f.type === "session_started" && f.worktree === mainA && f.backend.id === "omp",
+    (f) => f.type === "session_started" && f.worktree === branchId && f.backend.id === "omp",
     "session_started for the harness that reported in",
   );
   check(
-    "a harness dialing the remote agent's link appears as a session in its variation",
+    "a harness dialing the remote agent's link appears as a session on its branch",
     started.session.sessionId !== null && started.backend.capabilities.hostTool === true,
     JSON.stringify({ session: started.session, capabilities: started.backend.capabilities }),
   );
@@ -389,14 +420,14 @@ try {
   type(sessionA, "build me an auth service");
   const said = await frameAfter(
     turnAt,
-    (f) => f.type === "transcript" && f.worktree === mainA && f.role === "assistant" && f.text.includes("auth service"),
+    (f) => f.type === "transcript" && f.worktree === branchId && f.role === "assistant" && f.text.includes("auth service"),
     "assistant transcript line from the remote session",
   );
   check("what the remote session says reaches the browser as a transcript line", said.text.length > 0, said.text);
 
   const graph = await frameAfter(
     turnAt,
-    (f) => f.type === "graph" && f.worktree === mainA && f.graph.nodes.some((n) => n.id === "auth-service"),
+    (f) => f.type === "graph" && f.worktree === branchId && f.graph.nodes.some((n) => n.id === "auth-service"),
     "graph frame carrying the canvas call",
   );
   check(
@@ -419,7 +450,7 @@ try {
   await stopChild(agentA);
   const sessionLost = await frameAfter(
     goneAt,
-    (f) => f.type === "session_stopped" && f.worktree === mainA,
+    (f) => f.type === "session_stopped" && f.worktree === branchId,
     "session_stopped after the agent left",
   );
   check(
@@ -476,7 +507,7 @@ try {
   type(sessionA, "second life auth service");
   await frameAfter(
     secondTurnAt,
-    (f) => f.type === "graph" && f.worktree === mainA && f.graph.nodes.some((n) => n.id === "auth-service"),
+    (f) => f.type === "graph" && f.worktree === branchId && f.graph.nodes.some((n) => n.id === "auth-service"),
     "graph frame from the second session",
   );
   const starts = ompFrames(ompLogIn(mainA)).filter((f) => f.type === "__start");
@@ -555,13 +586,13 @@ try {
   const graphRow = await waitFor(
     "the first project's graph row in the server's database",
     () =>
-      dbRows("SELECT doc FROM graphs WHERE tenant = ? AND key = ? AND worktree = ?", "local", projectAId, mainA)?.[0] ??
+      dbRows("SELECT doc FROM graphs WHERE tenant = ? AND key = ? AND worktree = ?", "local", projectAId, branchId)?.[0] ??
       null,
     10_000,
   );
   const storedGraph = JSON.parse(graphRow.doc);
   check(
-    "a remote server keeps each variation's graph in <data-dir>/shape.db, keyed by tenant, project and variation",
+    "a remote server keeps each branch graph in <data-dir>/shape.db, keyed by tenant, project and public branch id",
     storedGraph.nodes.some((n) => n.id === "auth-service") &&
       storedGraph.edges.some((e) => e.id === "auth-service--user-db"),
     JSON.stringify(storedGraph.nodes.map((n) => n.id)),
@@ -627,8 +658,8 @@ try {
   );
   check(
     "a restored room keeps its project key and serves the graph the old server persisted",
-    restoredA.projectId === projectAId && backA.graphs[mainA].nodes.some((n) => n.id === "auth-service"),
-    `${restoredA.projectId} vs ${projectAId}; ${JSON.stringify(backA.graphs[mainA]?.nodes.map((n) => n.id))}`,
+    restoredA.projectId === projectAId && backA.graphs[branchId].nodes.some((n) => n.id === "auth-service"),
+    `${restoredA.projectId} vs ${projectAId}; ${JSON.stringify(backA.graphs[branchId]?.nodes.map((n) => n.id))}`,
   );
 
   // --- 9b. a project marked inactive, and what a restart does with it -------
@@ -732,7 +763,7 @@ try {
   // everything that needs the machine — taking the user to a session's own
   // terminal — is refused by name in a room nothing is attached to
   const refusedAloneAt = mark();
-  send({ type: "focus_terminal", worktree: mainA });
+  send({ type: "focus_terminal", worktree: branchId });
   const refusedAlone = await frameAfter(
     refusedAloneAt,
     (f) => f.type === "error",
@@ -744,16 +775,16 @@ try {
     refusedAlone.message,
   );
 
-  // the snapshots are the variation's, not the agent's: two of them must still diff
-  const revs = (agentlessA.revisions[mainA] ?? []).map((r) => r.rev).sort((a, b) => a - b);
+  // the snapshots are the branch's, not the agent's: two of them must still diff
+  const revs = (agentlessA.revisions[branchId] ?? []).map((r) => r.rev).sort((a, b) => a - b);
   const diffAt = mark();
-  if (revs.length >= 2) send({ type: "diff", worktree: mainA, revA: revs[0], revB: revs[1] });
+  if (revs.length >= 2) send({ type: "diff", worktree: branchId, revA: revs[0], revB: revs[1] });
   const delta =
     revs.length < 2
       ? null
       : await frameAfter(
           diffAt,
-          (f) => f.type === "delta" && f.worktree === mainA && f.delta.revA === revs[0] && f.delta.revB === revs[1],
+          (f) => f.type === "delta" && f.worktree === branchId && f.delta.revA === revs[0] && f.delta.revB === revs[1],
           "delta over the restored revisions",
           5_000,
         ).catch(() => null);

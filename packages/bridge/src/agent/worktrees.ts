@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, resolve, sep } from "node:path";
+import { basename, dirname, resolve, sep } from "node:path";
 import type { WorktreeInfo } from "../../../shared/src/index.ts";
 
 /** Run git, resolving to null on any failure (missing git, not a repo, ...). */
@@ -171,6 +171,65 @@ export async function repoIdentity(cwd: string): Promise<RepoIdentity> {
   const worktrees = await listWorktrees(cwd);
   const main = worktrees[0]?.id;
   return { commonDir, main: main ?? target };
+}
+
+/**
+ * Canonical identity for a hosted Git remote. Transport and credentials are
+ * deliberately excluded so common SSH, scp and HTTP(S) spellings of the same
+ * host/repository converge. Local/file remotes return null: they are machine
+ * locations, not portable repository identities.
+ */
+function canonicalOrigin(raw: string): string | null {
+  const origin = raw.trim();
+  if (origin.length === 0) return null;
+
+  let parsed: URL;
+  const hasScheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(origin);
+  const scp = hasScheme ? null : /^(?:[^@/:]+@)?(\[[^\]]+\]|[^/:]+):(.+)$/.exec(origin);
+  try {
+    parsed = new URL(scp === null ? origin : `ssh://${scp[1]}/${scp[2]}`);
+  } catch {
+    return null;
+  }
+
+  if (!["ssh:", "http:", "https:", "git:"].includes(parsed.protocol)) return null;
+  const host = parsed.hostname.toLowerCase();
+  if (host.length === 0) return null;
+
+  const defaultPort =
+    (parsed.protocol === "ssh:" && parsed.port === "22") ||
+    (parsed.protocol === "http:" && parsed.port === "80") ||
+    (parsed.protocol === "https:" && parsed.port === "443") ||
+    (parsed.protocol === "git:" && parsed.port === "9418");
+  const authority =
+    parsed.port.length === 0 || defaultPort
+      ? host
+      : `${host}:${parsed.protocol.slice(0, -1)}:${parsed.port}`;
+  let repository = parsed.pathname.replace(/^\/+|\/+$/g, "").replace(/\/+/g, "/");
+  if (repository.toLowerCase().endsWith(".git")) repository = repository.slice(0, -4);
+  if (repository.length === 0) return null;
+  return `${authority}/${repository}`;
+}
+
+/**
+ * Resolve the stable repository descriptor used by map/live control clients.
+ * Unlike the legacy helpers, this rejects non-Git directories: map identity
+ * cannot be inferred safely without a repository.
+ */
+export async function repositoryIdentity(cwd: string): Promise<{ id: string; label: string; path: string }> {
+  const identity = await repoIdentity(cwd);
+  if (identity.commonDir === null) throw new Error("not a Git repository");
+
+  const origin = await git(cwd, ["remote", "get-url", "origin"]);
+  const canonical = origin === null ? null : canonicalOrigin(origin);
+  return {
+    id:
+      canonical === null
+        ? projectKey(identity)
+        : createHash("sha256").update(canonical).digest("hex"),
+    label: basename(identity.main),
+    path: identity.main,
+  };
 }
 
 /**

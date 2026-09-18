@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AgentState, LinkGap } from "../../shared/src/index.ts";
+import type { AgentState, BackendCapabilities, LinkGap } from "../../shared/src/index.ts";
 import { selectLayer } from "./layer.ts";
-import { NO_WORKTREES, selectAgent, selectRunningSession, useApp } from "./store.ts";
+import { NO_BRANCHES, selectAgent, selectRunningSession, useApp } from "./store.ts";
 import {
   edgeTldr,
   nodeTldr,
@@ -27,6 +27,15 @@ const AGENT_LABEL: Record<AgentState, string> = {
 const TERMINAL_CAP: Record<string, string> = {
   external: "runs in your own terminal",
   none: "no terminal to go to",
+};
+
+/** how Shape receives activity, without exposing transport-oriented enum names */
+const EVENT_CAP: Record<BackendCapabilities["events"], string> = {
+  native: "native",
+  hooks: "hooks",
+  reported: "explicit reports",
+  transcript: "transcript",
+  none: "none",
 };
 
 const KIND_ARROW: Record<string, string> = {
@@ -118,7 +127,7 @@ function ProjectView({ tldr, agent }: { tldr: ProjectTldr; agent: AgentState }) 
             <strong>{backend.label}</strong>
             {model === null ? null : <> · {model.id}</>}
             <span className="tl-harness-caps">
-              {`how Shape hears it: ${backend.capabilities.events}`} · {TERMINAL_CAP[backend.capabilities.terminal]}
+              {`how Shape hears it: ${EVENT_CAP[backend.capabilities.events]}`} · {TERMINAL_CAP[backend.capabilities.terminal]}
             </span>
           </p>
         </section>
@@ -550,7 +559,7 @@ export function SidePanel() {
   const activity = useApp((state) => state.activeNodes);
   // what the same bubble says in the other variations, for the "where" section
   const graphs = useApp((state) => state.graphs);
-  const worktrees = useApp((state) => state.session?.worktrees ?? NO_WORKTREES);
+  const branches = useApp((state) => state.session?.branches ?? NO_BRANCHES);
   const filter = useApp((state) => state.filter);
   const worktreeIds = useApp((state) => state.worktreeIds);
   const transcript = useApp((state) => state.transcript);
@@ -580,9 +589,9 @@ export function SidePanel() {
   const places = useMemo(
     () =>
       selection?.kind === "node"
-        ? nodeWhere({ graphs, worktrees, filter, worktreeIds, nodeId: selection.id })
+        ? nodeWhere({ graphs, branches, filter, worktreeIds, nodeId: selection.id })
         : NO_PLACES,
-    [selection, graphs, worktrees, filter, worktreeIds],
+    [selection, graphs, branches, filter, worktreeIds],
   );
   const project = selection === null || (node === null && edge === null);
 

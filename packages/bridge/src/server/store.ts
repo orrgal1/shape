@@ -1,8 +1,8 @@
 /**
- * Graph store: owns ONE worktree's GraphDoc, applies `canvas` tool ops through
+ * Graph store: owns ONE branch's GraphDoc, applies `canvas` tool ops through
  * the shared validator, and persists through the storage — where the graph
  * actually lives is the storage's business (`server/storage.ts`), not the
- * store's. A project has one of these per worktree; the view merges them.
+ * store's. A project has one of these per branch; the view merges them.
  */
 
 import { applyOps, emptyGraph, linkGapsOf, parseNext } from "../../../shared/src/index.ts";
@@ -191,23 +191,23 @@ export class GraphStore {
   readonly #storage: Storage;
   readonly #tenant: string;
   readonly #key: string;
-  readonly #worktree: string;
+  readonly #branch: string;
 
-  /** ONE worktree's graph of one project, under the tenant that owns it */
-  constructor(storage: Storage, tenant: string, key: string, worktree: string) {
+  /** ONE branch's graph of one repository, under the tenant that owns it */
+  constructor(storage: Storage, tenant: string, key: string, branch: string) {
     this.#storage = storage;
     this.#tenant = tenant;
     this.#key = key;
-    this.#worktree = worktree;
+    this.#branch = branch;
   }
 
   /**
-   * Read this worktree's stored graph, if it has one. A record written by an
+   * Read this branch's stored graph, if it has one. A record written by an
    * older bridge is taken field by field rather than trusted whole: a missing
    * or malformed part costs that part, never the project.
    */
   async load(): Promise<void> {
-    const stored: unknown = await this.#storage.loadGraph(this.#tenant, this.#key, this.#worktree);
+    const stored: unknown = await this.#storage.loadGraph(this.#tenant, this.#key, this.#branch);
     if (stored === null || typeof stored !== "object") return;
     const doc = emptyGraph();
     if ("rev" in stored && typeof stored.rev === "number") doc.rev = stored.rev;
@@ -239,7 +239,7 @@ export class GraphStore {
   /** Last-write-wins persistence; a store that cannot write costs the turn nothing. */
   async persist(): Promise<void> {
     try {
-      await this.#storage.saveGraph(this.#tenant, this.#key, this.#worktree, this.doc);
+      await this.#storage.saveGraph(this.#tenant, this.#key, this.#branch, this.doc);
     } catch (err) {
       console.error(`[bridge] failed to persist graph: ${String(err)}`);
     }

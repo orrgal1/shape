@@ -32,8 +32,13 @@ import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 import {
   AGENT_WS_PATH,
+  CONTROL_WS_PATH,
+  type ControlErrorResponse,
+  type ControlRequest,
+  type ControlResponse,
   type ProjectStatus,
   type ProjectSummary,
+  type RepositoryDescriptor,
   type ServerMsg,
   type WorktreeInfo,
   type WatchedProjectCandidate,
@@ -41,6 +46,7 @@ import {
 import { socketServerEnd, type ServerEnd } from "../transport.ts";
 import type { SocketServer } from "../wsserver.ts";
 import { LOCAL_TENANT, tokenFromRequest, type TokenTable } from "./auth.ts";
+import { handleControlConnection } from "./control.ts";
 import { ProjectRoom, type AttachMsg } from "./room.ts";
 import type { Storage, StoredProject } from "./storage.ts";
 import { WsHub } from "./ws.ts";
@@ -71,6 +77,12 @@ export interface SeenRepo {
   /** picker-created rows keep an observation-only runtime and their originating project */
   observationOnly: boolean;
   watcherKey: string | null;
+}
+
+interface ControlRoomTarget {
+  key: string;
+  room: ProjectRoom;
+  published: boolean;
 }
 
 export interface ShapeServerOptions {
@@ -146,6 +158,7 @@ export class ShapeServer {
         const room = this.#rooms.get(key);
         return room === undefined ? null : room.hello();
       },
+      waiting: (tenant) => ({ type: "projects", projects: this.#projects(tenant) }),
       onClients: (count) => this.#onBrowsers?.(count),
       onMessage: (msg, socket, reply) => {
         // which project, and whether it is one at all, are the server's: a room
@@ -181,6 +194,19 @@ export class ShapeServer {
       (socket, _request, tenant) => this.attachAgent(socketServerEnd(socket), tenant),
       { authorize: (request) => this.#authorize(request) },
     );
+    opts.sockets.mount(
+      CONTROL_WS_PATH,
+      (socket, _request, tenant) => {
+        handleControlConnection(socket, tenant, {
+          onRequest: (authorizedTenant, request) => this.#handleControl(authorizedTenant, request),
+        });
+      },
+      {
+        // `/control` is a tooling endpoint, not a browser API. A browser can
+        // carry a valid token but must still be refused at the HTTP upgrade.
+        authorize: (request) => request.headers.origin === undefined ? this.#authorize(request) : null,
+      },
+    );
   }
 
   /**
@@ -194,6 +220,139 @@ export class ShapeServer {
     if (auth === null) return LOCAL_TENANT;
     const token = tokenFromRequest(request);
     return token === null ? null : auth.tenantOf(token);
+  }
+
+  /** One validated tooling request, scoped only by the mount-authenticated tenant. */
+  async #handleControl(tenant: string, request: ControlRequest): Promise<ControlResponse> {
+    if (request.type === "control_ping") {
+      return {
+        type: "control_ready",
+        requestId: request.requestId,
+        service: "shape",
+        protocolVersion: 1,
+      };
+    }
+    if (request.type === "map_read") {
+      const state = await this.#storage.readBranch(tenant, request.repository.id, request.branch);
+      return {
+        type: "map_state",
+        requestId: request.requestId,
+        repository: request.repository,
+        branch: request.branch,
+        revision: state?.effective.rev ?? 0,
+        mappedCommit: state?.info.mappedCommit ?? null,
+        doc: state?.baseline ?? null,
+      };
+    }
+
+    return this.#serialize(async () => {
+      const registered = this.#registry.get(`${tenant}/${request.repository.id}`);
+      if (registered?.status === "inactive") {
+        return {
+          type: "control_error",
+          requestId: request.requestId,
+          message: `repository ${registered.project.label} is inactive; activate it before mapping or sending live updates`,
+          code: "invalid",
+        } satisfies ControlErrorResponse;
+      }
+
+      if (request.type === "live_update") {
+        const mapped = await this.#storage.readBranch(tenant, request.repository.id, request.branch);
+        if (mapped?.info.mappedCommit === null || mapped === null) {
+          return {
+            type: "control_error",
+            requestId: request.requestId,
+            message: `branch ${request.branch} is not mapped; run shape map first`,
+            code: "not_mapped",
+          } satisfies ControlErrorResponse;
+        }
+      }
+
+      const target = await this.#controlRoom(
+        tenant,
+        request.repository,
+        request.requestId,
+        request.type === "live_update",
+      );
+      if ("type" in target) return target;
+      if (request.type === "live_update") return target.room.liveUpdate(request);
+
+      const response = await target.room.mapCommit(request);
+      if (response.type === "control_error" || target.published) return response;
+      await this.#publishControlRoom(tenant, target.key, target.room);
+      return response;
+    });
+  }
+
+  /**
+   * Find an active control room, or prepare an unpublished one for a repository
+   * that has no registry row. A first map uses the latter transient room and
+   * publishes it only after its storage commit succeeds; a mapped live branch
+   * may publish immediately because its durable mapping already exists.
+   */
+  async #controlRoom(
+    tenant: string,
+    repository: RepositoryDescriptor,
+    requestId: string,
+    publishUnknown: boolean,
+  ): Promise<ControlRoomTarget | ControlErrorResponse> {
+    const key = `${tenant}/${repository.id}`;
+    const known = this.#registry.get(key);
+    if (known?.status === "inactive") {
+      return {
+        type: "control_error",
+        requestId,
+        message: `repository ${repository.label} is inactive; activate it before mapping or sending live updates`,
+        code: "invalid",
+      };
+    }
+    const existing = this.#rooms.get(key);
+    if (existing !== undefined) return { key, room: existing, published: true };
+
+    if (known !== undefined) {
+      const room = await this.#openRoom(key, known, false);
+      await this.#opened(tenant, key, room);
+      this.#broadcastProjects(tenant);
+      return { key, room, published: true };
+    }
+
+    const now = new Date().toISOString();
+    const row: StoredProject = {
+      project: {
+        key: repository.id,
+        label: repository.label,
+        cwd: repository.path,
+        observationOnly: false,
+        watcherKey: null,
+        backend: null,
+        tools: { launcher: null, launchers: [], harnesses: [], directoryPicker: false },
+        targetHasCode: false,
+        directivePath: null,
+        manager: null,
+        legacyKeys: {},
+        injected: [],
+      },
+      tenant,
+      worktrees: [],
+      sessions: [],
+      controlOnly: true,
+      liveSessions: 0,
+      status: "active",
+      statusChangedAt: now,
+      lastSeen: now,
+    };
+    const room = this.#newRoom(key, tenant, false);
+    await room.restore(row);
+    if (publishUnknown) await this.#publishControlRoom(tenant, key, room);
+    return { key, room, published: publishUnknown };
+  }
+
+  /** Expose the room whose first mapping transaction already persisted its registry row. */
+  async #publishControlRoom(tenant: string, key: string, room: ProjectRoom): Promise<void> {
+    this.#registry.set(key, room.row());
+    this.#rooms.set(key, room);
+    await this.#opened(tenant, key, room);
+    this.#broadcastProjects(tenant);
   }
 
   /**
@@ -210,7 +369,7 @@ export class ShapeServer {
       const key = `${row.tenant}/${row.project.key}`;
       this.#registry.set(key, row);
       if (row.status !== "active" || this.#rooms.has(key)) continue;
-      await this.#openRoom(key, row);
+      await this.#openRoom(key, row, row.controlOnly ? false : this.#importLegacy);
     }
     // a browser connecting before any agent is back is greeted by the ACTIVE
     // project ITS tenant saw most recently, instead of waiting ungreeted
@@ -231,7 +390,7 @@ export class ShapeServer {
   activeProjects(tenant: string = LOCAL_TENANT): ActiveProject[] {
     const projects: ActiveProject[] = [];
     for (const row of this.#registry.values()) {
-      if (row.tenant !== tenant || row.status !== "active") continue;
+      if (row.tenant !== tenant || row.status !== "active" || row.controlOnly) continue;
       projects.push({
         key: row.project.key,
         cwd: row.project.cwd,
@@ -576,7 +735,7 @@ export class ShapeServer {
 
     // no room means a project nothing has reported in from yet — a fresh one,
     // or an active row whose room somehow did not open; the attach opens it
-    const room = existing ?? this.#newRoom(key, tenant);
+    const room = existing ?? this.#newRoom(key, tenant, known?.controlOnly ? false : this.#importLegacy);
     // loaded before it is reachable: nothing may see a half-open room. The
     // link is bound right after, because the hello below asks the agent
     // questions whose answers must find their room.
@@ -588,19 +747,14 @@ export class ShapeServer {
     // switcher reads for it; a stale one costs a project
     void room.saveProject();
     this.#remember(key, room.row());
-    // The attach names the keys an older Shape derived for this repo's
-    // worktrees, and `retarget` has just moved their canvases onto the current
-    // one (the storage drops the legacy registry row with the last of them). A
-    // restart had meanwhile opened a room for such a row, and that room is now
-    // this very project a second time: it is FORGOTTEN, never closed, because
-    // closing it would file the canvases it no longer owns back under the key
-    // they were adopted from.
+    // Retarget has attempted to adopt every legacy graph onto the repository
+    // identity. Storage keeps an old project row while any graph or durable
+    // branch still conflicts there; only a fully consumed identity may leave
+    // the in-memory registry, room map, and browser hub.
     const orphaned: WebSocket[] = [];
     for (const legacy of Object.values(attach.project.legacyKeys)) {
       const stale = `${tenant}/${legacy}`;
-      if (stale === key) continue;
-      // the storage drops the legacy row whether or not it had a room (a parked
-      // one has none), and the switcher must not go on listing it
+      if (stale === key || await this.#storage.hasProject(tenant, legacy)) continue;
       this.#registry.delete(stale);
       if (!this.#rooms.delete(stale)) continue;
       if (this.#defaultKeys.get(tenant) === stale) this.#defaultKeys.set(tenant, key);
@@ -633,20 +787,24 @@ export class ShapeServer {
    * the tenant that owns the room. Attaches, restores and discovery all open
    * rooms this way.
    */
-  #newRoom(key: string, tenant: string): ProjectRoom {
+  #newRoom(key: string, tenant: string, importLegacy: boolean = this.#importLegacy): ProjectRoom {
     return new ProjectRoom({
       broadcast: (out: ServerMsg) => this.#hub.broadcastTo(key, out),
       projects: () => this.#projects(tenant),
       onProjectsChanged: () => this.#broadcastProjects(tenant),
       storage: this.#storage,
       tenant,
-      importLegacy: this.#importLegacy,
+      importLegacy,
     });
   }
 
   /** One registry row's room, loaded from what the row remembers and agentless. */
-  async #openRoom(key: string, row: StoredProject): Promise<ProjectRoom> {
-    const room = this.#newRoom(key, row.tenant);
+  async #openRoom(
+    key: string,
+    row: StoredProject,
+    importLegacy: boolean = this.#importLegacy,
+  ): Promise<ProjectRoom> {
+    const room = this.#newRoom(key, row.tenant, importLegacy);
     await room.restore(row);
     this.#rooms.set(key, room);
     return room;
@@ -677,6 +835,7 @@ export class ShapeServer {
         // what does the briefing, and it says so with an `injected` frame
         injected: [],
       },
+      controlOnly: false,
       tenant,
       worktrees: repo.worktrees,
       sessions: [],
@@ -704,8 +863,9 @@ export class ShapeServer {
    * restart would reopen it, and the runtime that feeds it is started.
    */
   async #activate(tenant: string, key: string, row: StoredProject): Promise<void> {
-    const room = await this.#openRoom(key, row);
+    const room = await this.#openRoom(key, row, row.controlOnly ? false : this.#importLegacy);
     await this.#opened(tenant, key, room);
+    if (row.controlOnly) return;
     this.#onActivated?.({
       key: row.project.key,
       cwd: row.project.cwd,

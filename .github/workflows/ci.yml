@@ -28,6 +28,9 @@ jobs:
       # TypeScript is run directly by Node in bridge/link/shared, so typecheck is
       # the only compile-time check there is outside the web build.
       - run: pnpm typecheck
+      # The bridge serves the production canvas from web/dist during runtime smokes.
+      - name: production canvas build
+        run: pnpm --filter @shape/web build
 
       # Hermetic smokes only: no network, no model, no real agent session, fakes
       # for omp and herdr. These are left out on purpose:

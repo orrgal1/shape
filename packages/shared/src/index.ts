@@ -6,6 +6,7 @@
  * TypeScript (no enums, no namespaces) and dependency-free.
  */
 
+import type { CanvasBranchInfo } from "./control.ts";
 import type { AgentSession, WorktreeSession } from "./link.ts";
 
 export type {
@@ -18,6 +19,8 @@ export type {
   ServerToAgentMsg,
   WorktreeSession,
 } from "./link.ts";
+
+export * from "./control.ts";
 
 // ---------------------------------------------------------------------------
 // Graph document
@@ -1478,7 +1481,7 @@ export interface BackendCapabilities {
   /** the harness can call a host-provided tool (the canvas) */
   hostTool: boolean;
   /** how the bridge learns what the agent is doing */
-  events: "native" | "hooks" | "transcript" | "none";
+  events: "native" | "hooks" | "reported" | "transcript" | "none";
   /** a previous session can be resumed */
   resume: boolean;
   /**
@@ -1550,7 +1553,7 @@ export interface BackendInfo {
 export interface SessionInfo {
   /** the MAIN worktree's path — the project's label and its default target */
   cwd: string;
-  /** target repo already contains source code (automatic map gate) */
+  /** whether the target repository contains source code */
   targetHasCode: boolean;
   /**
    * every worktree of the target's repo (`git worktree list`), each an
@@ -1558,6 +1561,8 @@ export interface SessionInfo {
    * single pseudo-worktree of its own directory.
    */
   worktrees: WorktreeInfo[];
+  /** persistent repository branches, including branches without a physical worktree */
+  branches: CanvasBranchInfo[];
   /**
    * the harnesses reporting in right now, one per worktree with a session on
    * the link. A worktree with no entry here is visible on the canvas; nothing

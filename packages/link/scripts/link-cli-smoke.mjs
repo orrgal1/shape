@@ -30,6 +30,8 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { repositoryIdentity } from "../../bridge/src/agent/worktrees.ts";
+import { requestControl } from "../../../scripts/lib/client.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const linkPkg = dirname(here);
@@ -37,6 +39,7 @@ const repo = dirname(dirname(linkPkg));
 const bridgePkg = join(repo, "packages", "bridge");
 const cli = join(linkPkg, "src", "cli.ts");
 
+const BRANCH_ID = "refs/heads/fixture";
 // ---------------------------------------------------------------------------
 // harness
 // ---------------------------------------------------------------------------
@@ -136,13 +139,11 @@ async function startBridge(tag) {
     cwd: bridgePkg,
     env: {
       ...process.env,
-      // no herdr probe against the developer's own terminal, one detected
-      // harness, and no automatic map: the canvas has to be empty until the
-      // fixture call writes to it, or the two graphs would differ by whatever
-      // the skeleton happened to draw.
+      // No launcher probe against the developer's terminal. Mapping is explicit
+      // through /control below; the fixture calls are live edits on that
+      // committed empty baseline.
       SHAPE_LAUNCHER: "none",
       SHAPE_FORCE_HARNESSES: "omp",
-      SHAPE_AUTO_MAP: "0",
       SHAPE_HOME: home,
       HOME: home,
       GIT_AUTHOR_NAME: "smoke",
@@ -172,10 +173,34 @@ async function startBridge(tag) {
   running.push(bridge);
 
   await waitFor(`${tag}: bridge listening`, () => log.includes("canvas at ws://"));
+  const hello = await hubHello(port);
+  const repository = await repositoryIdentity(target);
+  const state = await requestControl(
+    { type: "map_read", requestId: `${tag}-baseline-read`, repository, branch: BRANCH_ID },
+    { server: `http://127.0.0.1:${port}` },
+  );
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: target, encoding: "utf8" }).trim();
+  const mapped = await requestControl(
+    {
+      type: "map_commit",
+      requestId: `${tag}-baseline-commit`,
+      repository,
+      branch: BRANCH_ID,
+      expectedRevision: state.revision,
+      expectedMappedCommit: state.mappedCommit,
+      commit,
+      mode: "initial",
+      ops: [],
+      reality: hello.graphs[BRANCH_ID].reality,
+      note: "link CLI smoke empty committed baseline",
+    },
+    { server: `http://127.0.0.1:${port}` },
+  );
+  if (mapped.type !== "map_committed") throw new Error(`${tag}: expected map_committed, got ${mapped.type}`);
   return bridge;
 }
 
-/** the browser hub's opening frame: one graph and one revision list per worktree */
+/** The browser hub's opening frame: one graph and revision list per public branch. */
 async function hubHello(port) {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
   const { promise, resolve, reject } = Promise.withResolvers();
@@ -197,7 +222,7 @@ async function hubHello(port) {
   }
 }
 
-/** one worktree's stored revision snapshots, oldest first; null until persisted */
+/** One public branch's stored revision snapshots, oldest first; null until persisted. */
 function storedRevisions(bridge) {
   if (!existsSync(bridge.db)) return null;
   let db = null;
@@ -205,7 +230,7 @@ function storedRevisions(bridge) {
     db = new DatabaseSync(bridge.db);
     return db
       .prepare("SELECT snapshot FROM revisions WHERE tenant = ? AND key = ? AND worktree = ? ORDER BY rev ASC")
-      .all("local", projectKeyOf(bridge.target), bridge.worktree)
+      .all("local", projectKeyOf(bridge.target), BRANCH_ID)
       .map((row) => JSON.parse(row.snapshot));
   } catch {
     // mid-write, or the schema is not there yet: "not yet" either way
@@ -450,6 +475,13 @@ try {
     extReceipt.text.split("\n")[0],
   );
   const extHello = await hubHello(ext.port);
+  check(
+    "the extension session joins the public fixture branch",
+    extHello.session.sessions.some(
+      (session) => session.worktree === BRANCH_ID && session.session.sessionId === "link-cli-smoke",
+    ),
+    JSON.stringify(extHello.session.sessions),
+  );
   const extRevisions = await waitFor("the extension path's revision snapshot", () => {
     const rows = storedRevisions(ext);
     return rows !== null && rows.length > 0 ? rows : false;
@@ -472,8 +504,8 @@ try {
 
   // --- the comparison ------------------------------------------------------
   const paths = [ext.worktree, ext.target, ext.home, cliBridge.worktree, cliBridge.target, cliBridge.home];
-  const extGraph = normalize(extHello.graphs[ext.worktree], paths);
-  const cliGraph = normalize(cliHello.graphs[cliBridge.worktree], paths);
+  const extGraph = normalize(extHello.graphs[BRANCH_ID], paths);
+  const cliGraph = normalize(cliHello.graphs[BRANCH_ID], paths);
 
   check(
     "the same ops through either channel produce the same receipt",

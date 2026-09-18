@@ -35,7 +35,14 @@ import type { HerdrLauncher } from "./launcher/herdr.ts";
 import { chooseLauncher } from "./launcher/index.ts";
 import { mountLoopbackLink, type LoopbackLink } from "./link.ts";
 import { AgentRuntime } from "./runtime.ts";
-import { canonicalDir, listWorktrees, projectKey, repoIdentity, worktreeContaining } from "./worktrees.ts";
+import {
+  canonicalDir,
+  listWorktrees,
+  projectKey,
+  repoIdentity,
+  repositoryIdentity,
+  worktreeContaining,
+} from "./worktrees.ts";
 
 /**
  * How often the machine is re-scanned while a browser is connected. Long
@@ -223,7 +230,7 @@ export class AgentFleet {
     try {
       const identity = await repoIdentity(project.cwd);
       main = identity.main;
-      key = projectKey(identity);
+      key = identity.commonDir === null ? projectKey(identity) : (await repositoryIdentity(project.cwd)).id;
       if (project.expectedKey !== undefined && project.expectedKey !== key) {
         throw new Error(`selected project identity changed (expected ${project.expectedKey}, got ${key})`);
       }
@@ -396,11 +403,12 @@ export class AgentFleet {
     const seeded = new Set(this.#seeded ? [] : this.#seeds);
     this.#seeded = true;
 
-    const cwds = new Set<string>([...seeded, ...(await this.#herdrCwds()), ...(this.#loopback?.greeted() ?? [])]);
+    const observed = new Set<string>([...(await this.#herdrCwds()), ...(this.#loopback?.greeted() ?? [])]);
+    const cwds = new Set<string>([...seeded, ...observed]);
     const repos = new Map<string, SeenRepo>();
     for (const cwd of cwds) {
       try {
-        const repo = await this.#seenRepo(cwd, seeded);
+        const repo = await this.#seenRepo(cwd, seeded, observed.has(cwd));
         if (repo === null) continue;
         const known = repos.get(repo.key);
         if (known === undefined) {
@@ -443,7 +451,7 @@ export class AgentFleet {
    * firing from a scratch directory is not a project somebody is working on,
    * while a `--cwd` is exactly that, and the operator said so.
    */
-  async #seenRepo(cwd: string, seeded: ReadonlySet<string>): Promise<SeenRepo | null> {
+  async #seenRepo(cwd: string, seeded: ReadonlySet<string>, observed = true): Promise<SeenRepo | null> {
     const identity = await repoIdentity(cwd);
     if (identity.commonDir === null && !seeded.has(cwd)) return null;
     const listed = identity.commonDir === null ? [] : await listWorktrees(identity.main);
@@ -451,9 +459,10 @@ export class AgentFleet {
     // a worktree the browser has never heard of
     const worktrees: WorktreeInfo[] =
       listed.length > 0 ? listed : [{ id: identity.main, path: identity.main, branch: null, head: null }];
-    const live = worktreeContaining(worktrees, canonicalDir(cwd));
+    const live = observed ? worktreeContaining(worktrees, canonicalDir(cwd)) : null;
+    const key = identity.commonDir === null ? projectKey(identity) : (await repositoryIdentity(cwd)).id;
     return {
-      key: projectKey(identity),
+      key,
       cwd: identity.main,
       label: basename(identity.main),
       worktrees,

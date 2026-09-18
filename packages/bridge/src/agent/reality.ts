@@ -269,6 +269,10 @@ async function discoverPackages(
     seenNames.add(pkg.name);
     pkgs.push(pkg);
   }
+  if (pkgs.length === 0) {
+    const rootPkg = await packageAt(root, root, index);
+    if (rootPkg !== null) pkgs.push(rootPkg);
+  }
   pkgs.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
   return pkgs;
 }

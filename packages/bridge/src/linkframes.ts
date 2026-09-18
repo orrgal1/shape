@@ -153,7 +153,7 @@ function parseCapabilities(value: unknown): BackendCapabilities | null {
   if (typeof c.steerMidTurn !== "boolean" || typeof c.hostTool !== "boolean") return null;
   if (typeof c.resume !== "boolean") return null;
   const events = c.events;
-  if (events !== "native" && events !== "hooks" && events !== "transcript" && events !== "none") {
+  if (events !== "native" && events !== "hooks" && events !== "reported" && events !== "transcript" && events !== "none") {
     return null;
   }
   const terminal = c.terminal;

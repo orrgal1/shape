@@ -88,6 +88,12 @@ export interface WsHubOptions {
    * here). `null` = that room is gone, so the socket waits like an early one.
    */
   hello: (key: string) => Promise<ServerMsg | null>;
+  /**
+   * Frame sent when this tenant has no active room to greet. This keeps
+   * persisted inactive projects discoverable after a cold start without
+   * opening a room for any of them.
+   */
+  waiting: (tenant: string) => ServerMsg;
   /** `reply` reaches only the socket the message came from */
   onMessage: (msg: ClientMsg, socket: WebSocket, reply: (msg: ServerMsg) => void) => void;
   /**
@@ -133,6 +139,8 @@ export class WsHub {
       const key = opts.defaultRoom(tenant);
       if (key === null) {
         this.#ungreeted.add(socket);
+        const waiting = opts.waiting(tenant);
+        if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(waiting));
         return;
       }
       this.join(socket, key);

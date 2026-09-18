@@ -15,6 +15,7 @@ import {
   verifiedOf,
   verificationOf,
   verifiersOf,
+  type CanvasBranchInfo,
   type GraphDoc,
   type GraphEdge,
   type IntentNode,
@@ -23,7 +24,6 @@ import {
   type Phase,
   type RealitySymbol,
   type RealityVerification,
-  type WorktreeInfo,
 } from "../../shared/src/index.ts";
 import { coveringVerification, symbolsInside } from "./layer.ts";
 import { branchOf, toneOf, type TranscriptEntry } from "./store.ts";
@@ -162,9 +162,9 @@ export interface WherePlace {
 }
 
 export interface WhereInput {
-  /** every variation's canvas, keyed by worktree id */
+  /** every variation's effective canvas, keyed by opaque branch id */
   graphs: Record<string, GraphDoc>;
-  worktrees: readonly WorktreeInfo[];
+  branches: readonly CanvasBranchInfo[];
   /** the variations on the canvas, or null for all of them */
   filter: ReadonlySet<string> | null;
   /** every variation's id in colour order */
@@ -180,15 +180,15 @@ export interface WhereInput {
  * different phase, a different status, or a variation that does not have the
  * bubble at all is the case this section exists for.
  */
-export function nodeWhere({ graphs, worktrees, filter, worktreeIds, nodeId }: WhereInput): WherePlace[] {
-  const shown = worktrees.filter((entry) => filter === null || filter.has(entry.id));
+export function nodeWhere({ graphs, branches, filter, worktreeIds, nodeId }: WhereInput): WherePlace[] {
+  const shown = branches.filter((entry) => filter === null || filter.has(entry.id));
   if (shown.length < 2) return [];
   const places: WherePlace[] = [];
   for (const entry of shown) {
     const node = graphs[entry.id]?.nodes.find((item) => item.id === nodeId);
     places.push({
       worktree: entry.id,
-      branch: branchOf(worktrees, entry.id),
+      branch: branchOf(branches, entry.id),
       tone: toneOf(worktreeIds, entry.id),
       present: node !== undefined,
       phase: node?.phase ?? null,

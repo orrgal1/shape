@@ -19,6 +19,7 @@
  */
 import type {
   BackendInfo,
+  CanvasBranchInfo,
   GraphDoc,
   IntentNode,
   ProjectTools,
@@ -308,8 +309,11 @@ export function playgroundGraph(): GraphDoc {
 }
 
 const PLAYGROUND_ROOT = "/Users/orgal/code/shape-playground";
-
 const PLAYGROUND_REMINDERS = `${PLAYGROUND_ROOT}.worktrees/reminders`;
+
+const PLAYGROUND_MAIN_BRANCH = "refs/heads/main";
+const PLAYGROUND_REMINDERS_BRANCH = "refs/heads/feature/reminders";
+const PLAYGROUND_PERSISTED_BRANCH = "refs/heads/launch-checklist";
 
 /**
  * The same project on `feature/reminders`: it has a scheduler nothing on `main`
@@ -377,6 +381,36 @@ const PLAYGROUND_MODEL = { provider: "anthropic", id: "claude-fable-5" };
  * merged canvas, the variations pill and the two-line "now" pill are only true
  * to life with work happening in two variations at once.
  */
+const PLAYGROUND_BRANCHES: CanvasBranchInfo[] = [
+  {
+    id: PLAYGROUND_MAIN_BRANCH,
+    branch: "main",
+    head: "6e47abb",
+    mappedCommit: "51cd8a0",
+    live: true,
+    path: PLAYGROUND_ROOT,
+    isDefault: true,
+  },
+  {
+    id: PLAYGROUND_REMINDERS_BRANCH,
+    branch: "feature/reminders",
+    head: "1c4d9f2",
+    mappedCommit: "1c4d9f2",
+    live: true,
+    path: PLAYGROUND_REMINDERS,
+    isDefault: false,
+  },
+  {
+    id: PLAYGROUND_PERSISTED_BRANCH,
+    branch: "launch-checklist",
+    head: "ae621d8",
+    mappedCommit: "ae621d8",
+    live: false,
+    path: null,
+    isDefault: false,
+  },
+];
+
 const PLAYGROUND_SESSION: SessionInfo = {
   cwd: PLAYGROUND_ROOT,
   targetHasCode: true,
@@ -384,15 +418,16 @@ const PLAYGROUND_SESSION: SessionInfo = {
     { id: PLAYGROUND_ROOT, path: PLAYGROUND_ROOT, branch: "main", head: "6e47abb" },
     { id: PLAYGROUND_REMINDERS, path: PLAYGROUND_REMINDERS, branch: "feature/reminders", head: "1c4d9f2" },
   ],
+  branches: PLAYGROUND_BRANCHES,
   sessions: [
     {
-      worktree: PLAYGROUND_ROOT,
+      worktree: PLAYGROUND_MAIN_BRANCH,
       session: { sessionId: "playground-fixture", sessionName: "ledgerly", model: PLAYGROUND_MODEL },
       backend: PLAYGROUND_BACKEND,
       state: "streaming",
     },
     {
-      worktree: PLAYGROUND_REMINDERS,
+      worktree: PLAYGROUND_REMINDERS_BRANCH,
       session: { sessionId: "playground-reminders", sessionName: "ledgerly reminders", model: PLAYGROUND_MODEL },
       backend: PLAYGROUND_BACKEND,
       state: "streaming",
@@ -440,12 +475,21 @@ export function startPlaygroundMock(): () => void {
   const store = useApp.getState();
   store.ingest({
     type: "hello",
-    graphs: { [PLAYGROUND_ROOT]: playgroundGraph(), [PLAYGROUND_REMINDERS]: remindersGraph() },
-    session: { ...PLAYGROUND_SESSION, worktrees: PLAYGROUND_SESSION.worktrees.map((entry) => ({ ...entry })) },
-    agents: { [PLAYGROUND_ROOT]: "streaming", [PLAYGROUND_REMINDERS]: "streaming" },
+    graphs: {
+      [PLAYGROUND_MAIN_BRANCH]: playgroundGraph(),
+      [PLAYGROUND_REMINDERS_BRANCH]: remindersGraph(),
+      [PLAYGROUND_PERSISTED_BRANCH]: playgroundGraph(),
+    },
+    session: {
+      ...PLAYGROUND_SESSION,
+      worktrees: PLAYGROUND_SESSION.worktrees.map((entry) => ({ ...entry })),
+      branches: PLAYGROUND_SESSION.branches.map((entry) => ({ ...entry })),
+      sessions: PLAYGROUND_SESSION.sessions.map((entry) => ({ ...entry })),
+    },
+    agents: { [PLAYGROUND_MAIN_BRANCH]: "streaming", [PLAYGROUND_REMINDERS_BRANCH]: "streaming" },
     catchUps: {
-      [PLAYGROUND_ROOT]: { state: "idle", at: 0 },
-      [PLAYGROUND_REMINDERS]: { state: "idle", at: 0 },
+      [PLAYGROUND_MAIN_BRANCH]: { state: "idle", at: 0 },
+      [PLAYGROUND_REMINDERS_BRANCH]: { state: "idle", at: 0 },
     },
     projects: [{ ...PLAYGROUND_PROJECT }],
     projectId: PLAYGROUND_PROJECT.projectId,
@@ -463,13 +507,18 @@ export function startPlaygroundMock(): () => void {
   // project opens on is on screen before anything follows anywhere.
   const beat = (): void => {
     const state = useApp.getState();
-    state.ingest({ type: "activity", worktree: PLAYGROUND_ROOT, nodeIds: ["ledgerly-api"] });
-    state.ingest({ type: "activity", worktree: PLAYGROUND_REMINDERS, nodeIds: ["ledgerly-notify"] });
+    state.ingest({ type: "activity", worktree: PLAYGROUND_MAIN_BRANCH, nodeIds: ["ledgerly-api"] });
+    state.ingest({ type: "activity", worktree: PLAYGROUND_REMINDERS_BRANCH, nodeIds: ["ledgerly-notify"] });
   };
-  store.ingest({ type: "transcript", worktree: PLAYGROUND_ROOT, role: "tool", text: "read apps/api/src/routes.ts" });
   store.ingest({
     type: "transcript",
-    worktree: PLAYGROUND_REMINDERS,
+    worktree: PLAYGROUND_MAIN_BRANCH,
+    role: "tool",
+    text: "read apps/api/src/routes.ts",
+  });
+  store.ingest({
+    type: "transcript",
+    worktree: PLAYGROUND_REMINDERS_BRANCH,
     role: "tool",
     text: "write packages/scheduler/src/cron.ts",
   });

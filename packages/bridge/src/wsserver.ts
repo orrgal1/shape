@@ -14,6 +14,7 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import { LOCAL_TENANT } from "./server/auth.ts";
+import { createHttpHandler } from "./static-http.ts";
 
 export type ConnectionHandler = (socket: WebSocket, request: IncomingMessage, tenant: string) => void;
 
@@ -37,14 +38,17 @@ export class SocketServer {
   readonly #port: number;
   readonly #mounts = new Map<string, Mount>();
 
-  constructor(opts: { port: number; host?: string }) {
+  constructor(opts: { port: number; host?: string; webDir?: string }) {
     this.#host = opts.host ?? "127.0.0.1";
     this.#port = opts.port;
-    this.#http = createServer((_req, res) => {
-      res.statusCode = 426;
-      res.setHeader("content-type", "text/plain");
-      res.end("websocket endpoints only\n");
-    });
+    this.#http =
+      opts.webDir === undefined
+        ? createServer((_req, res) => {
+            res.statusCode = 426;
+            res.setHeader("content-type", "text/plain");
+            res.end("websocket endpoints only\n");
+          })
+        : createServer(createHttpHandler(opts.webDir, (path) => this.#mounts.has(path)));
     this.#http.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
       const path = request.url === undefined ? "" : new URL(request.url, "http://localhost").pathname;
       const mount = this.#mounts.get(path);
@@ -61,7 +65,12 @@ export class SocketServer {
         socket.destroy();
         return;
       }
-      mount.wss.handleUpgrade(request, socket, head, (ws) => mount.handler(ws, request, tenant));
+      mount.wss.handleUpgrade(request, socket, head, (ws) => {
+        // Every endpoint inherits a non-throwing transport error boundary;
+        // handlers may add their own reporting without needing one for safety.
+        ws.on("error", () => {});
+        mount.handler(ws, request, tenant);
+      });
     });
   }
 

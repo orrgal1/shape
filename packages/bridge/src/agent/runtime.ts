@@ -61,7 +61,15 @@ import { attachManager } from "./manager.ts";
 import { hasSourceCode, synthesizeSkeleton } from "./onboarding-fs.ts";
 import { extractReality } from "./reality.ts";
 import { directoryPickerAvailable, pickWatchedProject } from "./picker.ts";
-import { canonicalDir, legacyProjectKey, listWorktrees, projectKey, repoIdentity, worktreeContaining } from "./worktrees.ts";
+import {
+  canonicalDir,
+  legacyProjectKey,
+  listWorktrees,
+  projectKey,
+  repoIdentity,
+  repositoryIdentity,
+  worktreeContaining,
+} from "./worktrees.ts";
 
 /** an empty layer keeps `synthesizeSkeleton` honest before the first extraction */
 const NO_REALITY: RealityLayer = {
@@ -165,6 +173,8 @@ export class AgentRuntime {
   #projectCwd = "";
   /** sha256 of machine + the repo's common dir: every worktree shares it */
   #projectKey = "";
+  /** previous common-dir identity, carried so the server can adopt stored canvases */
+  #legacyRepositoryKey: string | null = null;
   /** the worktree `#cwd` sits in */
   #primary = "";
   /**
@@ -341,7 +351,13 @@ export class AgentRuntime {
   async #openProject(): Promise<void> {
     const identity = await repoIdentity(this.#cwd);
     this.#projectCwd = identity.main;
-    this.#projectKey = projectKey(identity);
+    const previousKey = projectKey(identity);
+    if (identity.commonDir === null) {
+      this.#projectKey = previousKey;
+    } else {
+      this.#projectKey = (await repositoryIdentity(this.#cwd)).id;
+      this.#legacyRepositoryKey = previousKey === this.#projectKey ? null : previousKey;
+    }
 
     const worktrees = await listWorktrees(this.#cwd);
     // a non-git target is still one variation, or the canvas would have a
@@ -558,12 +574,15 @@ export class AgentRuntime {
     }));
     const realities: Record<string, RealityLayer> = {};
     for (const [worktree, entry] of this.#realities) realities[worktree] = entry.layer;
-    // the key each worktree WOULD have had before the project key came off the
-    // repo's common dir: the server needs them to find a canvas drawn under the
-    // old scheme and move it onto this project (CONTRACTS.md § Worktrees on one
-    // canvas). Derived here because only the agent knows the directories.
+    // Both earlier identity generations remain readable: the immediately
+    // previous repository-common-dir key, and the older per-worktree key.
+    // Extra entries are namespaced because the wire shape predates multiple
+    // legacy keys per worktree; the room deliberately decodes both forms.
     const legacyKeys: Record<string, string> = {};
-    for (const info of this.#worktrees) legacyKeys[info.id] = legacyProjectKey(info.id);
+    for (const info of this.#worktrees) {
+      if (this.#legacyRepositoryKey !== null) legacyKeys[`repository:${info.id}`] = this.#legacyRepositoryKey;
+      legacyKeys[`worktree:${info.id}`] = legacyProjectKey(info.id);
+    }
     // never queued: this frame is what opens the queue
     this.#link.send({
       type: "attach",

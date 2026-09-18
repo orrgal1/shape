@@ -3,6 +3,7 @@ import {
   emptyGraph,
   layerOf,
   type AgentSession,
+  type CanvasBranchInfo,
   type AgentState,
   type BackendInfo,
   type CatchUpState,
@@ -15,7 +16,6 @@ import {
   type RevisionInfo,
   type ServerMsg,
   type SessionInfo,
-  type WorktreeInfo,
   type WorktreeSession,
 } from "../../shared/src/index.ts";
 import {
@@ -96,7 +96,7 @@ let activityTick = 0;
 const NO_ACTIVE: ReadonlySet<string> = new Set<string>();
 const NO_REVISIONS: RevisionInfo[] = [];
 const NO_WHERE_MARKS: readonly WhereMark[] = [];
-export const NO_WORKTREES: WorktreeInfo[] = [];
+export const NO_BRANCHES: CanvasBranchInfo[] = [];
 export const NO_RUNNING: WorktreeSession[] = [];
 
 /** where the filter of a project is remembered between visits */
@@ -108,10 +108,10 @@ function filterKey(projectId: string): string {
  * The filter is a reading preference, not project state: it belongs to this
  * browser and to this project, and a reload that forgot it would silently put
  * three variations back on a canvas somebody narrowed to one. A stored id that
- * no longer names a worktree is dropped; nothing left means "all", which is
- * also what an unreadable store means.
+ * no longer names a branch is dropped; nothing left means "all", which is also
+ * what an unreadable store means.
  */
-function loadFilter(projectId: string, worktrees: readonly WorktreeInfo[]): ReadonlySet<string> | null {
+function loadFilter(projectId: string, branches: readonly CanvasBranchInfo[]): ReadonlySet<string> | null {
   let raw: string | null = null;
   try {
     raw = window.localStorage.getItem(filterKey(projectId));
@@ -128,9 +128,9 @@ function loadFilter(projectId: string, worktrees: readonly WorktreeInfo[]): Read
   if (!Array.isArray(ids)) return null;
   const known = new Set<string>();
   for (const id of ids) {
-    if (typeof id === "string" && worktrees.some((entry) => entry.id === id)) known.add(id);
+    if (typeof id === "string" && branches.some((entry) => entry.id === id)) known.add(id);
   }
-  if (known.size === 0 || known.size === worktrees.length) return null;
+  if (known.size === 0 || known.size === branches.length) return null;
   return known;
 }
 
@@ -145,28 +145,20 @@ function saveFilter(projectId: string | null, filter: ReadonlySet<string> | null
 }
 
 /** colour order is id order, so a variation keeps its colour as others come and go */
-function sortedIds(worktrees: readonly WorktreeInfo[]): string[] {
-  return worktrees.map((entry) => entry.id).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+function sortedIds(branches: readonly CanvasBranchInfo[]): string[] {
+  return branches.map((entry) => entry.id).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
 }
 
-/**
- * The main worktree: the one whose path is the project's own directory. It owns
- * the git common dir, so its canvas is the primary copy of every bubble.
- */
-export function mainWorktreeOf(session: SessionInfo | null): string | null {
+/** The branch the server identifies as this repository's default variation. */
+export function defaultBranchOf(session: SessionInfo | null): string | null {
   if (session === null) return null;
-  const main = session.worktrees.find((entry) => entry.path === session.cwd);
-  return main?.id ?? session.worktrees[0]?.id ?? null;
+  const main = session.branches.find((entry) => entry.isDefault);
+  return main?.id ?? session.branches[0]?.id ?? null;
 }
 
-/** what a person calls a variation: its branch, or the folder when it has none */
-export function branchOf(worktrees: readonly WorktreeInfo[], id: string): string {
-  const found = worktrees.find((entry) => entry.id === id);
-  if (found === undefined) return id;
-  if (found.branch !== null) return found.branch;
-  const trimmed = found.path.replace(/\/+$/, "");
-  const cut = trimmed.lastIndexOf("/");
-  return cut === -1 ? trimmed : trimmed.slice(cut + 1);
+/** What a person calls a variation: its repository branch name. */
+export function branchOf(branches: readonly CanvasBranchInfo[], id: string): string {
+  return branches.find((entry) => entry.id === id)?.branch ?? id;
 }
 
 /**
@@ -441,7 +433,7 @@ function keepSelection(selection: Selection | null, doc: GraphDoc): Selection | 
  * same way.
  */
 function remerged(state: AppState, graphs: Record<string, GraphDoc>, filter: ReadonlySet<string> | null) {
-  const { doc, where } = mergeGraphs({ graphs, filter, main: mainWorktreeOf(state.session) });
+  const { doc, where } = mergeGraphs({ graphs, filter, main: defaultBranchOf(state.session) });
   return {
     graphs,
     filter,
@@ -606,11 +598,11 @@ export const useApp = create<AppState>((set, get) => ({
   ingest: (msg) => {
     switch (msg.type) {
       case "hello": {
-        const filter = loadFilter(msg.projectId, msg.session.worktrees);
+        const filter = loadFilter(msg.projectId, msg.session.branches);
         const { doc, where } = mergeGraphs({
           graphs: msg.graphs,
           filter,
-          main: mainWorktreeOf(msg.session),
+          main: defaultBranchOf(msg.session),
         });
         // A canvas with capabilities on it leads with them: what the project
         // promises a person is the reading that makes its parts make sense. A
@@ -629,7 +621,7 @@ export const useApp = create<AppState>((set, get) => ({
           where,
           session: msg.session,
           tools: msg.tools,
-          worktreeIds: sortedIds(msg.session.worktrees),
+          worktreeIds: sortedIds(msg.session.branches),
           projects: msg.projects,
           projectId: msg.projectId,
           // the list this hello carries is the server's own word on every
@@ -734,7 +726,7 @@ export const useApp = create<AppState>((set, get) => ({
         // away is dropped from the filter, or the canvas would be narrowed to
         // nothing that exists.
         set((s) => {
-          const ids = sortedIds(msg.session.worktrees);
+          const ids = sortedIds(msg.session.branches);
           const known = new Set(ids);
           const kept = s.filter === null ? null : new Set([...s.filter].filter((id) => known.has(id)));
           const filter = kept === null || kept.size === 0 || kept.size === ids.length ? null : kept;
@@ -752,7 +744,7 @@ export const useApp = create<AppState>((set, get) => ({
         }));
         return;
       case "session_stopped": {
-        const worktrees = get().session?.worktrees ?? NO_WORKTREES;
+        const branches = get().session?.branches ?? NO_BRANCHES;
         set((s) => ({
           session:
             s.session === null
@@ -768,7 +760,7 @@ export const useApp = create<AppState>((set, get) => ({
         get().appendTranscript(
           msg.worktree,
           "tool",
-          `the session on ${branchOf(worktrees, msg.worktree)} stopped: ${msg.reason}`,
+          `the session on ${branchOf(branches, msg.worktree)} stopped: ${msg.reason}`,
         );
         return;
       }
@@ -793,9 +785,13 @@ export const useApp = create<AppState>((set, get) => ({
         if (asked === null || asked.worktree !== msg.worktree) return;
         if (asked.revA !== msg.delta.revA || asked.revB !== msg.delta.revB) return;
         const live = get().graphs[msg.worktree];
+        const branch = get().session?.branches.find((entry) => entry.id === msg.worktree);
         set({
           delta: msg.delta,
-          deltaContext: live !== undefined && live.rev === msg.delta.revB ? live : null,
+          // A live branch's effective graph includes an uncommitted overlay, so
+          // it is not evidence for the committed historical after-side even
+          // when its effective revision happens to have the same number.
+          deltaContext: branch?.live === false && live !== undefined && live.rev === msg.delta.revB ? live : null,
           // nothing on a past version is a bubble in the project as it stands
           selection: null,
         });
@@ -1004,14 +1000,14 @@ export const useApp = create<AppState>((set, get) => ({
  * filtered variation with a harness in it, because with one reporting in there
  * is nothing to choose; else the filtered variation that lit the selected
  * bubble most recently, because that is the one working on what the reader is
- * looking at; else the main worktree, which is the project itself. The last
- * case can name a variation with no harness at all — the pills then have
- * nothing to say about it, which is the honest reading.
+ * looking at; else the repository's default branch. The last case can name a
+ * variation with no harness at all — the pills then have nothing to say about
+ * it, which is the honest reading.
  */
 export function selectTarget(state: AppState): string | null {
   const { session, filter, target } = state;
   if (session === null) return null;
-  const shown = session.worktrees.filter((entry) => filter === null || filter.has(entry.id));
+  const shown = session.branches.filter((entry) => filter === null || filter.has(entry.id));
   if (target !== null && shown.some((entry) => entry.id === target)) return target;
 
   const running = shown.filter((entry) => runsIn(session, entry.id));
@@ -1031,7 +1027,7 @@ export function selectTarget(state: AppState): string | null {
     if (best !== null) return best;
   }
 
-  const main = mainWorktreeOf(session);
+  const main = defaultBranchOf(session);
   if (main !== null && shown.some((entry) => entry.id === main)) return main;
   return shown[0]?.id ?? null;
 }
@@ -1161,15 +1157,15 @@ let nowCache: { sig: string; lines: readonly NowLine[] } = { sig: "", lines: NO_
  * ("reminders: reading merge.ts").
  */
 export function selectNow(state: AppState): readonly NowLine[] {
-  const worktrees = state.session?.worktrees ?? NO_WORKTREES;
-  const shown = worktrees.filter((entry) => state.filter === null || state.filter.has(entry.id));
+  const branches = state.session?.branches ?? NO_BRANCHES;
+  const shown = branches.filter((entry) => state.filter === null || state.filter.has(entry.id));
   const lines: NowLine[] = [];
   let sig = "";
   for (const entry of shown) {
     if ((state.agents[entry.id] ?? "idle") === "idle") continue;
     const line = nowLineOf(state, entry.id);
     if (line === null) continue;
-    const text = shown.length === 1 ? line.text : `${branchOf(worktrees, entry.id)}: ${line.text}`;
+    const text = shown.length === 1 ? line.text : `${branchOf(branches, entry.id)}: ${line.text}`;
     lines.push({ key: line.key, text });
     sig += `${line.key}\u0000${text}\u0001`;
   }

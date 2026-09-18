@@ -13,12 +13,13 @@
  * only bind loopback.
  *
  * Run: node src/server-cli.ts [--port 4400] [--host 127.0.0.1] [--data-dir <dir>]
- *                             [--token-file <file>]
+ *                             [--token-file <file>] [--web-dir <dir>]
  */
 
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { AGENT_WS_PATH, BRIDGE_PORT, BRIDGE_WS_PATH } from "../../shared/src/index.ts";
 import { isLoopbackHost, loadTokenFile } from "./server/auth.ts";
 import { importLegacyDataDir } from "./server/legacy.ts";
@@ -38,6 +39,8 @@ interface Cli {
   dataDir: string;
   /** `--token-file`: `[{ token, tenant }, …]`; null ⇒ unauthenticated, one `local` tenant */
   tokenFile: string | null;
+  /** `--web-dir`: production canvas assets served on the same listener */
+  webDir: string;
 }
 
 function parseArgv(argv: string[]): Cli {
@@ -46,6 +49,7 @@ function parseArgv(argv: string[]): Cli {
     host: "127.0.0.1",
     dataDir: join(process.env.SHAPE_HOME ?? homedir(), ".shape", "server"),
     tokenFile: null,
+    webDir: fileURLToPath(new URL("../../web/dist/", import.meta.url)),
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -66,6 +70,9 @@ function parseArgv(argv: string[]): Cli {
     } else if (arg === "--token-file" && next !== undefined) {
       cli.tokenFile = resolve(next);
       i++;
+    } else if (arg === "--web-dir" && next !== undefined) {
+      cli.webDir = resolve(next);
+      i++;
     } else {
       throw new Error(`unknown argument ${arg}`);
     }
@@ -84,7 +91,7 @@ try {
   }
   // one read at startup; a token change is an operator restarting the server
   const auth = cli.tokenFile === null ? null : await loadTokenFile(cli.tokenFile);
-  const sockets = new SocketServer({ port: cli.port, host: cli.host });
+  const sockets = new SocketServer({ port: cli.port, host: cli.host, webDir: cli.webDir });
   await mkdir(cli.dataDir, { recursive: true });
   const storage = openSqliteStorage(join(cli.dataDir, "shape.db"));
   // a data dir written by a pre-SQLite server is taken over once, before any
@@ -99,6 +106,7 @@ try {
   const restored = await server.restore();
   if (restored > 0) console.error(`[bridge] restored ${restored} active project(s) from ${cli.dataDir}`);
   await sockets.listen();
+  if (typeof process.send === "function") process.send({ type: "shape_server_ready" });
   console.error(`[bridge] server at ${sockets.url(BRIDGE_WS_PATH)} (agents at ${AGENT_WS_PATH})`);
 } catch (err) {
   console.error(`[bridge] startup failed: ${err instanceof Error ? err.message : String(err)}`);

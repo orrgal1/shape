@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { WatchedProjectCandidate } from "../../../shared/src/index.ts";
-import { listWorktrees, projectKey, repoIdentity } from "./worktrees.ts";
+import { listWorktrees, repoIdentity, repositoryIdentity } from "./worktrees.ts";
 
 interface Chooser {
   command: string;
@@ -102,6 +102,7 @@ export async function pickWatchedProject(signal?: AbortSignal): Promise<WatchedP
 
   const identity = await repoIdentity(cwd);
   if (identity.commonDir === null) throw new Error(`selected directory is not a Git project: ${cwd}`);
+  const repository = await repositoryIdentity(cwd);
   let main: string;
   try {
     main = await realpath(identity.main);
@@ -114,7 +115,7 @@ export async function pickWatchedProject(signal?: AbortSignal): Promise<WatchedP
   const worktrees = [...new Map(listed.map((worktree) => [worktree.id, worktree])).values()];
 
   return {
-    key: projectKey(identity),
+    key: repository.id,
     label: basename(main),
     cwd: main,
     worktrees,

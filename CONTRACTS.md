@@ -3,19 +3,14 @@
 Settled 2026-08-28. `packages/shared/src/index.ts` is the machine-readable form of this
 document; when they disagree, the TS file wins.
 
-**Read-only since 2026-09-05, with one narrow #35 exception.** Shape shows; it does not
-drive ordinary sessions. The browser cannot instruct, start, stop, prompt or focus an ordinary
-coding agent, and the bridge never launches a general harness or sends a prompt to an observed
-session. Its existing terminal action only reveals a session that is already running; it is not
-agent control. The one filesystem-facing browser action added by #33 asks the connected local
-Shape agent to show a native directory chooser and register the selected existing Git repo for
-observation; it does not address a harness.
-For a newly watched or reactivated repo whose graph is missing, or whose surveyed head differs
-from the current extracted reality/`HEAD`, #35 may expose catch-up state and run exactly one
-dedicated OMP synchronization through herdr in the selected project workspace. That run is
-unfocused, uses Shape's extension and only `read`, `glob`, `grep` and `canvas`; it is not a
-general launcher. A current graph launches nothing, and a graph is caught up only after the
-matching job's canvas writes are persisted at the pinned head. Failures remain visible.
+**Read-only observation; no catch-up exception.** Shape shows; it does not drive ordinary
+sessions. The browser cannot instruct, start, stop, prompt or focus an ordinary coding agent,
+and the bridge never launches a general harness or sends a prompt to an observed session.
+The browser's only filesystem-facing action is selecting an existing Git repo through the
+connected local agent's directory chooser; it does not address a harness.
+Mapping is never automatic. Missing or stale graphs expose state only; committed maps change
+only through an explicit authenticated `/control` map operation. Shape does not start herdr,
+run catch-up synchronization, or turn surveys into mappings.
 
 **Projects are a registry, with one explicit add path since #33.** A project exists because a
 session reported in from its repo or because the operator selected an existing Git repo with
@@ -30,7 +25,7 @@ browser (Vite dev :5173)
    │  WebSocket  ws://127.0.0.1:4400/ws     ServerMsg out, a read-only ClientMsg in
    ▼
 SERVER half   packages/bridge/src/server/   ProjectRoom + ShapeServer
-   │  graph store, snapshots, drift, activity, the automatic map
+   │  graph store, snapshots, drift, activity, explicit mapping/control
    │  agent link: AgentToServerMsg / ServerToAgentMsg (shared/src/link.ts)
    │  local mode = memoryLinkPair() in one process; remote = WebSocket /agent (Phase 1)
    ▼
@@ -54,29 +49,24 @@ The two halves meet ONLY in `shared/src/link.ts` and `index.ts`; `server/` never
   anything else — becomes the session of the worktree its `cwd` resolves to, and the agent
   registers it the first time it speaks (§Sessions are observed). One session per worktree; a
   worktree with nothing running is a normal state and the canvas says so rather than offering
-  to fix it. The dedicated #35 synchronization run is the sole narrow exception: its own OMP
-  session is started by herdr only when catch-up is owed.
-- The harness writes to the canvas through the loopback link and the agent forwards
+  to fix it. The harness writes to the canvas through the loopback link and the agent forwards
   `canvas_call { id, args }` to the server, which validates + applies to the graph store,
   answers `canvas_result`, and broadcasts the new graph to browsers. That is the only path
   into the document, and it runs one way: no frame the browser sends reaches a session.
 - What the agent is expected to write onto the canvas is carried by the session's own
   integration — `CANVAS_TOOL_DESCRIPTION` on the tool it registers, and the per-project
-  directive file the agent writes on every project open
-  (`packages/bridge/src/agent/directive.ts`) for an ordinary session started by hand. The
-  server hands out no preamble and composes no prompt for observed sessions; the dedicated
-  catch-up run has its own fixed prompt and extension (§Catch-up synchronization).
-- Projects usually arrive from observed sessions. In addition, a browser already joined to a
-  capable local agent may send `add_watched_project`; that same agent shows the directory
-  chooser and returns validated repo identity facts without retargeting its current runtime.
-  The registry opens a separate runtime through its normal activation path.
-- Attach: each runtime sends `attach` (project key = sha256(hostname:realpath(git common dir)),
-  label, cwd, tools, targetHasCode, worktrees, sessions, realities) once its project is open,
+  directive file the agent writes on every project open. The server hands out no preamble and
+  composes no prompt for observed sessions.
+- Projects usually arrive from observed sessions. A browser already joined to a capable local
+  agent may send `add_watched_project`; that agent shows the directory chooser without
+  retargeting its runtime, and the registry opens a separate runtime through normal activation.
+- Attach: each runtime sends `attach` (repository descriptor, label, cwd, tools, targetHasCode,
+  worktrees, sessions, realities) once its project is open,
   with whatever sessions have already greeted — usually none. A link is bound to ONE project
   for its life: there is no retarget, and a project marked inactive has its link CLOSED rather
   than re-pointed.
 - Filesystem facts the server needs are requests over the link, answered by id:
-  `list_worktrees`, `synthesize_skeleton`, `extract_reality`.
+  `list_worktrees`, `extract_reality`.
 - Going to the terminal: `focus_terminal { worktree }` server → agent → the herdr agent whose
   cwd is that worktree is focused and its terminal window raised (§Views and the terminal). No
   herdr, no terminal: the session reports `terminal: "none"` and the browser offers nothing.
@@ -161,16 +151,10 @@ follows as the end of the exchange; a close BEFORE the answer is the failure. Th
 asserts `session.snapshot`'s `protocol` is 19 and otherwise logs and refuses rather than
 guessing at a protocol it does not know. `herdr status` is shelled out once first to autospawn
 the server — skipped when `HERDR_SOCKET_PATH` is set, because an operator or a test who named
-What is left of the client is what read-only observation and the dedicated catch-up path need:
-probe/connect, `workspaceOf` (the project's workspace by cached id, then by
-`worktree.repo_root` / `checkout_path`, then by label), `tabs()`, `agents()` (also the
-discovery scan's source of truth — §Projects and status), `closeTab`, focus-by-cwd for the
-existing terminal view, `dispose`, and — since #5 — `prompt(paneId, text)` again, which is
-`agent.prompt { target, text }`: injection writes the directive into panes Shape never opened,
-so it needs a way to speak to a pane without owning it (§Injection). Since #35, `sync()` is
-the separate, fixed OMP catch-up operation described below. General `launch()`, `Launched`,
-`type`, `interrupt`, `kill`, the pty fallback and `open` (which existed for the manager tab
-Shape no longer opens — §`SessionInfo.manager`) are gone.
+What is left of the client is what read-only observation and explicit control operations need:
+probe/connect, `workspaceOf`, `tabs()`, `agents()`, `closeTab`, focus-by-cwd for the existing
+terminal view, and `dispose`. General prompt/injection and automatic synchronization are absent.
+`type`, `interrupt`, `kill`, the pty fallback and manager-tab `open` are absent.
 `SHAPE_LAUNCHER` is no longer a choice between two launchers:
 `herdr` forces the probe even when herdr was not found on PATH, `none` skips it, an unknown
 value logs and falls through to ordinary detection — the launcher is herdr when it answers and
@@ -191,18 +175,11 @@ launch env that used to set it; a frame says which worktree it is about by its `
 
 ## Projects and status (2026-09-05, issue #28)
 
-A project is a ROW in the `projects` registry with a status. `StoredProject` is
-`{ project: AgentProject, tenant, worktrees, sessions: WorktreeSession[], liveSessions,
-status: "active" | "inactive", statusChangedAt, lastSeen }` (schema v3 — §Storage):
-`liveSessions` is how many worktrees had a live session as of the last attach, detach or
-discovery scan, and `statusChangedAt` is the ISO time the status was last set. The browser
-sees the row as `ProjectSummary { projectId, label, cwd (the main worktree), status,
-liveSessions, manager, caughtUp, injected, lastSeen }`. It may switch between active rows,
-change a row's status, or add one existing Git repo through the connected local agent's
-directory chooser. The browser receives catch-up state, not a harness-launch control: there
-are still no project-creation, session-adoption or general harness-launch frames. The
-dedicated catch-up request is an internal agent-side exception and cannot be selected as a
-general browser action.
+A project is a row in the `projects` registry with a status. `StoredProject` remains the
+registry summary; the browser may switch active rows, change status, or add an existing Git
+repo through the connected local agent's directory chooser. The browser receives stored
+branch/map state, not a harness-launch or catch-up control. There are no project-creation,
+session-adoption or general harness-launch frames.
 
 **A new row is ACTIVE** — operator decision, 2026-09-05. A repo somebody is working in is a
 repo they want to see, and a Shape that greeted a first session with a project it had decided
@@ -213,15 +190,13 @@ decides a new row's status, and `saveProject` never writes the status of a row t
 **Discovery** (`AgentFleet`, `packages/bridge/src/agent/fleet.ts`) is three sources unioned,
 never a scan of the machine: the cwds of herdr's own agents (`agent.list`), the cwds of the
 loopback callers currently greeted, and the `--cwd` seed when one was given. Each cwd is
-resolved with `repoIdentity()` (`packages/bridge/src/agent/worktrees.ts`) and the results are
-GROUPED by `projectKey(identity)` — the sha of hostname + the git common dir — so every
-worktree of a repo lands on ONE project; a cwd with no common dir is skipped unless it is a
-seed, and a seed that is not a repo is its own single worktree. The scan runs when a browser
-connects and every 30 s while a browser is
-connected, and NEVER with zero clients — nobody is watching, so there is nothing to keep
-fresh. It is additive: it refreshes worktrees and `liveSessions`, inserts the repos it has not
-seen before, and NEVER deletes a row or deactivates one. Only `set_project_status` moves a
-status, because a repo whose sessions all went home is a project you still want in the list.
+resolved with `repositoryIdentity()` and grouped by its durable repository id; Git branches use
+full refs as opaque branch IDs. Non-Git seeds retain their explicit fallback identity. Physical
+worktrees remain routing metadata only.
+The scan runs when a browser connects and every 30 s while a browser is connected, and NEVER
+with zero clients — nobody is watching, so there is nothing to keep fresh.
+It is additive: it refreshes worktrees and live sessions, inserts unseen repositories, and
+never deletes or deactivates a row; only `set_project_status` changes status.
 
 The handoff is one call: the fleet builds a
 `SeenRepo { key, cwd, label, worktrees, live, observationOnly, watcherKey }` per group —
@@ -292,54 +267,12 @@ registry, opening a room for each active one:
 - `select_project` is accepted for an ACTIVE project only: inactive is `error` "project <id>
   is inactive", unknown is `error` "unknown project <id>".
 
-The project summary exposes catch-up rather than a guessed boolean. `catchUp` is the aggregate
-`CatchUpState` for the project's worktrees; each state is `idle | queued | running | failed`,
-with an optional failure `reason` and numeric `at` timestamp. `caughtUp` remains the concise
-projection and is true only when the aggregate state is `idle`. `hello` carries
-`catchUps` keyed by worktree, and `catch_up` transitions carry the worktree's state, so a
-newly watched or reactivated project can show missing/stale work and its progress. A graph is
-not caught up merely because a job was queued or finished: the matching job's canvas
-persistence must be recorded at the pinned `HEAD`; failures stay `failed` and visible.
+The project summary may retain `catchUp`/`caughtUp` fields for wire compatibility, but no jobs
+are created: state is always `idle` and no catch-up transitions or synchronization run exists.
 `injected` is real since #5: it is
 `AgentProject.injected.length` — how many of the project's herdr panes this bridge process has
 briefed with the Shape directive (§Injection) — and 0 for a row with no room, because an
 inactive project has no runtime briefing anybody.
-## Catch-up synchronization (2026-09-10, issue #35)
-
-Catch-up is the only operation that lets Shape start a coding harness. It applies to a newly
-watched or reactivated repository when a worktree has no stored Shape graph, or when its stored
-survey mark is absent/stale: the surveyed head does not match the current extracted reality
-and `HEAD`. A current graph at the current head launches nothing. The room exposes one
-`CatchUpState` per worktree and an aggregate project state:
-
-- `idle` means no catch-up is owed. `queued` means the worktree is waiting for its one run;
-  `running` means that run is active; `failed` means it could not complete, with the reason
-  and timestamp retained for the browser.
-- The server pins the worktree's current `HEAD` and extracted reality before queueing. It
-  sends one correlated `catch_up { worktree, id, prompt, since }` request to the selected
-  project runtime. The runtime may start exactly one OMP process through herdr in that
-  project's selected workspace, never through a general launcher and never for a current
-  graph.
-- The run creates an unfocused Shape-owned tab and starts OMP with the fixed read-only
-  invocation: `-p --no-session --no-extensions --mode=text --approval-mode=yolo
-  --tools=read,glob,grep,canvas -e <Shape extension> @<staged prompt file>`. No other harness,
-  tool, extension, focus action or interactive terminal is allowed. The job id travels on its
-  `canvas_call` writes, so ordinary sessions cannot satisfy this run accidentally. The prompt is
-  composed prose, and herdr refuses any agent argument it cannot encode for the target shell
-  (`invalid_agent_argument` — a newline is such a character), so the prompt is written to a
-  temporary file outside the project and reaches OMP as the `@` message argument it inlines; the
-  file is removed when the run is over either way. OMP inlines a text file up to its own size
-  ceiling and leaves the contents out above it, which surfaces as a run that persists nothing
-  (a visible `failed` state), never as a run against the wrong prompt.
-- Completion is accepted only when the matching job has exited successfully and its canvas
-  writes are persisted against the pinned head. The room then records `idle`; a changed head,
-  missing matching writes or any launch/canvas/persistence failure leaves the state visible
-  as `failed` rather than claiming catch-up.
-
-This exception does not change the browser's ordinary read-only boundary. Picker registration
-still only selects an existing repository, ordinary observation sessions are never launched or
-prompted, and `focus_terminal` only reveals a terminal session that was already running; no
-browser path can launch, prompt or focus an ordinary coding agent.
 
 ## Injection (2026-09-05, issue #5)
 
@@ -610,79 +543,59 @@ earned — the ops still land.
 
 ## WebSocket protocol (bridge ↔ browser)
 
-Per-worktree fields (`worktree` on most frames, `hello.graphs`/`revisions`/`agents`) landed
-2026-09-03 — see §Worktrees on one canvas, which wins wherever this section still reads as one
-graph per project.
+The ordinary `/ws` protocol remains read-only for canvas control: browser frames do not
+steer or prompt coding sessions. `ServerMsg` retains the existing `worktree` field names for
+physical session/activity routing, but graph keys and branch identity are opaque branch IDs.
+Rooms may be agentless: reads, branch selection, mapping and live control remain available
+without a local agent, while terminal/focus actions require the corresponding physical
+session.
 
-Server → client (`ServerMsg`):
-- `hello` — full `GraphDoc` + `SessionInfo` + `projects: ProjectSummary[]` (every project this
-  server holds for the tenant, BOTH statuses, newest `lastSeen` first) + `projectId` (the room
-  this socket is joined to) + `tools: ProjectTools` on connect, to the one socket that asked
-  after successful `select_project` or `add_watched_project`, to a socket waiting for its
-  first room, and when an agent re-attaches to an agentless room
-- `watched_project_add_cancelled` — asker-only acknowledgement that the native chooser closed;
-  no project or room state changed
-- `session` — `{ session: SessionInfo }` session facts changed without the graph changing:
-  the agent attached/detached (`agentConnected`), or the harness reported its session id
-  late. The client replaces `session` only — no selection/transcript reset.
-- `projects` — `{ projects }` broadcast to the tenant whenever a room opens or closes, an
-  agent attaches or detaches, a status changes, or a discovery scan changed a row
-- `graph` — full `GraphDoc` after every change (graphs are small; no patch protocol in v1)
-- `agent` — `{ state: "idle" | "streaming" | "compacting" }`
-- `activity` — `{ nodeIds: string[] }` currently-working intent nodes (pulse rendering)
-- `transcript` — `{ role, text }` appended lines for the side panel (assistant text deltas
-  coalesced per message_end; tool lines summarized)
-- `error` — `{ message }`
-- `now` — `{ worktree, text: string | null }` the sentence being written right now, folded
-  from the harness's `text_delta` events: at most one frame every 150 ms, the last ≤ 120
-  characters, and `null` at the end of a turn (and when the session stops). Never stored,
-  never a transcript line — the `text` that follows is the message of record.
+`SessionInfo.branches` is `CanvasBranchInfo[]`, each exactly
+`{ id, branch, head, mappedCommit, live, path, isDefault }`. `id` is an opaque stable branch
+ID (for example the full ref `refs/heads/<name>`); `branch` is its display ref, `head` is the
+observed commit or null, `mappedCommit` is the exact committed checkpoint or null, `live`
+indicates an uncommitted effective overlay, `path` is display-only physical worktree metadata,
+and `isDefault` marks the repository default branch. Browser branch selection uses these
+records and never derives map identity from a worktree path. Physical worktrees remain in
+`WorktreeInfo` for agent routing; detached worktrees are live/physical-only and never become
+trusted committed maps.
 
-Client → server (`ClientMsg`) — five frames, and none of them says anything to a coding
-session:
-- `focus_terminal` — `{ worktree }` take the user to the terminal that session runs in: the
-  herdr agent whose cwd is that worktree is focused and its window raised (§Views and the
-  terminal). Refused when that variation has no session, and refused with "there is no
-  terminal to go to on <variation>" when its `capabilities.terminal` is `none`.
-- `select_project` — `{ projectId }` join another ACTIVE project this server hosts; answered
-  with that room's `hello` to this socket only. An inactive project → `error` "project <id> is
-  inactive"; an unknown or cross-tenant id → `error` "unknown project <id>".
-- `set_project_status` — `{ projectId, status: "active" | "inactive" }`; answered by a
-  tenant-wide `projects` broadcast or an asker-only `error`. Repeating the status is a no-op.
-- `add_watched_project` — ask the current room's capable attached local agent to show its
-  native directory chooser, validate one existing Git repo and register/select it (§Add
-  watched project). Pending begins when the client sends and settles on fresh `hello`,
-  `watched_project_add_cancelled`, or `error`.
-- `diff` — `{ worktree, revA, revB }` compare two revisions of one variation; answered with a
-  `delta` broadcast (§Revision snapshots + delta). Served by an agentless room like every read.
+Server → client retains `hello`, `session`, `projects`, `graph`, `agent`, `activity`,
+`transcript`, `error`, and `now`; graph/revision/activity frames use their existing
+`worktree` field names but values are branch IDs where they identify a graph. Client → server
+retains project/status, watched-project, diff and focus frames. No unsolicited automatic
+mapping occurs: committed maps are created or changed only by the authenticated control API
+or an explicitly requested mapping operation.
 
-**Agentless rooms.** A room outlives its agent. While `session.agentConnected` is false the
-server refuses `focus_terminal` as before and `add_watched_project` with "no connected local
-Shape agent can browse folders"; reads, selection and status changes still work. A second
-agent attaching to a key whose agent is connected is refused with "project already has an
-attached agent"; an agent attaching for an inactive project is refused with "project <label>
-is inactive" (§Projects and status).
+## Authenticated control protocol (`/control`)
 
-There are no terminal frames: `packages/shared/src/pty.ts` is deleted and neither `ClientMsg`
-nor `ServerMsg` carries terminal output, input or geometry. `BackendCapabilities.terminal`
-says only whether the session's own terminal can be REACHED — `"external"` when the agent has
-a herdr, so `focus_terminal` can bring that tab forward, and `"none"` when it cannot, which
-hides the action in the browser (§Views and the terminal).
+`/control` is a tooling-only authenticated WebSocket endpoint using the same tenant
+authentication as `/ws`. Control clients MUST omit the `Origin` header; any `Origin` header is
+rejected. Tenant identity is derived only from socket authentication, never request fields.
+Every request and response carries a non-empty `requestId`.
 
-`SessionInfo` includes `targetHasCode: boolean` (bridge runs `extractReality` once at startup;
-non-TS repos fall back to a cheap source-file scan). There is nothing to click on an empty
-canvas any more — the map seeds itself — so the flag is what the empty state reads to tell
-"there is code here, the picture is coming" from "there is nothing here yet". It also carries
-`backend: { id, label, capabilities }` (§Sessions are observed) — what that session says it
-is, re-derived as each session reports in.
+`map_read { repository, branch }` returns `map_state { requestId, repository, branch,
+revision, mappedCommit, doc }`; `doc` is the committed baseline, never the effective live
+overlay, and a missing map is `revision: 0, doc: null`.
+`map_commit { repository, branch, expectedRevision, expectedMappedCommit, commit, mode,
+ops, reality, note? }` returns `map_committed { requestId, projectId, branch, revision,
+mappedCommit }`. The commit is an exact locally-resolved SHA. Incremental ops apply to the
+committed baseline; initial/full apply to an empty document. Every op is validated before
+any write, and stale revision/checkpoint (including a live write since prepare) returns
+`conflict`; invalid input returns `invalid`. A successful commit atomically writes the full
+committed document, effective graph, checkpoint, revision history and reality snapshot in one
+SQLite transaction; failures never advance the checkpoint.
+`live_update { repository, branch, sessionId, state, ops?, note?, tool?, files? }` returns
+`live_updated { requestId, projectId, branch, revision, mappedCommit }`. It requires an
+existing mapped branch (`not_mapped` otherwise), validates ops atomically, and updates only
+the visible effective graph/session activity; it never changes the committed baseline or
+checkpoint. Live activity is labeled honestly by source and never fabricated as native events.
+
+`SessionInfo` includes `targetHasCode: boolean`; empty state reflects whether code exists.
 
 `SessionInfo.directivePath: string | null` — absolute path on the agent's machine of
 `<SHAPE_HOME|~>/.shape/server/projects/<projectKey>/shape-directive.md`, the per-project
 directive the agent writes on every project open (what Shape is, this project's link URL,
-`CANVAS_TOOL_DESCRIPTION` verbatim, and the `packages/link/src/cli.ts` fallback). Null when
-the write failed — the directive is a convenience, never fatal. Travels on `AgentProject`
-too, so a launcher reading the registry can point a builder's brief at it; absent or empty
-on the wire parses as `null`.
 
 `SessionInfo.manager: ManagerHandle | null` — `{ paneId, tabId, workspaceId, agentName,
 origin: "found", shapeAware }`, the project's manager session in the user's herdr as the agent
@@ -716,9 +629,6 @@ defined in `packages/shared/src/link.ts` as `LinkClientMsg` / `LinkServerMsg`:
   (Claude Code's hooks, a transcript tail) lights up activity, transcript and agent state
   through the normal path.
 
-`cwd` is REQUIRED on both and is how the frame finds its project AND its session: the endpoint
-belongs to the FLEET, which asks every runtime `routeLink(cwd)` and hands the frame to the one
-whose repo contains that directory; inside a runtime, Shape watches one session per worktree
 and the cwd is the only thing that says which. The MCP server sends
 `process.cwd()`; the hook sends the payload's `cwd`, falling back to its own. The agent
 CANONICALIZES what it is given before matching — `process.cwd()` is already a realpath, but
@@ -856,11 +766,10 @@ separate observation-only runtime/link and `watched_project_started { id, key }`
 its attach. `cancel_request { id }` aborts a chooser nobody is waiting for.
 
 Other frames going down are `attached`, `error`, `canvas_result`, `focus_terminal`,
-`list_worktrees`, `extract_reality` and `synthesize_skeleton`; the way the server ENDS a link
-is `error` + close. What goes up, besides `attach`, `picked_directory` and
-`watched_project_started`, is `session_started`, `session_stopped`, `agent_event`,
-`canvas_call`, `reality`, `worktrees`, `skeleton_result`, `agent_error`, `agent_exit`,
-`detached`, and `injected { paneIds }`.
+`list_worktrees` and `extract_reality`; the way the server ENDS a link is `error` + close.
+What goes up, besides `attach`, `picked_directory` and `watched_project_started`, is
+`session_started`, `session_stopped`, `agent_event`, `canvas_call`, `reality`, `worktrees`,
+`agent_error`, `agent_exit`, `detached`, and `injected { paneIds }`.
 
 ## Worktrees (user decision 2026-08-28: toggle first, compare later) — SUPERSEDED
 
@@ -902,79 +811,27 @@ what lets one canvas merge them; `AgentProject.cwd` is the MAIN worktree's path.
   because HEADs differ; an unreadable entry costs that worktree's reality, not the attach.
   `project.legacyKeys` names the key each worktree was stored under before the common-dir
   key — see **Adopting a canvas off an older project key** below.
-- Agent → server: `session_started { worktree, session, backend }` and
-  `session_stopped { worktree, reason }` — both unsolicited, because a session is observed
-  rather than asked for — and `worktree` on `agent_event`, `canvas_call`, `reality` and
-  `skeleton_result`. `worktrees`, `sessions`, `agent_error`, `agent_exit`, `injected` and
-  `detached` stay project-wide — injection briefs PANES, and a pane is not a worktree.
-- Server → agent: `worktree` on `extract_reality`, `synthesize_skeleton` and
-  `focus_terminal`. There is no frame that starts a session, stops one, or says anything to
-  one, and none that moves an agent between projects — one link, one project (§The agent link).
+**Browser wire** (`ServerMsg` / `ClientMsg`): `hello` and `session` include
+`branches: CanvasBranchInfo[]`; graph/revision/activity frames retain their `worktree` field
+names for compatibility but use opaque branch IDs as graph keys. `WorktreeInfo` remains
+physical metadata for session and terminal routing. `SessionInfo` includes `branches` alongside
+the physical `worktrees` and `sessions`; no worktree-path fallback is used for map identity.
 
-**Browser wire** (`ServerMsg` / `ClientMsg`, validated in `packages/bridge/src/server/ws.ts`).
-- `hello` carries `graphs: Record<worktreeId, GraphDoc>`,
-  `revisions: Record<worktreeId, RevisionInfo[]>`, `agents: Record<worktreeId, AgentState>`
-  and the usual `session`, `projects`, `projectId`. The single `graph`/`agent`/`revisions`
-  are gone.
-- `SessionInfo` is `{ cwd (main worktree), targetHasCode, worktrees, sessions:
-  WorktreeSession[], agentConnected, directivePath, manager }`; `sessionId`/`sessionName`/`model`/
-  `backend` moved into `sessions`, one per worktree.
-- Server → browser: `worktree` on `graph`, `agent`, `activity`, `transcript`, `revisions`,
-  `delta` and `now`; `session_started { worktree, session, backend }` and
-  `session_stopped { worktree, reason }`. `session`, `projects` and `error`
-  stay project-wide.
-- Browser → server: `worktree` on `diff` and `focus_terminal`. Nothing else in `ClientMsg`
-  is about one variation, because nothing else acts on one.
+**Storage and durable branch identity.** Storage is keyed by tenant, repository identity and
+opaque full branch ref (for example `refs/heads/main`), never by worktree path. It exposes
+`StoredBranchState { info: CanvasBranchInfo; baseline: GraphDoc | null; effective: GraphDoc }`,
+`listBranches(tenant, key)`, `readBranch(tenant, key, branch)`, `mapCommit(tenant, request)`,
+`liveUpdate(tenant, request)`, and a focused branch metadata upsert/update operation.
+`graphs[id]` remains the effective rendered graph; the committed mapping baseline is separate.
+Branch metadata is exactly `{ id, branch, head, mappedCommit, live, path, isDefault }`.
 
-**Storage** (`packages/bridge/src/server/{storage,sqlite}.ts`, schema `user_version` 3 since
-#28 — §Storage; 2 when this landed).
-`loadGraph` / `saveGraph` / `listRevisions` / `loadRevision` / `saveRevision` /
-`appendAudit` take `(tenant, key, worktree, …)`: `graphs` and `revisions` have a
-`worktree TEXT NOT NULL` column inside their primary key, `audit` carries it as a column
-(and inside the stored entry), and revision retention (50) is per worktree. `GraphStore`
-and `SnapshotStore` are constructed with the worktree they belong to. The `projects`
-registry stays one row per project: its `session` column became `sessions` (a
-`WorktreeSession[]`) beside the existing `worktrees` list.
-
-**Migration 1 → 2.** Everything stored before worktrees existed was the canvas of one
-directory, so its rows are assigned the realpath of the `cwd` in that project's registry
-row (`mainWorktreeOf`); a graph whose registry row is gone has no cwd to resolve and takes
-the project key itself, an id no live worktree collides with. The v1 `session` becomes a
-one-element `sessions` list against that same main worktree when it named a resumable
-session, the v1 worktree list gains `id`s and loses `current`, and old audit lines keep
-their `seq`. Legacy `.shape/` imports (`server/legacy.ts`) land on the main worktree too.
-Covered by `pnpm --filter @shape/bridge run smoke:wire`.
-
-**Adopting a canvas off an older project key.** The key used to be
-`sha256(hostname():realpath(cwd))` — one project per DIRECTORY — so every canvas drawn
-before the common-dir key is stored under a key nothing now derives, and a first attach
-would open an empty canvas beside it. So `attach`'s project carries
-`legacyKeys: Record<worktreeId, string>` — for each worktree the agent lists,
-`legacyProjectKey(worktree.id)` = the old key for that directory (missing ⇒ `{}`: an older
-agent, or a stored registry row) — and the room, before it loads a worktree's graph, calls
-`Storage.adoptLegacyKey(tenant, legacyKey, key, worktree)`. In one transaction that moves
-the `(legacyKey, worktree)` graph, revisions and audit lines onto `(key, worktree)`
-(audit entries re-stamped with the new `projectId`, their own lines under the new key kept),
-drops the legacy `projects` row once no graph is left under it, and returns whether anything
-moved; the room logs `[bridge] adopted the canvas of <worktree> from its previous project
-key` when it did. Rows already under `(key, worktree)` are replaced ONLY when their graph
-has zero nodes: a canvas someone has actually drawn under the current key wins, and the
-legacy rows are then left untouched rather than discarded. Adoption is idempotent, runs
-ahead of the `.shape/` import so the newer of the two is never overwritten by the older,
-and NEVER runs in `restore()` — an agentless room has no agent to name the old keys.
-Covered by `smoke:wire` (the storage rule) and `smoke` (seeded before the bridge starts,
-adopted on the first attach of that project).
-
-**Agent runtime** (`packages/bridge/src/agent/runtime.ts`). One runtime serves one REPO for as
-long as that project is active, and keeps `#sessions`, a `Map<worktreeId, Observed>` of the
-sessions that have reported in (§Sessions are observed). The project key is
-`sha256(hostname():realpath(git common dir))` — every worktree of a repo agrees on the
-common dir, which is what puts them on one canvas — and `realpath(cwd)` for a non-git
-target, which is still reported as exactly one `WorktreeInfo` so a session never names a
-worktree the browser has not seen. `project.cwd` is the main worktree: the first entry of
-`git worktree list --porcelain`, which is the one owning the common dir. Every path the
-agent reports is a realpath, never the spelling the frame asked for.
-
+Repository descriptors are `{ id, label, path }`; `id` comes from canonical origin identity
+when available, otherwise canonical git-common-dir plus machine identity. `path` is display
+metadata only. Existing registry/project keys and historical rows are preserved through safe
+migration; unresolvable legacy checkout data is not fabricated into a committed baseline.
+Physical worktrees route live sessions to branch IDs. Detached worktrees are physical/live-only
+and cannot become trusted committed maps. Agentless rooms still expose stored branches and
+control reads/writes.
 The runtime is not the process: `packages/bridge/src/agent/fleet.ts` is. `AgentFleet` detects
 tools once, chooses the launcher, mounts the ONE loopback endpoint, and holds an
 `AgentRuntime` per active project. A runtime may answer `pick_directory` with validated facts
@@ -996,25 +853,16 @@ switch projects, adopt sessions, discover projects, launch harnesses or maintain
   repo is not this runtime's business at all — the fleet routes it to that repo's runtime, or
   makes the repo a project and opens one (§Projects and status). Inside the current repo a new
   directory is just a worktree: the list is refreshed and nothing re-`attach`es.
-- Per worktree: reality re-extraction on its own HEAD change when a session in it goes idle,
-  and `synthesize_skeleton` / `extract_reality`, which work on a worktree with no session
-  just as well — a directory is a directory.
+Per-worktree reality observation remains physical routing only; it never synthesizes or commits
+a map. Explicit map/live control operates on durable branch IDs.
 
 ### The merged view (web, 2026-09-03)
 
 The browser never switches between variations; it reads them as one canvas.
-- STORE: `graphs: Record<worktreeId, GraphDoc>`, `agents`, `activity` and `revisions` are all
-  worktree-keyed; transcript entries carry their `worktree`. `doc` is the
-  MERGE of the filtered variations, so every existing selector, layout pass and panel is
-  still written against one document.
-- MERGE (`web/src/layer.ts` `mergeGraphs({ graphs, filter, main })`): nodes and edges
-  unioned by id; the drawn copy (the primary) is the main worktree's when it is in the
-  filter, else the first filtered id in codepoint order. `rev`, `reality` and `drift` are
-  the primary's — a rev counted across variations names no snapshot, and extracted code
-  describes one HEAD. Each merged node id maps to `where: Array<{ worktree, differs }>`,
-  `differs` = `canonicalJson(canonicalNode(copy))` against the primary's (hence
-  `canonicalNode` is now exported from `shared/src/delta.ts`). One variation on screen ⇒
-  the primary doc is passed through and no marks are produced.
+The browser's merged view is branch-ID keyed. `graphs`, `agents`, `activity` and `revisions`
+use opaque branch IDs, while transcript entries retain physical `worktree` metadata. Committed
+baseline and effective live overlay are distinct; the browser renders the effective graph and
+uses `CanvasBranchInfo` for branch selection, filtering and mapped-commit/live metadata.
 - FILTER: `filter: Set<worktreeId> | null` (null = all), persisted per project in
   `localStorage` under `shape.variations.<projectId>`; a stored id that no longer names a
   worktree is dropped, and "all of them" normalises back to null.
@@ -1318,45 +1166,37 @@ an older agent (or a row stored before any of them existed) and reads as `[]`; a
 ENTRY is dropped on its own, because one bad row must never cost a whole extraction.
 `GraphStore.load()` hydrates all three the same way for a row stored before they existed.
 
-## The automatic map (server, 2026-09-03; mechanical only since 2026-09-05)
+## Mapping, committed baselines, and live overlays
 
-Nothing asks for a map and nothing is prompted to produce one. `autoMap` in
-`packages/bridge/src/server/room.ts` is two mechanical steps over frames the room already
-has:
+Mapping is explicit and authenticated; Shape performs no unsolicited automatic mapping,
+survey-to-map conversion, skeleton seeding, prompting, or herdr-owned map. The durable
+identity is repository descriptor plus full branch ref, not a physical worktree path.
+`repository` is `{ id, label, path }`; `id` is derived from canonical Git origin identity
+when available, otherwise canonical git-common-dir plus machine identity. `path` is
+source-side display metadata and never server filesystem authority. Existing registry keys
+are preserved/migrated safely.
 
-1. A session starting in a worktree whose reality has never been extracted ⇒
-   `extract_reality { worktree }`.
-2. Reality landing on a worktree whose intent layer is EMPTY ⇒
-   `synthesize_skeleton { worktree }`. The ops come back as `skeleton_result` and the room
-   applies them ITSELF through `store.applyCanvasCall`, so they snapshot, persist and
-   broadcast exactly like an agent's own call. Link-gap warnings are dropped — a mechanical
-   skeleton owes no cross-layer links yet — the room appends one audit line
-   `{ kind: "onboard", ops }`, and the canvas is marked mapped, so a project is seeded once
-   and never over a canvas somebody has already drawn.
+Storage exposes `StoredBranchState { info: CanvasBranchInfo; baseline: GraphDoc | null;
+effective: GraphDoc }` and branch operations keyed by `(tenant, repository.id, branch)`.
+`graphs[id]` remains the effective rendered graph, while `baseline` is the separately durable
+committed mapping document. `CanvasBranchInfo` is the browser record defined in the control
+section. Physical worktree facts route sessions to branch IDs; detached worktrees are never
+promoted to committed branch records.
+Control-created registry rows persist their control-only provenance across restart and
+reactivation. `repository.path` is inert display metadata: restore and status toggles never
+call the local fleet, `onActivated`, or legacy import. A genuine agent attach may replace that
+provenance with agent-authored facts.
 
-The skeleton is `synthesizeSkeleton` in `packages/bridge/src/agent/onboarding-fs.ts`: one
-`component` node per workspace package (id `slug(pkgName)`, `phase: "built"`,
-`codeRefs: [pkgDir]`, label = the short package name, summary = the package's own
-`description` or a placeholder naming its directory) plus one `depends` intent edge per
-cross-package reality edge. Deliberately flat: mechanics know packages, not domains.
-
-There is no survey turn, no survey prompt, no file index and no onboarding validation mode.
-What the agent is expected to write — four layers, three cross-layer links, one product root
-with its capabilities, plain English, `codeRefs` on anything that owns files — is stated in
-`CANVAS_TOOL_DESCRIPTION` and in the per-project directive
-(`packages/bridge/src/agent/directive.ts`), both read by the session itself; the rules that
-must hold whoever the caller is are `applyOps`' own (§`canvas` tool). See
-docs/onboarding.md.
-
-## Revision snapshots + delta
-
-Every accepted change bumps `rev`; the bridge then stores a canonical snapshot of the intent
-layer as one row per `rev` (`SnapshotStore` in packages/bridge/src/server/snapshots.ts, over
-the `revisions` table). A rev is immutable — an existing row is never rewritten — and
-retention keeps the newest 50 per project, pruning the rest in the same transaction as the
-insert. Snapshots hold nodes + edges only — reality and drift are re-derivable, so they stay
-out.
-
+`map_commit` is compare-and-swap on both expected revision and expected mapped commit. It
+validates the complete operation batch before applying anything, requires the exact selected
+commit SHA, and atomically writes committed baseline/effective graph, checkpoint, revision
+history and reality snapshot in one SQLite transaction. A conflict or invalid batch changes
+`live_update` requires an existing mapped branch and atomically validates its batch; it changes
+only the effective graph and activity/session state, preserving baseline, checkpoint and mapped
+commit. `state: "stop"` ends the session and clears its activity only. Already-applied effective
+ops remain visible and uncommitted until a successful `map_commit`; stop never rolls them back
+or changes the baseline/checkpoint. Live writes participate in revision CAS, so a map prepared
+before a live write is stale.
 `packages/shared/src/delta.ts` is the whole comparison: `snapshotGraph` writes the canonical
 form (nodes/edges sorted by id, stable key order, undefined optionals omitted, `codeRefs`
 sorted), `canonicalJson` gives it a byte-stable string, and `diffSnapshots(a, b)` is a pure
@@ -1367,72 +1207,24 @@ Wire: `hello` carries `revisions: RevisionInfo[]` (ascending), and a `revisions`
 broadcast whenever a new snapshot lands. The client asks with `diff` `{ revA, revB }` and the
 bridge broadcasts `delta` `{ delta }`; an unknown rev answers with the usual `error` frame.
 
-## Storage (server, 2026-09-03)
+## Storage (server, schema v4)
 
-All server-side canvas state lives in one SQLite database, through Node's built-in
-`node:sqlite` (`DatabaseSync`, zero dependencies). `packages/bridge/src/server/storage.ts`
-declares the record store; `packages/bridge/src/server/sqlite.ts` is the only
-implementation (`openSqliteStorage(file)`), and both modes use it:
-- local mode (`pnpm bridge`, `shape` with no subcommand): `$SHAPE_HOME`-or-`~/.shape/shape.db`,
-  overridable with `--db <file>`. Nothing is written into the repo and nothing in it is read as
-  configuration; the only thing Shape still looks for there is a canvas an older Shape left
-  under `.shape/` (the one-shot import below).
-- `shape server --data-dir <dir>` (default `~/.shape/server`, `SHAPE_HOME` honored):
-  `<data-dir>/shape.db`.
+All server-side canvas state lives in SQLite. `Storage` retains legacy graph/revision APIs
+for migration compatibility and additionally exposes `listBranches`, `readBranch`,
+`upsertBranch`, `mapCommit`, and `liveUpdate`. Branch state is
+`StoredBranchState { info: CanvasBranchInfo; baseline: GraphDoc | null; effective: GraphDoc }`.
 
-`Storage { file, loadGraph(tenant, key, worktree), saveGraph(tenant, key, worktree, doc),
-listRevisions(tenant, key, worktree), loadRevision(tenant, key, worktree, rev),
-saveRevision(tenant, key, worktree, snapshot), listProjects(), saveProject(row),
-setProjectStatus(tenant, key, status),
-appendAudit(tenant, key, worktree, entry),
-adoptLegacyKey(tenant, legacyKey, key, worktree), close() }`. Canvas records are keyed
-`(tenant, projectKey, worktree)` — none of the three is a filter a query may forget: the
-tenant because two machines may hold the same project key, the worktree because every
-variation of a repo is its own canvas (§Worktrees on one canvas) — over four tables:
-`projects` (registry rows, one per project), `graphs`, `revisions`, `audit`.
-`PRAGMA user_version` is the schema version (3); a database from a newer build is a startup
-error, never reshaped, and 1 → 2 (see §Worktrees on one canvas) and 2 → 3 migrate in place.
+Schema v4 adds `projects.control_only`, `branches` (id, full ref, display branch, head,
+mapped commit, live, path, default flag, baseline, effective, updated timestamp), and
+`branch_live_sessions`. Branch records are durable by repository and branch ID; physical
+worktrees are routing metadata only. `SessionInfo.sessions[].worktree` is projected as a
+branch ID; only `SessionInfo.worktrees` and agent-link frames carry physical worktree IDs.
+Legacy graph/revision/audit rows are preserved and migrated without fabricating committed
+baselines.
 
-**Schema 3 (2026-09-05, issue #28)** gives `projects` its status: `status TEXT NOT NULL
-DEFAULT 'active'`, `status_changed_at TEXT NOT NULL` and `live_sessions INTEGER NOT NULL
-DEFAULT 0`. It is `ALTER TABLE … ADD COLUMN` in one transaction — no primary key changes, no
-rows move — and `status_changed_at` is added with an empty default, because a NOT NULL column
-added to rows that already exist needs one, then stamped with the migration time: the
-switcher's "since" is when Shape learned the status, not the epoch. Every project stored
-before status existed therefore comes back ACTIVE, which is what it was in practice.
-`parseRow` is as forgiving as the rest of the store: `status` defaults to
-`"active"` when it is absent or not one of the two words, `statusChangedAt` to `lastSeen`,
-and `liveSessions` to `sessions.length`.
-
-`saveRevision` returns false when that rev already exists, which is how a room knows not to
-broadcast a snapshot twice; retention (newest 50) is per worktree. `saveProject` upserts
-`StoredProject { tenant, project: AgentProject, worktrees, sessions: WorktreeSession[],
-liveSessions, status, statusChangedAt, lastSeen }` after every attach, detach and discovery
-scan (a pre-tenant row reads as `local`), and on a row that EXISTS it does not write `status`
-or `statusChangedAt` — only `setProjectStatus` moves those, so an attach can never quietly
-re-activate a project the operator switched off (§Projects and status). `setProjectStatus`
-answers false when there is no such row and true for the same status again.
-`restore()` runs in BOTH modes: every row is loaded into the in-memory registry and each
-ACTIVE one gets a room (`[bridge] restored N project(s) from <data-dir>`), so a browser is
-greeted read-only immediately, agents re-bind on reconnect, and local mode brings a project
-back from the registry instead of waiting for an agent to arrive with it. An unreadable row is
-skipped with `[bridge] ignoring unparseable project row <tenant>/<key>`, never fatal. One kind
-of audit entry is left,
-`{ at, tenant, projectId, worktree, kind: "onboard", ops }` — the room's own record of the
-mechanical skeleton it seeded onto an empty canvas, and how many ops landed; a failed append
-is logged once as `[bridge] audit write failed: <message>` and never fails the seeding.
-
-One-shot import (`packages/bridge/src/server/legacy.ts`): the first time local mode opens a
-project that has no graph row, a `<cwd>/.shape/graph.json` and `<cwd>/.shape/revisions/` left
-by an older Shape are read into the database, then moved aside under `<cwd>/.shape/imported/`
-(a second import lands under a timestamped sibling, never over the first) — `config.json` and
-the directory itself stay (`[bridge] imported <cwd>/.shape into <db file> (files kept under
-…)`). Never deleted: a bridge on a throwaway `--db` imports just the same, and the only copy
-of a canvas must survive that; the imported canvas is the MAIN worktree's. A remote server does the same
-once at startup for a pre-SQLite `--data-dir`: rows from `<root>/projects.json` and the
-graphs and revisions under `<root>/tenants/<tenant>/projects/<key>/` are imported and the
-registry is renamed to `projects.json.imported`. Anything unparseable is skipped with a line
-on stderr, never thrown.
+Control-created rows preserve control-only provenance across restart/reactivation. Restore and
+status changes do not invoke the local fleet, activation, or legacy import; a genuine agent
+attach may replace provenance with agent-authored facts.
 
 ## Auth and tenancy (server, 2026-09-03)
 

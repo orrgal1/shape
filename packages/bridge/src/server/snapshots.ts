@@ -1,6 +1,6 @@
 /**
- * Revision snapshots: one canonical GraphSnapshot per `rev` of ONE worktree's
- * canvas, so the browser can diff any two points in that variation's history.
+ * Revision snapshots: one canonical GraphSnapshot per `rev` of ONE branch's
+ * canvas, so the browser can diff any two points in that branch's history.
  * Where they are kept is the storage's business (`server/storage.ts`).
  *
  * A revision is immutable once written (a rev never means two different graphs)
@@ -16,13 +16,13 @@ export class SnapshotStore {
   readonly #storage: Storage;
   readonly #tenant: string;
   readonly #key: string;
-  readonly #worktree: string;
+  readonly #branch: string;
 
-  constructor(storage: Storage, tenant: string, key: string, worktree: string) {
+  constructor(storage: Storage, tenant: string, key: string, branch: string) {
     this.#storage = storage;
     this.#tenant = tenant;
     this.#key = key;
-    this.#worktree = worktree;
+    this.#branch = branch;
   }
 
   /**
@@ -33,7 +33,7 @@ export class SnapshotStore {
   async save(doc: GraphDoc): Promise<RevisionInfo | null> {
     const snapshot = snapshotGraph(doc);
     try {
-      const stored = await this.#storage.saveRevision(this.#tenant, this.#key, this.#worktree, snapshot);
+      const stored = await this.#storage.saveRevision(this.#tenant, this.#key, this.#branch, snapshot);
       return stored ? { rev: snapshot.rev, at: snapshot.at } : null;
     } catch (err) {
       console.error(`[bridge] failed to write revision ${snapshot.rev}: ${String(err)}`);
@@ -42,10 +42,10 @@ export class SnapshotStore {
   }
 
   list(): Promise<RevisionInfo[]> {
-    return this.#storage.listRevisions(this.#tenant, this.#key, this.#worktree);
+    return this.#storage.listRevisions(this.#tenant, this.#key, this.#branch);
   }
 
   load(rev: number): Promise<GraphSnapshot | null> {
-    return this.#storage.loadRevision(this.#tenant, this.#key, this.#worktree, rev);
+    return this.#storage.loadRevision(this.#tenant, this.#key, this.#branch, rev);
   }
 }

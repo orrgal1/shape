@@ -1,11 +1,10 @@
 /**
- * Everything a room keeps between turns: its graphs, the revisions they can be
- * diffed over, the registry row a restart reopens it from, and the audit trail
- * of what the server itself wrote onto a canvas. A `Storage` is a record store,
- * not a directory: graph rows are keyed by `(tenant, projectKey, worktree)`
- * because the same repo path on two machines is two projects that must never
- * read each other's graph, and every worktree of one repo is its own canvas the
- * view merges — one project, as many graphs as it has worktrees.
+ * Everything a room keeps between turns: durable repository+branch graphs,
+ * their committed mapping baselines and checkpoints, revision history, the
+ * registry row a restart reopens, and the audit trail of server writes.
+ * Branch ids are full Git refs and are independent of physical checkout paths;
+ * legacy worktree-keyed rows remain readable only as migration history until
+ * an unambiguous named branch can adopt them.
  *
  * Both modes are served by the same implementation (`server/sqlite.ts`); they
  * differ only in which database file they open. The registry is the switcher's
@@ -21,8 +20,14 @@
 import { realpathSync } from "node:fs";
 import type {
   AgentProject,
+  CanvasBranchInfo,
+  ControlErrorResponse,
   GraphDoc,
   GraphSnapshot,
+  LiveUpdateRequest,
+  LiveUpdatedResponse,
+  MapCommitRequest,
+  MapCommittedResponse,
   ProjectStatus,
   RevisionInfo,
   WorktreeInfo,
@@ -45,6 +50,8 @@ export interface StoredProject {
    * resume can name the session that was running where.
    */
   sessions: WorktreeSession[];
+  /** true for a remote control-created row whose descriptor path is display-only */
+  controlOnly: boolean;
   /** worktrees with a live session as of the last attach, detach or discovery scan */
   liveSessions: number;
   /** whether the server holds a room for this project; an inactive row keeps its records */
@@ -53,6 +60,13 @@ export interface StoredProject {
   statusChangedAt: string;
   /** ISO time of the last attach or detach */
   lastSeen: string;
+}
+
+/** Durable state of one repository branch: committed truth and its visible overlay. */
+export interface StoredBranchState {
+  info: CanvasBranchInfo;
+  baseline: GraphDoc | null;
+  effective: GraphDoc;
 }
 
 /**
@@ -93,6 +107,23 @@ export interface Storage {
   loadRevision(tenant: string, key: string, worktree: string, rev: number): Promise<GraphSnapshot | null>;
   /** false when `rev` already exists (revisions are immutable); prunes to the newest 50 PER WORKTREE */
   saveRevision(tenant: string, key: string, worktree: string, snapshot: GraphSnapshot): Promise<boolean>;
+  /** durable repository branches, including branches with no physical checkout */
+  listBranches(tenant: string, key: string): Promise<CanvasBranchInfo[]>;
+  /** one branch's committed baseline and visible effective graph */
+  readBranch(tenant: string, key: string, branch: string): Promise<StoredBranchState | null>;
+  /** update checkout/display metadata without replacing stored graph state */
+  upsertBranch(tenant: string, key: string, info: CanvasBranchInfo): Promise<void>;
+  /** atomically commit a validated mapping and, when supplied, its registry row */
+  mapCommit(
+    tenant: string,
+    request: MapCommitRequest,
+    project?: StoredProject,
+  ): Promise<MapCommittedResponse | ControlErrorResponse>;
+  /** atomically apply a validated live overlay without advancing the committed mapping */
+  liveUpdate(
+    tenant: string,
+    request: LiveUpdateRequest,
+  ): Promise<LiveUpdatedResponse | ControlErrorResponse>;
   /** every registry row, both statuses, across every tenant */
   listProjects(): Promise<StoredProject[]>;
   /**
@@ -108,21 +139,19 @@ export interface Storage {
    * still answers true and leaves `statusChangedAt` where it was.
    */
   setProjectStatus(tenant: string, key: string, status: ProjectStatus): Promise<boolean>;
+  /** whether a durable project registry row still exists */
+  hasProject(tenant: string, key: string): Promise<boolean>;
   /**
    * Append one audit line, against the worktree it happened in. Never rejects:
    * a canvas the room seeded must not be lost because a disk was.
    */
   appendAudit(tenant: string, key: string, worktree: string, entry: AuditEntry): Promise<void>;
   /**
-   * Move one worktree's canvas from the project key an older Shape derived for
-   * it onto the key this build uses, and report whether there was anything to
-   * move. Graph, revisions and audit lines all travel, and the legacy registry
-   * row is dropped once no graph is left under it, so the project stops
-   * appearing twice in the picker.
-   *
-   * A canvas already stored under `(key, worktree)` is only overwritten when it
-   * is empty: a graph someone has actually drawn under the current key is the
-   * newer truth and wins over whatever the old key still holds.
+   * Move collision-free durable branches and one physical legacy canvas from
+   * an older repository key onto the current key. Graphs, revisions, live
+   * metadata and audit lines travel together. A conflicting nonempty or mapped
+   * current branch wins, leaving the old rows intact; the legacy registry row
+   * is dropped only after neither graphs nor durable branches remain.
    */
   adoptLegacyKey(tenant: string, legacyKey: string, key: string, worktree: string): Promise<boolean>;
   close(): void;
@@ -155,8 +184,8 @@ export function parseRow(value: unknown): StoredProject | null {
   const project = parseProject(row.project);
   const worktrees = parseWorktrees(row.worktrees);
   if (project === null || worktrees === null) return null;
+  const controlOnly = row.controlOnly === true;
   // a row whose sessions cannot be read still names a project worth reopening:
-  // the harnesses are gone by the time it is read anyway (the room reopens
   // agentless), so a bad list costs the resume hint, never the room
   const sessions = parseWorktreeSessions(row.sessions) ?? [];
   if (typeof row.lastSeen !== "string" || row.lastSeen.length === 0) return null;
@@ -178,5 +207,5 @@ export function parseRow(value: unknown): StoredProject | null {
     typeof row.liveSessions === "number" && Number.isInteger(row.liveSessions) && row.liveSessions >= 0
       ? row.liveSessions
       : sessions.length;
-  return { project, tenant, worktrees, sessions, liveSessions, status, statusChangedAt, lastSeen: row.lastSeen };
+  return { project, tenant, worktrees, sessions, liveSessions, status, statusChangedAt, lastSeen: row.lastSeen, controlOnly };
 }

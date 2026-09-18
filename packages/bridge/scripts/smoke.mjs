@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 /**
- * Bridge dev smoke test. Runs the real bridge over a throwaway target dir and
- * asserts the wire contract of a READ-ONLY Shape: the bridge starts nothing and
- * says nothing to a session. Sessions are OBSERVED — a harness dials the
- * agent's loopback link from a directory inside the project, and that is how it
- * appears on the canvas — so every session in this file is started BY THIS
- * SCRIPT (scripts/fake-omp-tui.mjs, `SHAPE_LINK` pointed at the bridge) and
- * driven by typing into its own stdin, exactly as a person types at a TUI.
+ * Bridge dev smoke test. Runs the real bridge over throwaway repositories and
+ * asserts both observation-only session behavior and explicit control mapping.
+ * The bridge starts no harness and sends no prompt to one. Sessions are
+ * observed when a harness dials the loopback link from its own working
+ * directory, so every session here is started by this script
+ * (`scripts/fake-omp-tui.mjs`) and driven through its stdin like a real TUI.
  *
  * Usage (from packages/bridge): node scripts/smoke.mjs
  */
@@ -21,6 +20,7 @@ import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import WebSocket from "ws";
+import { requestControl as sendControlRequest } from "../../../scripts/lib/client.mjs";
 
 const PORT = Number(process.env.SMOKE_PORT ?? 4409);
 
@@ -34,13 +34,10 @@ const PORT = Number(process.env.SMOKE_PORT ?? 4409);
 process.env.SHAPE_LAUNCHER = "none";
 process.env.SHAPE_FORCE_HARNESSES = "omp";
 /**
- * Most bridges in this file drive the canvas by hand: a session reports in and
- * the canvas calls it makes are what the assertions read. A room that maps such
- * a project by itself the moment a session starts would be drawing bubbles in
- * the middle of those assertions, so the automatic map is off — except in the
- * blocks that are about it, which spawn their own bridges without this.
+ * Browser-visible state uses stable Git branch refs. Physical checkout paths
+ * remain only in agent-link routing and the public worktree inventory.
  */
-const NO_AUTO_MAP = { SHAPE_AUTO_MAP: "0" };
+const branchId = (name) => `refs/heads/${name}`;
 const results = [];
 let failed = 0;
 
@@ -190,15 +187,18 @@ execFileSync("git", ["worktree", "add", "-b", "variation-2", worktree2], { cwd: 
 /** a third variation, added under the running bridge: the worktree list must follow */
 const worktree3 = join(tmpdir(), `vh-smoke-wt3-${process.pid}`);
 /**
- * Worktree ids: the realpath of each directory, which is what every frame that
- * is about one canvas carries. `wtA`, `wtVariation` and `wt2` are three
- * variations of ONE project (they share its key); `wtB` is the whole of the
- * second one.
+ * Physical worktree ids stay in agent-link routing and worktree inventory.
+ * Browser graph and session state is keyed by the stable branch refs below.
+ * `wtA`, `wtVariation`, and `wt2` are checkouts of one project; `wtB` is another.
  */
 const wtA = realpathSync(target);
 const wtVariation = realpathSync(worktree);
 const wt2 = realpathSync(worktree2);
 const wtB = realpathSync(targetB);
+const branchA = branchId("smoke");
+const branchVariation = branchId("variation");
+const branch2 = branchId("variation-2");
+const branchB = branchId("smoke");
 const frames = [];
 let bridge = null;
 let socket = null;
@@ -248,24 +248,24 @@ function dbRowsIn(file, sql, ...params) {
 
 const dbRows = (sql, ...params) => dbRowsIn(shapeDb, sql, ...params);
 
-/** one worktree's stored canvas; null until the bridge has persisted it */
-function storedGraph(cwd, worktree = realpathSync(cwd)) {
+/** One branch's stored effective canvas; null until the bridge has persisted it. */
+function storedGraph(cwd, branch = branchId("smoke")) {
   const rows = dbRows(
     "SELECT doc FROM graphs WHERE tenant = ? AND key = ? AND worktree = ?",
     "local",
     projectKeyOf(cwd),
-    worktree,
+    branch,
   );
   return rows === null || rows.length === 0 ? null : JSON.parse(rows[0].doc);
 }
 
-/** one worktree's stored revision snapshots, oldest first */
-function storedRevisions(cwd, worktree = realpathSync(cwd)) {
+/** One branch's stored revision snapshots, oldest first. */
+function storedRevisions(cwd, branch = branchId("smoke")) {
   const rows = dbRows(
     "SELECT snapshot FROM revisions WHERE tenant = ? AND key = ? AND worktree = ? ORDER BY rev ASC",
     "local",
     projectKeyOf(cwd),
-    worktree,
+    branch,
   );
   return rows === null ? [] : rows.map((row) => JSON.parse(row.snapshot));
 }
@@ -280,6 +280,15 @@ async function openSocket(url, sink) {
   await opened.promise;
   return ws;
 }
+let controlSequence = 0;
+
+/** Use the production client for one request-correlated local control exchange. */
+function requestControl(port, label, request) {
+  return sendControlRequest(
+    { ...request, requestId: `${label}-${++controlSequence}` },
+    { server: `http://127.0.0.1:${port}` },
+  );
+}
 
 // --- store.applyCanvasCall: shared validation, receipts and link warnings ---
 // In-process (node strips types, same as the bridge child): every rule below
@@ -289,9 +298,9 @@ async function openSocket(url, sink) {
 {
   const { GraphStore } = await import(new URL("../src/server/store.ts", import.meta.url));
   const { openSqliteStorage } = await import(new URL("../src/server/sqlite.ts", import.meta.url));
-  // the constructor takes the storage and the (tenant, project, worktree) the graph is under
+  // The store is scoped by tenant, project, and public branch identity.
   const storeDb = openSqliteStorage(join(tmpdir(), `vh-smoke-store-${process.pid}`, "shape.db"));
-  const store = new GraphStore(storeDb, "local", "shared-validation", "/tmp/shared-validation");
+  const store = new GraphStore(storeDb, "local", "shared-validation", branchA);
   const mkNode = (id, parentId = null) => ({
     op: "upsert_node",
     node: { id, parentId, label: id, summary: `promise of ${id}`, phase: "idea" },
@@ -375,8 +384,8 @@ async function openSocket(url, sink) {
       store.node("sm-someday") !== undefined,
     earlyCall.text,
   );
-  // the one call that owes nothing: the mechanical skeleton the room seeds by
-  // itself is a flat pile of parts with nothing yet to be connected to
+  // A caller may explicitly suppress link warnings for a deliberately partial
+  // semantic edit; suppression is scoped to that call.
   const quietCall = store.applyCanvasCall(
     { ops: [{ op: "upsert_node", node: { id: "sm-quiet", parentId: "sm-product", layer: "product", label: "See who owes", summary: "Shows who still owes what.", phase: "component" } }] },
     { linkWarnings: false },
@@ -469,7 +478,7 @@ try {
       cwd: process.cwd(),
       // SHAPE_HOME/HOME keep the directive and everything else this bridge
       // writes out of the developer's own home dir
-      env: { ...process.env, ...NO_AUTO_MAP, SHAPE_HOME: fakeHome, HOME: fakeHome },
+      env: { ...process.env, SHAPE_HOME: fakeHome, HOME: fakeHome },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -487,13 +496,13 @@ try {
 
   const hello = await waitFor("hello", () => frames.find((f) => f.type === "hello"));
   check(
-    "hello carries one canvas per variation and the project's session facts",
-    hello.graphs?.[wtA] !== undefined && hello.session?.cwd === wtA,
+    "hello carries one branch-keyed canvas and the project's physical cwd",
+    hello.graphs?.[branchA] !== undefined && hello.session?.cwd === wtA,
     `session=${JSON.stringify(hello.session)} graphs=${JSON.stringify(Object.keys(hello.graphs ?? {}))}`,
   );
   check(
     "hello reports an empty intent layer",
-    hello.graphs[wtA].nodes.length === 0 && hello.graphs[wtA].edges.length === 0,
+    hello.graphs[branchA].nodes.length === 0 && hello.graphs[branchA].edges.length === 0,
   );
   check(
     // the whole of the read-only model in one frame: a bridge starts nothing,
@@ -512,12 +521,12 @@ try {
   check("a project with no herdr has no manager session", hello.session.manager === null, JSON.stringify(hello.session.manager));
 
   // --- startup reality extraction -------------------------------------------
-  const pkgs = hello.graphs[wtA].reality.nodes.map((n) => n.id).sort();
+  const pkgs = hello.graphs[branchA].reality.nodes.map((n) => n.id).sort();
   check("reality extracted before the first hello", pkgs.join(",") === "r:@t/auth,r:@t/db", pkgs.join(","));
   check(
     "reality layer records git HEAD",
-    typeof hello.graphs[wtA].reality.head === "string",
-    String(hello.graphs[wtA].reality.head).slice(0, 8),
+    typeof hello.graphs[branchA].reality.head === "string",
+    String(hello.graphs[branchA].reality.head).slice(0, 8),
   );
   check("targetHasCode from workspace packages", hello.session.targetHasCode === true);
 
@@ -541,13 +550,30 @@ try {
       typeof mainEntry?.branch === "string" && mainEntry.branch.length > 0,
     JSON.stringify({ branch: variation?.branch, head: variation?.head?.slice(0, 8), main: mainEntry?.branch }),
   );
+  const branchList = hello.session.branches;
+  const mainBranch = branchList.find((branch) => branch.id === branchA);
+  const variationBranch = branchList.find((branch) => branch.id === branchVariation);
   check(
-    "hello carries a canvas for every variation nobody is working in, and a revision list for each",
-    hello.graphs[wtVariation] !== undefined &&
-      hello.graphs[wt2] !== undefined &&
-      Array.isArray(hello.revisions[wtA]) &&
-      Array.isArray(hello.revisions[wtVariation]) &&
-      Array.isArray(hello.revisions[wt2]),
+    "public branch metadata is stable and does not use physical worktree paths as IDs",
+    branchList.length === 3 &&
+      mainBranch?.branch === "smoke" &&
+      mainBranch.path === wtA &&
+      mainBranch.isDefault === true &&
+      mainBranch.mappedCommit === null &&
+      mainBranch.live === false &&
+      variationBranch?.branch === "variation" &&
+      variationBranch.path === wtVariation &&
+      variationBranch.live === false &&
+      Object.keys(mainBranch).sort().join(",") === "branch,head,id,isDefault,live,mappedCommit,path",
+    JSON.stringify(branchList),
+  );
+  check(
+    "hello carries a canvas and revision list keyed by each public branch ID",
+    hello.graphs[branchVariation] !== undefined &&
+      hello.graphs[branch2] !== undefined &&
+      Array.isArray(hello.revisions[branchA]) &&
+      Array.isArray(hello.revisions[branchVariation]) &&
+      Array.isArray(hello.revisions[branch2]),
     JSON.stringify({ graphs: Object.keys(hello.graphs), revisions: Object.keys(hello.revisions) }),
   );
   check(
@@ -555,25 +581,58 @@ try {
     hello.projectId === projectKeyOf(target),
     `${hello.projectId} / ${projectKeyOf(target)}`,
   );
-  check(
-    "`.shape/` was added to the repo's shared info/exclude",
-    readFileSync(join(target, ".git", "info", "exclude"), "utf8").split("\n").filter((l) => l.trim() === ".shape/").length === 1,
-  );
   // --- the registry: every project this server knows, on the greeting -------
-  // A project is a row with a status, and every hello carries the whole list.
-  // Nothing has reported in yet, so the seed is a project with a room and
-  // nothing live in it.
+  // Startup reality does not make an empty intent graph live and does not
+  // invent a harness session; both branch and project remain non-live.
   const seeded = hello.projects.find((p) => p.projectId === projectKeyOf(target));
   check(
-    "hello lists the seeded project as active, with nothing running in it yet",
+    "hello lists the seeded project as active with no harness session",
     hello.projects.length === 1 && seeded.cwd === wtA && seeded.status === "active" && seeded.liveSessions === 0 &&
-      seeded.manager === false && seeded.injected === 0 && typeof seeded.caughtUp === "boolean",
+      seeded.manager === false && seeded.injected === 0,
     JSON.stringify(hello.projects),
   );
   check(
     "a project summary says what is true of the project, never what its agent is doing",
     !("harness" in seeded) && !("agentConnected" in seeded),
     JSON.stringify(Object.keys(seeded)),
+  );
+  // Live session canvas calls below require an explicit committed baseline.
+  // Empty semantic maps are valid: they establish the selected exact commits
+  // without inventing bubbles before a person or mapping skill describes them.
+  const { repositoryIdentity: describeRepository } = await import(new URL("../src/agent/worktrees.ts", import.meta.url));
+  const repository = await describeRepository(target);
+  const baselineCommits = [];
+  for (const branch of [branchA, branchVariation, branch2]) {
+    const state = await requestControl(PORT, `baseline-read-${branch}`, {
+      type: "map_read",
+      repository,
+      branch,
+    });
+    const commit = execFileSync("git", ["rev-parse", branch], { cwd: target, encoding: "utf8" }).trim();
+    baselineCommits.push(
+      await requestControl(PORT, `baseline-commit-${branch}`, {
+        type: "map_commit",
+        repository,
+        branch,
+        expectedRevision: state.revision,
+        expectedMappedCommit: state.mappedCommit,
+        commit,
+        mode: "initial",
+        ops: [],
+        reality: hello.graphs[branch].reality,
+        note: "bridge smoke empty committed baseline",
+      }),
+    );
+  }
+  check(
+    "each branch is explicitly mapped before live session edits",
+    baselineCommits.every(
+      (response, index) =>
+        response.type === "map_committed" &&
+        response.branch === [branchA, branchVariation, branch2][index] &&
+        typeof response.mappedCommit === "string",
+    ),
+    JSON.stringify(baselineCommits),
   );
 
   /**
@@ -595,7 +654,7 @@ try {
   const mainSession = startSession({ worktree: target, port: PORT, holdMs: 1200 });
   sessions.push(mainSession);
   const named = await waitFor("session_started for the harness that greeted", () =>
-    frames.slice(mainAt).find((f) => f.type === "session_started" && f.worktree === wtA && f.backend.id === "omp"),
+    frames.slice(mainAt).find((f) => f.type === "session_started" && f.worktree === branchA && f.backend.id === "omp"),
   );
   check(
     "a harness that greets the link becomes a named session of the variation it runs in",
@@ -614,7 +673,7 @@ try {
   );
   const unnamed = frames
     .slice(mainAt, frames.indexOf(named))
-    .find((f) => f.type === "session_started" && f.worktree === wtA);
+    .find((f) => f.type === "session_started" && f.worktree === branchA);
   check(
     "a session is on the canvas before it has a name: a caller on the link is already one",
     unnamed?.backend.id === "unknown" && unnamed.backend.label === "agent" &&
@@ -631,8 +690,8 @@ try {
       ),
   );
   check(
-    "the project's session facts name the variation the harness runs in",
-    oneRunning.session.sessions[0].worktree === wtA && oneRunning.session.sessions[0].backend.id === "omp",
+    "the project's public session facts name the branch the harness runs on",
+    oneRunning.session.sessions[0].worktree === branchA && oneRunning.session.sessions[0].backend.id === "omp",
     JSON.stringify(oneRunning.session.sessions.map((s) => `${s.worktree}:${s.backend.id}`)),
   );
 
@@ -648,12 +707,12 @@ try {
   mainSession.type("build me an auth service");
 
   await waitFor("agent:streaming", () =>
-    frames.slice(turnAt).find((f) => f.type === "agent" && f.worktree === wtA && f.state === "streaming"),
+    frames.slice(turnAt).find((f) => f.type === "agent" && f.worktree === branchA && f.state === "streaming"),
   );
   check("agent -> streaming", true);
 
   const live = await waitFor("the live line while the harness is writing", () =>
-    frames.slice(turnAt).find((f) => f.type === "now" && f.worktree === wtA && f.text !== null),
+    frames.slice(turnAt).find((f) => f.type === "now" && f.worktree === branchA && f.text !== null),
   );
   check(
     "the message being written arrives as a folded live line, tail only",
@@ -677,7 +736,7 @@ try {
   );
 
   const graph = await waitFor("graph with the new stub nodes", () =>
-    frames.slice(turnAt).find((f) => f.type === "graph" && f.worktree === wtA && f.graph.nodes.some((n) => n.id === "user-db")),
+    frames.slice(turnAt).find((f) => f.type === "graph" && f.worktree === branchA && f.graph.nodes.some((n) => n.id === "user-db")),
   );
   const ids = graph.graph.nodes.map((n) => n.id).sort();
   check("graph broadcast contains the stub nodes", ids.join(",") === "auth-service,user-db", ids.join(","));
@@ -713,18 +772,18 @@ try {
   );
 
   await waitFor("activity cleared on turn_end", () =>
-    frames.slice(frames.indexOf(activity) + 1).find((f) => f.type === "activity" && f.worktree === wtA && f.nodeIds.length === 0),
+    frames.slice(frames.indexOf(activity) + 1).find((f) => f.type === "activity" && f.worktree === branchA && f.nodeIds.length === 0),
   );
   check("activity cleared on turn_end", true);
   await waitFor("the live line cleared at the end of the turn", () => {
-    const last = frames.slice(turnAt).filter((f) => f.type === "now" && f.worktree === wtA).at(-1);
+    const last = frames.slice(turnAt).filter((f) => f.type === "now" && f.worktree === branchA).at(-1);
     return last !== undefined && last.text === null ? last : null;
   }, 20_000);
   check("a turn that ends leaves nothing being said", true);
   await waitFor("agent:idle after the turn", () =>
-    frames.slice(turnAt).find((f) => f.type === "agent" && f.worktree === wtA && f.state === "idle"),
+    frames.slice(turnAt).find((f) => f.type === "agent" && f.worktree === branchA && f.state === "idle"),
   );
-  const spoken = frames.slice(turnAt).filter((f) => f.type === "transcript" && f.worktree === wtA && f.role === "assistant");
+  const spoken = frames.slice(turnAt).filter((f) => f.type === "transcript" && f.worktree === branchA && f.role === "assistant");
   check(
     "a delta is never a transcript line: the whole message of record is, once",
     spoken.length === 1,
@@ -763,10 +822,10 @@ try {
   );
   check(
     "an all-rejected batch did not bump rev",
-    !frames.slice(badAt).some((f) => f.type === "graph" && f.worktree === wtA && f.graph.rev > graph.graph.rev),
+    !frames.slice(badAt).some((f) => f.type === "graph" && f.worktree === branchA && f.graph.rev > graph.graph.rev),
   );
   await waitFor("agent:idle after the bad-op turn", () =>
-    frames.slice(badAt).find((f) => f.type === "agent" && f.worktree === wtA && f.state === "idle"),
+    frames.slice(badAt).find((f) => f.type === "agent" && f.worktree === branchA && f.state === "idle"),
   );
 
   // --- persistence ----------------------------------------------------------
@@ -792,7 +851,7 @@ try {
   const snapshotAt = (rev) => snapshots.find((snapshot) => snapshot.rev === rev);
 
   check(
-    "one snapshot row per revision, keyed by project and rev",
+    "one snapshot row per revision, keyed by project and public branch",
     revs.length >= 2 && revs[revs.length - 1] === persisted.rev,
     `revs=${revs.join(",")} docRev=${persisted.rev}`,
   );
@@ -800,17 +859,21 @@ try {
   const last = revs[revs.length - 1];
   const opening = snapshotAt(first);
   check(
-    "the opening revision was snapshotted as an empty canvas",
-    first === 0 && opening.nodes.length === 0 && opening.edges.length === 0 && typeof opening.at === "string",
-    `rev=${first} nodes=${opening.nodes.length} at=${opening.at}`,
+    "the oldest snapshot is an empty canvas before the real changes",
+    opening.nodes.length === 0 &&
+      opening.edges.length === 0 &&
+      typeof opening.at === "string" &&
+      first < last &&
+      (persisted.nodes.length > 0 || persisted.edges.length > 0),
+    `first=${first} last=${last} opening=${opening.nodes.length}/${opening.edges.length} final=${persisted.nodes.length}/${persisted.edges.length}`,
   );
   check(
-    "hello carries a revision list per variation",
-    hello.revisions[wtA].every((r) => typeof r.rev === "number" && typeof r.at === "string"),
-    JSON.stringify(hello.revisions[wtA]),
+    "hello carries a revision list per public branch",
+    hello.revisions[branchA].every((r) => typeof r.rev === "number" && typeof r.at === "string"),
+    JSON.stringify(hello.revisions[branchA]),
   );
   const revList = await waitFor("revisions broadcast after a snapshot", () =>
-    frames.find((f) => f.type === "revisions" && f.worktree === wtA && f.revisions.length >= 2),
+    frames.find((f) => f.type === "revisions" && f.worktree === branchA && f.revisions.length >= 2),
   );
   check(
     "a new snapshot broadcasts an ascending revision list",
@@ -820,7 +883,7 @@ try {
 
   const finalNodeIds = persisted.nodes.map((n) => n.id).sort().join(",");
   const finalEdgeIds = persisted.edges.map((e) => e.id).sort().join(",");
-  socket.send(JSON.stringify({ type: "diff", worktree: wtA, revA: first, revB: last }));
+  socket.send(JSON.stringify({ type: "diff", worktree: branchA, revA: first, revB: last }));
   const delta = await waitFor("delta frame", () =>
     frames.find((f) => f.type === "delta" && f.delta.revA === first && f.delta.revB === last),
   );
@@ -840,7 +903,7 @@ try {
     }),
   );
 
-  socket.send(JSON.stringify({ type: "diff", worktree: wtA, revA: last, revB: first }));
+  socket.send(JSON.stringify({ type: "diff", worktree: branchA, revA: last, revB: first }));
   const reversed = await waitFor("delta for the reversed pair", () =>
     frames.find((f) => f.type === "delta" && f.delta.revA === last && f.delta.revB === first),
   );
@@ -853,7 +916,7 @@ try {
     JSON.stringify(reversed.delta.nodes.removed.map((n) => n.id)),
   );
 
-  socket.send(JSON.stringify({ type: "diff", worktree: wtA, revA: first, revB: 9999 }));
+  socket.send(JSON.stringify({ type: "diff", worktree: branchA, revA: first, revB: 9999 }));
   const badDiff = await waitFor("bogus diff refused", () =>
     frames.find((f) => f.type === "error" && f.message.startsWith("unknown revision")),
   );
@@ -863,7 +926,7 @@ try {
   // And the reasons it is refused: there is no herdr on this machine, so no
   // session has a terminal Shape can reach at all.
   const focusAt = frames.length;
-  socket.send(JSON.stringify({ type: "focus_terminal", worktree: wtA }));
+  socket.send(JSON.stringify({ type: "focus_terminal", worktree: branchA }));
   const noTerminal = await waitFor("the reason a terminal cannot be reached", () =>
     frames.slice(focusAt).find((f) => f.type === "error"),
   );
@@ -873,7 +936,7 @@ try {
     noTerminal.message,
   );
   const idleFocusAt = frames.length;
-  socket.send(JSON.stringify({ type: "focus_terminal", worktree: wtVariation }));
+  socket.send(JSON.stringify({ type: "focus_terminal", worktree: branchVariation }));
   const nothingRunning = await waitFor("the reason a variation has no terminal", () =>
     frames.slice(idleFocusAt).find((f) => f.type === "error"),
   );
@@ -895,47 +958,47 @@ try {
 
   // --- several variations at once, on one canvas ----------------------------
   // A second session, in another worktree of the same repo. One project, one
-  // key, one view — and a canvas per variation.
+  // view, with browser state keyed by public branch.
   const secondAt = frames.length;
   const varSession = startSession({ worktree, port: PORT, holdMs: 1200 });
   sessions.push(varSession);
   await waitFor("session_started for the second variation", () =>
-    frames.slice(secondAt).find((f) => f.type === "session_started" && f.worktree === wtVariation && f.backend.id === "omp"),
+    frames.slice(secondAt).find((f) => f.type === "session_started" && f.worktree === branchVariation && f.backend.id === "omp"),
   );
   const bothSessions = await waitFor("a session frame listing both harnesses", () =>
     frames.slice(secondAt).find((f) => f.type === "session" && f.session.sessions.length === 2),
   );
   check(
-    "one project shows one session per variation that has one, and says which is which",
-    bothSessions.session.sessions.map((s) => s.worktree).sort().join(",") === [wtA, wtVariation].sort().join(","),
+    "one project shows one public session per branch that has one",
+    bothSessions.session.sessions.map((s) => s.worktree).sort().join(",") === [branchA, branchVariation].sort().join(","),
     JSON.stringify(bothSessions.session.sessions.map((s) => s.worktree)),
   );
 
   const varTurnAt = frames.length;
   varSession.type("shape the variation");
   const varGraph = await waitFor("a graph frame for the variation", () =>
-    frames.slice(varTurnAt).find((f) => f.type === "graph" && f.worktree === wtVariation && f.graph.nodes.some((n) => n.id === "auth-service")),
+    frames.slice(varTurnAt).find((f) => f.type === "graph" && f.worktree === branchVariation && f.graph.nodes.some((n) => n.id === "auth-service")),
   );
   check(
     "what a session draws lands on ITS canvas and on no other",
-    varGraph.worktree === wtVariation &&
-      !frames.slice(varTurnAt).some((f) => f.type === "graph" && f.worktree !== wtVariation),
+    varGraph.worktree === branchVariation &&
+      !frames.slice(varTurnAt).some((f) => f.type === "graph" && f.worktree !== branchVariation),
     JSON.stringify([...new Set(frames.slice(varTurnAt).filter((f) => f.type === "graph").map((f) => f.worktree))]),
   );
-  const varStored = await waitFor("the variation's own graph row", () => storedGraph(target, wtVariation));
+  const varStored = await waitFor("the variation's own graph row", () => storedGraph(target, branchVariation));
   check(
-    "one project, one key, a canvas row per variation",
+    "one project, one key, a canvas row per branch",
     varStored.nodes.some((n) => n.id === "auth-service") &&
-      storedGraph(target, wtA).nodes.length === 2 &&
-      (storedGraph(target, wt2)?.nodes.length ?? 0) === 0,
+      storedGraph(target, branchA).nodes.length === 2 &&
+      (storedGraph(target, branch2)?.nodes.length ?? 0) === 0,
     JSON.stringify({
       variation: varStored.nodes.length,
-      main: storedGraph(target, wtA).nodes.length,
-      untouched: storedGraph(target, wt2)?.nodes.length ?? 0,
+      main: storedGraph(target, branchA).nodes.length,
+      untouched: storedGraph(target, branch2)?.nodes.length ?? 0,
     }),
   );
   await waitFor("the variation's turn to end", () =>
-    frames.slice(varTurnAt).find((f) => f.type === "agent" && f.worktree === wtVariation && f.state === "idle"),
+    frames.slice(varTurnAt).find((f) => f.type === "agent" && f.worktree === branchVariation && f.state === "idle"),
   );
 
   // --- where a link caller runs is which canvas it writes -------------------
@@ -982,14 +1045,14 @@ try {
   );
   check(
     "where the caller runs is which canvas it writes: the second variation's",
-    wt2LinkGraph.worktree === wt2 && !frames.slice(wt2LinkAt).some((f) => f.type === "graph" && f.worktree === wtA),
+    wt2LinkGraph.worktree === branch2 && !frames.slice(wt2LinkAt).some((f) => f.type === "graph" && f.worktree === branchA),
     wt2LinkGraph.worktree,
   );
   // announced twice: once as a directory somebody is working in, and again the
   // moment the call itself proves the canvas tool is really registered there
   const overheard = frames
     .slice(wt2LinkAt)
-    .find((f) => f.type === "session_started" && f.worktree === wt2 && f.backend.capabilities.hostTool);
+    .find((f) => f.type === "session_started" && f.worktree === branch2 && f.backend.capabilities.hostTool);
   check(
     "a tool call is proof a session is there: it is drawn as one, known only through the link",
     overheard?.backend.id === "unknown" && overheard.backend.label === "agent" &&
@@ -1031,7 +1094,7 @@ try {
     }),
   );
   await waitFor("the second bubble on the variation's canvas", () =>
-    frames.slice(driftAt).find((f) => f.type === "graph" && f.worktree === wtVariation && f.graph.nodes.some((n) => n.id === "deep-db")),
+    frames.slice(driftAt).find((f) => f.type === "graph" && f.worktree === branchVariation && f.graph.nodes.some((n) => n.id === "deep-db")),
   );
   execFileSync(
     "git",
@@ -1045,13 +1108,13 @@ try {
     () =>
       frames
         .slice(movedAt)
-        .find((f) => f.type === "graph" && f.worktree === wtVariation && (f.graph.drift?.["auth-service"] ?? []).length > 0),
+        .find((f) => f.type === "graph" && f.worktree === branchVariation && (f.graph.drift?.["auth-service"] ?? []).length > 0),
     30_000,
   );
   check(
     "a turn that ends on a moved HEAD re-reads the code, and the gap shows up as drift",
     drifted.graph.drift["auth-service"].some((note) => note.includes("no edge is declared")) &&
-      drifted.graph.reality.head !== hello.graphs[wtVariation].reality.head,
+      drifted.graph.reality.head !== hello.graphs[branchVariation].reality.head,
     JSON.stringify(drifted.graph.drift),
   );
   check(
@@ -1060,7 +1123,7 @@ try {
     JSON.stringify([...new Set(ompFrames(varSession.log).filter((f) => f.__dir === "in").map((f) => f.type))]),
   );
   await waitFor("the drift turn to end", () =>
-    frames.slice(movedAt).find((f) => f.type === "agent" && f.worktree === wtVariation && f.state === "idle"),
+    frames.slice(movedAt).find((f) => f.type === "agent" && f.worktree === branchVariation && f.state === "idle"),
   );
 
   // --- the link is a boundary like the browser is ---------------------------
@@ -1080,7 +1143,7 @@ try {
     }),
   );
   const linkActivity = await waitFor("activity from an external tool_start", () =>
-    frames.slice(linkAt).find((f) => f.type === "activity" && f.worktree === wtVariation && f.nodeIds.length > 0),
+    frames.slice(linkAt).find((f) => f.type === "activity" && f.worktree === branchVariation && f.nodeIds.length > 0),
   );
   check(
     "an external tool_start maps its paths onto the codeRefs node",
@@ -1097,7 +1160,7 @@ try {
   const externalEndAt = frames.length;
   linkSocket.send(JSON.stringify({ type: "agent_event", cwd: wtVariation, event: { kind: "turn_end" } }));
   await waitFor("activity cleared by an external turn_end", () =>
-    frames.slice(externalEndAt).find((f) => f.type === "activity" && f.worktree === wtVariation && f.nodeIds.length === 0),
+    frames.slice(externalEndAt).find((f) => f.type === "activity" && f.worktree === branchVariation && f.nodeIds.length === 0),
   );
   check("an external turn_end ends the turn's activity", true);
 
@@ -1114,19 +1177,19 @@ try {
     probeFrames.find(
       (f) =>
         f.type === "hello" &&
-        f.session.sessions.some((sess) => sess.worktree === wtVariation && sess.session.sessionId === "link-session-1"),
+        f.session.sessions.some((sess) => sess.worktree === branchVariation && sess.session.sessionId === "link-session-1"),
     ),
   );
-  const probeSession = probeHello.session.sessions.find((sess) => sess.worktree === wtVariation);
+  const probeSession = probeHello.session.sessions.find((sess) => sess.worktree === branchVariation);
   check(
     "a session id and model reported on the link become the session of the variation it runs in",
     probeSession.session.model?.id === "claude-x",
     JSON.stringify({ worktree: probeSession.worktree, session: probeSession.session }),
   );
   check(
-    "and a browser joining late is greeted with every variation's state",
-    probeHello.agents[wtVariation] === "idle" && probeHello.agents[wtA] === "idle" &&
-      Object.keys(probeHello.graphs).sort().join(",") === [wtA, wtVariation, wt2].sort().join(","),
+    "and a browser joining late is greeted with every branch's effective state",
+    probeHello.agents[branchVariation] === "idle" && probeHello.agents[branchA] === "idle" &&
+      Object.keys(probeHello.graphs).sort().join(",") === [branchA, branchVariation, branch2].sort().join(","),
     JSON.stringify({ agents: probeHello.agents, graphs: Object.keys(probeHello.graphs) }),
   );
   sessionProbe.close();
@@ -1258,7 +1321,7 @@ try {
     `code=${preToolHook.code} stderr=${preToolHook.stderr.slice(0, 200)}`,
   );
   const hookActivity = await waitFor("activity from a PreToolUse hook", () =>
-    frames.slice(clearedAt).find((f) => f.type === "activity" && f.worktree === wtVariation && f.nodeIds.includes("auth-service")),
+    frames.slice(clearedAt).find((f) => f.type === "activity" && f.worktree === branchVariation && f.nodeIds.includes("auth-service")),
   );
   check(
     "a harness hook lights up the bubble whose code the tool touched",
@@ -1277,7 +1340,7 @@ try {
   });
   check("the UserPromptSubmit hook exits 0", promptHook.code === 0, `code=${promptHook.code}`);
   await waitFor("streaming from the UserPromptSubmit hook", () =>
-    frames.slice(promptAt).find((f) => f.type === "agent" && f.worktree === wtVariation && f.state === "streaming"),
+    frames.slice(promptAt).find((f) => f.type === "agent" && f.worktree === branchVariation && f.state === "streaming"),
   );
   check("a prompt-submit hook marks the session streaming", true);
 
@@ -1297,10 +1360,10 @@ try {
   );
   check("the Stop hook reports the last assistant message from the transcript file", true);
   await waitFor("turn end from the Stop hook", () =>
-    frames.slice(stopAt).find((f) => f.type === "activity" && f.worktree === wtVariation && f.nodeIds.length === 0),
+    frames.slice(stopAt).find((f) => f.type === "activity" && f.worktree === branchVariation && f.nodeIds.length === 0),
   );
   await waitFor("idle from the Stop hook", () =>
-    frames.slice(stopAt).find((f) => f.type === "agent" && f.worktree === wtVariation && f.state === "idle"),
+    frames.slice(stopAt).find((f) => f.type === "agent" && f.worktree === branchVariation && f.state === "idle"),
   );
   check("the Stop hook clears activity and returns the session to idle", true);
   linkSocket.close();
@@ -1310,7 +1373,7 @@ try {
   const stopSessionAt = frames.length;
   await mainSession.stop();
   const stopped = await waitFor("session_stopped for the harness that was closed", () =>
-    frames.slice(stopSessionAt).find((f) => f.type === "session_stopped" && f.worktree === wtA),
+    frames.slice(stopSessionAt).find((f) => f.type === "session_stopped" && f.worktree === branchA),
   );
   check(
     "a harness that says goodbye takes its session off the canvas, and says why",
@@ -1320,11 +1383,11 @@ try {
   const leftRunning = await waitFor("a session frame without the closed harness", () =>
     frames
       .slice(stopSessionAt)
-      .find((f) => f.type === "session" && !f.session.sessions.some((s) => s.worktree === wtA)),
+      .find((f) => f.type === "session" && !f.session.sessions.some((s) => s.worktree === branchA)),
   );
   check(
-    "the variation stays on the view with its canvas; only its session is gone",
-    leftRunning.session.sessions.some((s) => s.worktree === wtVariation) &&
+    "the branch stays on the view with its canvas; only its session is gone",
+    leftRunning.session.sessions.some((s) => s.worktree === branchVariation) &&
       leftRunning.session.worktrees.some((w) => w.id === wtA),
     JSON.stringify(leftRunning.session.sessions.map((s) => s.worktree)),
   );
@@ -1385,16 +1448,39 @@ try {
 
   const helloB = await watch(bKey, "hello for the second project");
   check(
-    "watching it answers this browser with that project alone: its worktree, its canvas",
-    helloB.session.cwd === wtB && Object.keys(helloB.graphs).join(",") === wtB,
+    "watching it answers this browser with that project alone: its physical cwd and public branch canvas",
+    helloB.session.cwd === wtB && Object.keys(helloB.graphs).join(",") === branchB,
     JSON.stringify({ cwd: helloB.session.cwd, graphs: Object.keys(helloB.graphs) }),
   );
   const placed = await waitFor("the re-greeted session on the second project's canvas", () =>
-    helloB.session.sessions.find((s) => s.worktree === wtB && s.backend.id === "omp") ??
+    helloB.session.sessions.find((s) => s.worktree === branchB && s.backend.id === "omp") ??
       frames
         .slice(frames.indexOf(helloB))
-        .flatMap((f) => (f.type === "session" ? f.session.sessions : []))
-        .find((s) => s.worktree === wtB && s.backend.id === "omp"),
+        .flatMap((f) => (f.type === "session" ? f.session.sessions : [])).find((s) => s.worktree === branchB && s.backend.id === "omp"),
+  );
+  const repositoryB = await describeRepository(targetB);
+  const mapStateB = await requestControl(PORT, "baseline-read-second-project", {
+    type: "map_read",
+    repository: repositoryB,
+    branch: branchB,
+  });
+  const commitB = execFileSync("git", ["rev-parse", branchB], { cwd: targetB, encoding: "utf8" }).trim();
+  const mappedB = await requestControl(PORT, "baseline-commit-second-project", {
+    type: "map_commit",
+    repository: repositoryB,
+    branch: branchB,
+    expectedRevision: mapStateB.revision,
+    expectedMappedCommit: mapStateB.mappedCommit,
+    commit: commitB,
+    mode: "initial",
+    ops: [],
+    reality: helloB.graphs[branchB].reality,
+    note: "bridge smoke second-project empty baseline",
+  });
+  check(
+    "the discovered project's branch is explicitly mapped before its live turn",
+    mappedB.type === "map_committed" && mappedB.mappedCommit === commitB,
+    JSON.stringify(mappedB),
   );
   check(
     "and the caller that was refused is a named session of the project that now claims it",
@@ -1457,6 +1543,7 @@ try {
   );
 
   // --- and back: the room returns with everything the project had -----------
+  const regreetLogAt = ompFrames(bSession.log).length;
   const revivedAt = frames.length;
   socket.send(JSON.stringify({ type: "set_project_status", projectId: bKey, status: "active" }));
   const revived = await waitFor("the list after the second project came back", () =>
@@ -1471,9 +1558,36 @@ try {
   );
   const helloBack = await watch(bKey, "hello for the project that came back");
   check(
-    "and a browser can watch it again, on the canvas it always had",
-    helloBack.session.cwd === wtB && Object.keys(helloBack.graphs).join(",") === wtB,
+    "and a browser can watch it again, on the branch canvas it always had",
+    helloBack.session.cwd === wtB && Object.keys(helloBack.graphs).join(",") === branchB,
     JSON.stringify({ cwd: helloBack.session.cwd, graphs: Object.keys(helloBack.graphs) }),
+  );
+  await waitFor(
+    "the revived pane to reconnect and re-greet",
+    () =>
+      ompFrames(bSession.log)
+        .slice(regreetLogAt)
+        .find((frame) => frame.type === "hello" && frame.__dir === "out"),
+    30_000,
+  );
+  const rejoined = await waitFor(
+    "SessionInfo to carry the revived pane's original session",
+    () =>
+      frames
+        .slice(revivedAt)
+        .filter((frame) => frame.type === "session")
+        .flatMap((frame) => frame.session.sessions)
+        .find(
+          (session) =>
+            session.worktree === branchB &&
+            session.session.sessionId === placed.session.sessionId,
+        ),
+    30_000,
+  );
+  check(
+    "the same pane re-joins the public branch before its next turn",
+    rejoined.backend.id === "omp",
+    JSON.stringify(rejoined),
   );
   const unknownAt = frames.length;
   socket.send(JSON.stringify({ type: "set_project_status", projectId: "no-such-project", status: "inactive" }));
@@ -1486,24 +1600,27 @@ try {
     unknown.message,
   );
 
-  // The pane in it never closed: what it says is heard again, which is the
-  // live count coming back — and the goodbye takes it away at once, long
-  // before the next scan would have noticed.
+  // The pane process survived parking. Its old link did not, so only type
+  // after the fresh hello is represented in SessionInfo; that next turn must
+  // then reach the browser on the same public branch.
   const spokeAt = frames.length;
   bSession.type("plain probe");
-  await waitFor("the session in the revived project heard again", () =>
-    frames.slice(spokeAt).find((f) => f.type === "session_started" && f.worktree === wtB),
+  await waitFor("the revived project's session output", () =>
+    frames
+      .slice(spokeAt)
+      .find((f) => f.type === "transcript" && f.worktree === branchB && f.role === "assistant"),
   );
   const liveAgain = await watch(bKey, "hello for the revived project with its session on it");
   check(
-    "a caller heard again is a live session of the project that claims it",
-    liveAgain.projects.find((p) => p.projectId === bKey).liveSessions === 1,
-    JSON.stringify(liveAgain.projects.map((p) => `${p.label}:${p.liveSessions}`)),
+    "the revived caller is a public branch session and restores the live count",
+    liveAgain.session.sessions.some((session) => session.worktree === branchB) &&
+      liveAgain.projects.find((p) => p.projectId === bKey).liveSessions === 1,
+    JSON.stringify({ sessions: liveAgain.session.sessions, projects: liveAgain.projects }),
   );
   const byeAt = frames.length;
   await bSession.stop();
   await waitFor("the goodbye from the pane that closed", () =>
-    frames.slice(byeAt).find((f) => f.type === "session_stopped" && f.worktree === wtB),
+    frames.slice(byeAt).find((f) => f.type === "session_stopped" && f.worktree === branchB),
   );
   const emptied = await watch(bKey, "hello after the second project's pane closed");
   check(
@@ -1519,10 +1636,10 @@ try {
   const wt3 = realpathSync(worktree3);
   const helloWt3 = await watch(projectKeyOf(target), "hello after a third variation was added");
   check(
-    "a variation added while the bridge runs is on the next hello, with a canvas of its own",
+    "a worktree added while the bridge runs appears as physical metadata and a public branch canvas",
     helloWt3.session.worktrees.length === 4 &&
       helloWt3.session.worktrees.some((w) => w.id === wt3 && w.branch === "variation-3") &&
-      helloWt3.graphs[wt3] !== undefined,
+      helloWt3.graphs[branchId("variation-3")] !== undefined,
     JSON.stringify(helloWt3.session.worktrees.map((w) => `${basename(w.path)}@${w.branch}`)),
   );
   await varSession.stop();
@@ -1562,7 +1679,7 @@ try {
   const restartFrames = [];
   bridge = spawn(process.execPath, ["src/index.ts", "--port", String(PORT), "--db", shapeDb], {
     cwd: process.cwd(),
-    env: { ...process.env, ...NO_AUTO_MAP, SHAPE_HOME: fakeHome, HOME: fakeHome },
+    env: { ...process.env, SHAPE_HOME: fakeHome, HOME: fakeHome },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let restartErr = "";
@@ -1584,7 +1701,7 @@ try {
   );
   check(
     "the canvas the run before drew is the canvas it opens",
-    helloAgain.graphs[wtA].nodes.map((n) => n.id).sort().join(",") === "auth-service,user-db",
+    helloAgain.graphs[branchA].nodes.map((n) => n.id).sort().join(",") === "auth-service,user-db",
     JSON.stringify(Object.keys(helloAgain.graphs)),
   );
   const parkedAfterAt = restartFrames.length;
@@ -1612,18 +1729,15 @@ try {
   await rm(worktree3, { recursive: true, force: true });
 }
 
-// --- a canvas drawn before Shape kept state in a database -------------------
-// Its own project, its own bridge, its own port. The files a pre-SQLite bridge
-// wrote are taken over by the first attach on that project, and an attach is
-// what a project in the registry gets — so this one is the seed its bridge
-// starts with. The graph and its revisions move into the database, the
-// leftovers are moved aside, and the project's own config.json is left where
-// it is.
+// --- retired path-keyed canvas files ----------------------------------------
+// A pre-database `.shape/graph.json` has no trustworthy repository+branch
+// checkpoint, but its graph and revision history remain valuable. Startup
+// adopts them as visible uncommitted effective state, keeps mappedCommit null,
+// and quarantines the source files while preserving unrelated configuration.
 {
   const legacyTarget = await mkdtemp(join(tmpdir(), "vh-smoke-legacy-"));
   const legacyHome = await mkdtemp(join(tmpdir(), "vh-smoke-legacy-home-"));
   await seedWorkspace(legacyTarget, "lg");
-  const wtLegacy = realpathSync(legacyTarget);
   const legacyDb = join(legacyHome, "shape.db");
   const legacyPort = PORT + 4;
   const legacyFrames = [];
@@ -1650,7 +1764,7 @@ try {
       ["src/index.ts", "--cwd", legacyTarget, "--port", String(legacyPort), "--db", legacyDb],
       {
         cwd: process.cwd(),
-        env: { ...process.env, ...NO_AUTO_MAP, SHAPE_HOME: legacyHome, HOME: legacyHome },
+        env: { ...process.env, SHAPE_HOME: legacyHome, HOME: legacyHome },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -1666,26 +1780,28 @@ try {
       () => legacyFrames.find((f) => f.type === "hello"),
       30_000,
     );
+    const legacyBranch = helloLegacy.session.branches.find((branch) => branch.id === branchA);
     check(
-      "a graph written by an older Shape opens as this project's canvas",
-      helloLegacy.graphs[wtLegacy].nodes.some((n) => n.id === "old-canvas"),
-      JSON.stringify(helloLegacy.graphs[wtLegacy].nodes.map((n) => n.id)),
+      "a historical path-keyed graph remains visible without becoming a trusted checkpoint",
+      helloLegacy.graphs[branchA].nodes.some((node) => node.id === "old-canvas") &&
+        legacyBranch?.mappedCommit === null,
+      JSON.stringify({ graph: helloLegacy.graphs[branchA], branch: legacyBranch }),
     );
     check(
-      "its revisions came over with their own timestamps, not the attach's",
-      helloLegacy.revisions[wtLegacy].some((r) => r.rev === 1 && r.at === "2020-01-01T00:00:00.000Z"),
-      JSON.stringify(helloLegacy.revisions[wtLegacy]),
+      "its revision history retains the original timestamp",
+      helloLegacy.revisions[branchA].some((revision) => revision.rev === 1 && revision.at === "2020-01-01T00:00:00.000Z"),
+      JSON.stringify(helloLegacy.revisions[branchA]),
     );
     const imported = dbRowsIn(
       legacyDb,
       "SELECT doc FROM graphs WHERE tenant = ? AND key = ? AND worktree = ?",
       "local",
       projectKeyOf(legacyTarget),
-      wtLegacy,
+      branchA,
     );
     check(
-      "the imported canvas is a row of the database like any other project's",
-      (imported ?? []).length === 1 && JSON.parse(imported[0].doc).nodes.some((n) => n.id === "old-canvas"),
+      "the adopted effective graph is stored under the repository and public branch",
+      (imported ?? []).length === 1 && JSON.parse(imported[0].doc).nodes.some((node) => node.id === "old-canvas"),
       JSON.stringify(imported),
     );
     check(
@@ -1736,15 +1852,6 @@ try {
       nodes: [oldKeyNode],
       edges: [],
     });
-    // the only line a room ever writes: the map it drew onto this canvas by itself
-    await seeded.appendAudit("local", oldKey, wtOldKey, {
-      kind: "onboard",
-      ops: 4,
-      at: "2026-01-01T00:00:00.000Z",
-      tenant: "local",
-      projectId: oldKey,
-      worktree: wtOldKey,
-    });
     await seeded.saveProject({
       project: {
         key: oldKey,
@@ -1773,7 +1880,7 @@ try {
       ["src/index.ts", "--cwd", oldKeyTarget, "--port", String(oldKeyPort), "--db", oldKeyDb],
       {
         cwd: process.cwd(),
-        env: { ...process.env, ...NO_AUTO_MAP, SHAPE_HOME: oldKeyHome, HOME: oldKeyHome },
+        env: { ...process.env, SHAPE_HOME: oldKeyHome, HOME: oldKeyHome },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -1791,20 +1898,20 @@ try {
     );
     check(
       "a canvas stored under the previous project key opens as this project's",
-      helloOldKey.graphs[wtOldKey].nodes.some((n) => n.id === "old-key-canvas") && helloOldKey.graphs[wtOldKey].rev >= 7,
-      JSON.stringify({ nodes: helloOldKey.graphs[wtOldKey].nodes.map((n) => n.id), rev: helloOldKey.graphs[wtOldKey].rev }),
+      helloOldKey.graphs[branchA].nodes.some((n) => n.id === "old-key-canvas") && helloOldKey.graphs[branchA].rev >= 7,
+      JSON.stringify({ nodes: helloOldKey.graphs[branchA].nodes.map((n) => n.id), rev: helloOldKey.graphs[branchA].rev }),
     );
     check(
       "its revisions came with it, timestamps and all",
-      helloOldKey.revisions[wtOldKey].some((r) => r.rev === 7 && r.at === "2026-01-01T00:00:00.000Z"),
-      JSON.stringify(helloOldKey.revisions[wtOldKey]),
+      helloOldKey.revisions[branchA].some((r) => r.rev === 7 && r.at === "2026-01-01T00:00:00.000Z"),
+      JSON.stringify(helloOldKey.revisions[branchA]),
     );
     const adopted = dbRowsIn(
       oldKeyDb,
       "SELECT doc FROM graphs WHERE tenant = ? AND key = ? AND worktree = ?",
       "local",
       projectKeyOf(oldKeyTarget),
-      wtOldKey,
+      branchA,
     );
     check(
       "the row now lives under the key this build derives from the repo",
@@ -1824,24 +1931,6 @@ try {
       "the registry says so too: the switcher shows one project, not the same repo twice",
       helloOldKey.projects.length === 1 && helloOldKey.projects[0].projectId === projectKeyOf(oldKeyTarget),
       JSON.stringify(helloOldKey.projects.map((p) => `${p.projectId.slice(0, 6)}:${p.label}:${p.status}`)),
-    );
-    const adoptedAudit = dbRowsIn(
-      oldKeyDb,
-      "SELECT key, entry FROM audit WHERE tenant = ? AND worktree = ? ORDER BY seq ASC",
-      "local",
-      wtOldKey,
-    );
-    check(
-      "the map the room drew before the upgrade is still on the record, under the new key",
-      (adoptedAudit ?? []).some((row) => {
-        const entry = JSON.parse(row.entry);
-        return row.key === projectKeyOf(oldKeyTarget) && entry.kind === "onboard" && entry.ops === 4;
-      }),
-      JSON.stringify((adoptedAudit ?? []).map((row) => `${row.key.slice(0, 6)}:${JSON.parse(row.entry).kind}`)),
-    );
-    check(
-      "the adoption is announced, naming the worktree it moved",
-      oldKeyErr.includes(`adopted the canvas of ${wtOldKey} from its previous project key`),
     );
   } catch (err) {
     check("the old-project-key run completed", false, String(err));
@@ -1929,7 +2018,7 @@ export { tallied };
       ["src/index.ts", "--cwd", symTarget, "--port", String(symPort), "--db", join(symHome, "shape.db")],
       {
         cwd: process.cwd(),
-        env: { ...process.env, ...NO_AUTO_MAP, SHAPE_HOME: symHome, HOME: symHome },
+        env: { ...process.env, SHAPE_HOME: symHome, HOME: symHome },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -1944,7 +2033,7 @@ export { tallied };
     const symWt = realpathSync(symTarget);
     const symHello = await waitFor("hello for the parts project", () => symFrames.find((f) => f.type === "hello"));
 
-    const reality = symHello.graphs[symWt].reality;
+    const reality = symHello.graphs[branchA].reality;
     const parts = reality.symbols.filter((s) => s.file === partsRel);
     const partOf = (name) => parts.find((s) => s.name === name);
     check(
@@ -1993,6 +2082,27 @@ export { tallied };
       jsPart?.name === "backupUsers" && jsPart.kind === "function" && jsPart.exported === true,
       JSON.stringify(jsPart ?? reality.symbols.map((s) => s.file)),
     );
+
+    const { repositoryIdentity: describeSymbolRepository } = await import(new URL("../src/agent/worktrees.ts", import.meta.url));
+    const symbolRepository = await describeSymbolRepository(symTarget);
+    const symbolMapState = await requestControl(symPort, "symbol-baseline-read", {
+      type: "map_read",
+      repository: symbolRepository,
+      branch: branchA,
+    });
+    const symbolCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: symTarget, encoding: "utf8" }).trim();
+    await requestControl(symPort, "symbol-baseline-commit", {
+      type: "map_commit",
+      repository: symbolRepository,
+      branch: branchA,
+      expectedRevision: symbolMapState.revision,
+      expectedMappedCommit: symbolMapState.mappedCommit,
+      commit: symbolCommit,
+      mode: "initial",
+      ops: [],
+      reality,
+      note: "symbol smoke empty committed baseline",
+    });
 
     // a bubble anchored to one part of a file lights up when that file is touched
     const symLinkFrames = [];
@@ -2114,7 +2224,7 @@ volumes:
       ["src/index.ts", "--cwd", infraTarget, "--port", String(infraPort), "--db", join(infraHome, "shape.db")],
       {
         cwd: process.cwd(),
-        env: { ...process.env, ...NO_AUTO_MAP, SHAPE_HOME: infraHome, HOME: infraHome },
+        env: { ...process.env, SHAPE_HOME: infraHome, HOME: infraHome },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -2131,7 +2241,7 @@ volumes:
       infraFrames.find((f) => f.type === "hello"),
     );
 
-    const found = infraHello.graphs[infraWt].reality.infra;
+    const found = infraHello.graphs[branchA].reality.infra;
     const item = (id) => found.find((i) => i.id === id);
     check(
       // one line per kind, and inside a kind by label: the same order every run,
@@ -2303,7 +2413,7 @@ volumes:
       ["src/index.ts", "--cwd", vTarget, "--port", String(vPort), "--db", join(vHome, "shape.db")],
       {
         cwd: process.cwd(),
-        env: { ...process.env, ...NO_AUTO_MAP, SHAPE_HOME: vHome, HOME: vHome },
+        env: { ...process.env, SHAPE_HOME: vHome, HOME: vHome },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -2318,7 +2428,7 @@ volumes:
     const vWt = realpathSync(vTarget);
     const vHello = await waitFor("hello for the verified project", () => vFrames.find((f) => f.type === "hello"));
 
-    const found = vHello.graphs[vWt].reality.verification;
+    const found = vHello.graphs[branchA].reality.verification;
     const item = (id) => found.find((v) => v.id === id);
     check(
       // one line per kind, and inside a kind by label: the same order every run
@@ -2375,7 +2485,7 @@ volumes:
         { id: "the-c", parentId: null, label: "The third part", summary: "Answers another way.", phase: "built", codeRefs: ["packages/api/src/c.ts"] },
         { id: "the-notes", parentId: null, label: "The plan", summary: "Says what is coming.", phase: "built", codeRefs: ["docs/plan.md"] },
       ],
-      reality: vHello.graphs[vWt].reality,
+      reality: vHello.graphs[branchA].reality,
     };
     check(
       "a build bubble is verified by the extraction alone when a test covers its file",
@@ -2445,7 +2555,7 @@ volumes:
     // checks scattered onto the build layer.
     const legacyHome = await mkdtemp(join(tmpdir(), "vh-smoke-legacy-layer-"));
     const legacyStorage = openSqliteStorage(join(legacyHome, "legacy.db"));
-    await legacyStorage.saveGraph("local", "legacy-layer", "/tmp/legacy-layer", {
+    await legacyStorage.saveGraph("local", "legacy-layer", branchA, {
       rev: 4,
       nodes: [
         {
@@ -2464,7 +2574,7 @@ volumes:
       reality: { nodes: [], edges: [], symbols: [], infra: [], verification: [], extractedAt: null, head: null },
       drift: {},
     });
-    const legacyStore = new GraphStore(legacyStorage, "local", "legacy-layer", "/tmp/legacy-layer");
+    const legacyStore = new GraphStore(legacyStorage, "local", "legacy-layer", branchA);
     await legacyStore.load();
     check(
       'a stored row on the retired "verify" layer loads onto the correctness layer',
@@ -2485,411 +2595,257 @@ volumes:
   }
 }
 
-// --- the map nobody asked for -----------------------------------------------
-// The one thing a room writes onto a canvas by itself, and the only condition
-// it writes it under: a project with code, a canvas with no bubbles, and a
-// session reporting in from it. The room reads the code (asking the agent for
-// the extraction first if it has never had one), draws one bubble per workspace
-// package, marks the canvas as mapped and files the one audit line it ever
-// files. Nothing is SAID to the session that occasioned it — Shape does not
-// instruct a session — and a canvas that already has bubbles is left exactly as
-// it is, drift and all.
-//
-// Every other bridge in this file runs with SHAPE_AUTO_MAP=0. These do not.
+// --- explicit mapping and live overlay --------------------------------------
+// A session attaching to an unmapped branch must not trigger a survey or draw
+// anything. Mapping starts only when an authenticated control client commits a
+// semantic document. Later live edits are visible but never replace that
+// committed baseline.
 {
-  const autoTarget = await mkdtemp(join(tmpdir(), "vh-smoke-auto-"));
-  const autoHome = await mkdtemp(join(tmpdir(), "vh-smoke-auto-home-"));
-  await seedWorkspace(autoTarget, "au");
-  // a second variation, canvas empty and reality never extracted for it: the
-  // room has to ask for the code to be read before it can draw anything
-  const autoVar = join(tmpdir(), `vh-smoke-auto-wt-${process.pid}`);
-  execFileSync("git", ["worktree", "add", "-b", "auto-variation", autoVar], { cwd: autoTarget, stdio: "ignore" });
-  // a third, whose canvas somebody has already drawn on: the room must leave it
-  const autoDrawn = join(tmpdir(), `vh-smoke-auto-drawn-${process.pid}`);
-  execFileSync("git", ["worktree", "add", "-b", "auto-drawn", autoDrawn], { cwd: autoTarget, stdio: "ignore" });
-  const autoWt = realpathSync(autoTarget);
-  const autoVarWt = realpathSync(autoVar);
-  const autoDrawnWt = realpathSync(autoDrawn);
-  const autoDb = join(autoHome, "shape.db");
-  const autoPort = PORT + 7;
-  const autoFrames = [];
-  let autoBridge = null;
-  let autoSocket = null;
-  const autoSessions = [];
+  const controlTarget = await mkdtemp(join(tmpdir(), "vh-smoke-control-"));
+  const controlHome = await mkdtemp(join(tmpdir(), "vh-smoke-control-home-"));
+  await seedWorkspace(controlTarget, "ctl");
+  const controlPort = PORT + 7;
+  const controlFrames = [];
+  const controlDb = join(controlHome, "shape.db");
+  let controlBridge = null;
+  let controlSocket = null;
+  let controlSession = null;
   try {
-    {
-      const { openSqliteStorage } = await import(new URL("../src/server/sqlite.ts", import.meta.url));
-      const seeded = openSqliteStorage(autoDb);
-      await seeded.saveGraph("local", projectKeyOf(autoTarget), autoDrawnWt, {
-        rev: 5,
-        // two bubbles, between them covering both packages, and no edge
-        // declared between them: the code imports one from the other, so this
-        // canvas has real drift to be shown
-        nodes: [
-          {
-            id: "the-front-door",
+    controlBridge = spawn(
+      process.execPath,
+      ["src/index.ts", "--cwd", controlTarget, "--port", String(controlPort), "--db", controlDb],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, SHAPE_HOME: controlHome, HOME: controlHome },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let controlErr = "";
+    controlBridge.stderr.setEncoding("utf8");
+    controlBridge.stderr.on("data", (d) => {
+      controlErr += d;
+    });
+    await waitFor("bridge listening for explicit mapping", () => controlErr.includes("canvas at ws://"), 30_000);
+
+    controlSocket = await openSocket(`ws://127.0.0.1:${controlPort}/ws`, controlFrames);
+    const initialHello = await waitFor(
+      "hello for the unmapped branch",
+      () => controlFrames.find((frame) => frame.type === "hello"),
+      30_000,
+    );
+    check(
+      "an unmapped branch starts empty and has no committed checkpoint",
+      initialHello.graphs[branchA].nodes.length === 0 &&
+        initialHello.session.branches.find((branch) => branch.id === branchA)?.mappedCommit === null,
+      JSON.stringify({
+        nodes: initialHello.graphs[branchA].nodes.length,
+        branches: initialHello.session.branches,
+      }),
+    );
+
+    const attachedAt = controlFrames.length;
+    controlSession = startSession({ worktree: controlTarget, port: controlPort });
+    await waitFor(
+      "the observed session on the unmapped branch",
+      () =>
+        controlFrames
+          .slice(attachedAt)
+          .find((frame) => frame.type === "session_started" && frame.worktree === branchA && frame.backend.id === "omp"),
+      30_000,
+    );
+    await sleep(750);
+    check(
+      "attaching a session causes no unsolicited survey or canvas write",
+      !controlFrames
+        .slice(attachedAt)
+        .some((frame) => frame.type === "graph" && frame.worktree === branchA && frame.graph.nodes.length > 0) &&
+        !controlFrames
+          .slice(attachedAt)
+          .some((frame) => frame.type === "transcript" && frame.worktree === branchA && frame.role === "tool"),
+      JSON.stringify(
+        controlFrames
+          .slice(attachedAt)
+          .filter((frame) => frame.type === "graph" || frame.type === "transcript")
+          .map((frame) => frame.type),
+      ),
+    );
+
+    const { repositoryIdentity } = await import(new URL("../src/agent/worktrees.ts", import.meta.url));
+    const repository = await repositoryIdentity(controlTarget);
+    const state = await requestControl(controlPort, "explicit-read", {
+      type: "map_read",
+      repository,
+      branch: branchA,
+    });
+    check(
+      "map_read reports no committed baseline before an explicit map",
+      state.type === "map_state" && state.branch === branchA && state.mappedCommit === null && state.doc === null,
+      JSON.stringify(state),
+    );
+
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: controlTarget, encoding: "utf8" }).trim();
+    const committed = await requestControl(controlPort, "explicit-commit", {
+      type: "map_commit",
+      repository,
+      branch: branchA,
+      expectedRevision: state.revision,
+      expectedMappedCommit: state.mappedCommit,
+      commit,
+      mode: "initial",
+      ops: [
+        {
+          op: "upsert_node",
+          node: {
+            id: "ctl-auth",
             parentId: null,
-            label: "The front door",
-            summary: "Lets a person in and hands the rest of the app a session.",
+            label: "Authentication",
+            summary: "Authenticates people before they use the system.",
             phase: "built",
+            kind: "service",
             codeRefs: ["packages/auth"],
           },
-          {
-            id: "the-vault",
+        },
+        {
+          op: "upsert_node",
+          node: {
+            id: "ctl-db",
             parentId: null,
-            label: "The vault",
-            summary: "Keeps the records nobody may lose.",
+            label: "Records",
+            summary: "Stores the user records authentication depends on.",
             phase: "built",
+            kind: "database",
             codeRefs: ["packages/db"],
           },
-        ],
-        edges: [],
-      });
-      seeded.close();
-    }
-
-    autoBridge = spawn(
-      process.execPath,
-      ["src/index.ts", "--cwd", autoTarget, "--port", String(autoPort), "--db", autoDb],
-      {
-        cwd: process.cwd(),
-        // deliberately WITHOUT NO_AUTO_MAP: the automatic map is the subject
-        env: { ...process.env, SHAPE_HOME: autoHome, HOME: autoHome },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    let autoErr = "";
-    autoBridge.stderr.setEncoding("utf8");
-    autoBridge.stderr.on("data", (d) => {
-      autoErr += d;
-    });
-    await waitFor("bridge listening for the unmapped project", () => autoErr.includes("canvas at ws://"), 30_000);
-
-    autoSocket = await openSocket(`ws://127.0.0.1:${autoPort}/ws`, autoFrames);
-    const autoHello = await waitFor("hello for the unmapped project", () => autoFrames.find((f) => f.type === "hello"), 30_000);
-    check(
-      "the project has code, no bubbles, and nothing running in it: nothing has been drawn",
-      autoHello.session.targetHasCode === true && autoHello.graphs[autoWt].nodes.length === 0 &&
-        autoHello.graphs[autoWt].surveyed === undefined && autoHello.session.sessions.length === 0,
-      JSON.stringify({
-        nodes: autoHello.graphs[autoWt].nodes.length,
-        surveyed: autoHello.graphs[autoWt].surveyed ?? null,
-      }),
-    );
-
-    // a session reports in from the main worktree, whose code the agent read at
-    // startup: the room has everything it needs and draws
-    const mainAt = autoFrames.length;
-    const autoMain = startSession({ worktree: autoTarget, port: autoPort });
-    autoSessions.push(autoMain);
-    await waitFor(
-      "the session that occasioned the map",
-      () => autoFrames.slice(mainAt).find((f) => f.type === "session_started" && f.worktree === autoWt && f.backend.id === "omp"),
-      30_000,
-    );
-    const skeleton = await waitFor(
-      "the map the room drew by itself",
-      () => autoFrames.slice(mainAt).find((f) => f.type === "graph" && f.worktree === autoWt && f.graph.nodes.length > 0),
-      30_000,
-    );
-    const drawn = skeleton.graph.nodes.map((n) => n.id).sort();
-    const auAuth = skeleton.graph.nodes.find((n) => n.id === "au-auth");
-    check(
-      "one bubble per workspace package, and nothing else",
-      drawn.join(",") === "au-auth,au-db",
-      drawn.join(","),
-    );
-    check(
-      "a mechanical bubble is built, points at the package it stands for, and says nobody has described it",
-      auAuth.phase === "built" && auAuth.label === "auth" && auAuth.codeRefs.join(",") === "packages/auth" &&
-        auAuth.summary === "Workspace package at packages/auth — nothing has described it yet.",
-      JSON.stringify(auAuth),
-    );
-    check(
-      "and a depends edge per dependency the code really has",
-      skeleton.graph.edges.length === 1 && skeleton.graph.edges[0].id === "au-auth--au-db" &&
-        skeleton.graph.edges[0].kind === "depends",
-      JSON.stringify(skeleton.graph.edges),
-    );
-    check(
-      "the room's own write is one transcript line, in the words the receipt gave it",
-      autoFrames
-        .slice(mainAt)
-        .some(
-          (f) =>
-            f.type === "transcript" && f.worktree === autoWt && f.role === "tool" &&
-            f.text === "canvas: mechanical skeleton: 2 workspace package(s)",
-        ),
-      JSON.stringify(
-        autoFrames.slice(mainAt).filter((f) => f.type === "transcript" && f.role === "tool").map((f) => f.text),
-      ),
-    );
-    const mark = await waitFor(
-      "the mark the map left on the canvas",
-      () => autoFrames.slice(mainAt).find((f) => f.type === "graph" && f.worktree === autoWt && f.graph.surveyed !== undefined),
-      30_000,
-    );
-    check(
-      "drawing it marks the canvas as mapped, at the HEAD it was mapped against",
-      mark.graph.surveyed.head === mark.graph.reality.head && typeof mark.graph.surveyed.head === "string" &&
-        typeof mark.graph.surveyed.at === "string",
-      JSON.stringify(mark.graph.surveyed),
-    );
-    const auditRow = await waitFor("the room's own record of the one write it makes", () => {
-      const rows = dbRowsIn(
-        autoDb,
-        "SELECT worktree, entry FROM audit WHERE tenant = ? AND key = ? ORDER BY seq ASC",
-        "local",
-        projectKeyOf(autoTarget),
-      );
-      return rows === null || rows.length === 0 ? null : rows;
+        },
+        {
+          op: "upsert_edge",
+          edge: {
+            id: "ctl-auth--ctl-db",
+            source: "ctl-auth",
+            target: "ctl-db",
+            kind: "depends",
+          },
+        },
+      ],
+      reality: initialHello.graphs[branchA].reality,
+      note: "bridge smoke explicit map",
     });
     check(
-      "one audit line, of the one kind there is: what the room seeded, and how much of it landed",
-      auditRow.length === 1 && auditRow[0].worktree === autoWt &&
-        JSON.parse(auditRow[0].entry).kind === "onboard" && JSON.parse(auditRow[0].entry).ops === 3 &&
-        JSON.parse(auditRow[0].entry).worktree === autoWt,
-      JSON.stringify(auditRow.map((r) => JSON.parse(r.entry))),
+      "map_commit records the exact requested branch and commit",
+      committed.type === "map_committed" && committed.branch === branchA && committed.mappedCommit === commit,
+      JSON.stringify(committed),
     );
-    check(
-      "and nothing was said to the session it happened around: the room answers its calls and nothing else",
-      ompFrames(autoMain.log).every((f) => f.__dir !== "in"),
-      JSON.stringify([...new Set(ompFrames(autoMain.log).filter((f) => f.__dir === "in").map((f) => f.type))]),
-    );
-
-    // the same decision on a variation whose code the room has never had read
-    // to it: the extraction is asked for first, and the map waits for it
-    const varAt = autoFrames.length;
-    const autoVarSession = startSession({ worktree: autoVar, port: autoPort });
-    autoSessions.push(autoVarSession);
-    const varReality = await waitFor(
-      "the extraction the room asked for before it could draw",
+    const mappedGraph = await waitFor(
+      "the explicit committed map on the browser",
       () =>
-        autoFrames
-          .slice(varAt)
-          .find((f) => f.type === "graph" && f.worktree === autoVarWt && f.graph.reality.extractedAt !== null),
-      30_000,
-    );
-    const varSkeleton = await waitFor(
-      "the map drawn on the variation once its code had been read",
-      () => autoFrames.slice(varAt).find((f) => f.type === "graph" && f.worktree === autoVarWt && f.graph.nodes.length > 0),
-      30_000,
-    );
-    check(
-      "a canvas whose code the room has never had read to it is read first, and drawn after",
-      autoFrames.indexOf(varReality) < autoFrames.indexOf(varSkeleton) &&
-        varSkeleton.graph.nodes.map((n) => n.id).sort().join(",") === "au-auth,au-db",
-      JSON.stringify({
-        reality: autoFrames.indexOf(varReality),
-        skeleton: autoFrames.indexOf(varSkeleton),
-        nodes: varSkeleton.graph.nodes.map((n) => n.id),
-      }),
-    );
-    const varMark = await waitFor(
-      "the mark on the variation's canvas",
-      () =>
-        autoFrames
-          .slice(varAt)
-          .find((f) => f.type === "graph" && f.worktree === autoVarWt && f.graph.surveyed !== undefined),
-      30_000,
-    );
-    check(
-      "every variation carries its own mark, at its own HEAD",
-      varMark.graph.surveyed.head === varSkeleton.graph.reality.head &&
-        typeof varMark.graph.surveyed.at === "string",
-      JSON.stringify(varMark.graph.surveyed),
-    );
-
-    // and the canvas somebody has already drawn on: read, shown as drift, never
-    // redrawn under the person looking at it
-    const drawnAt = autoFrames.length;
-    const autoDrawnSession = startSession({ worktree: autoDrawn, port: autoPort });
-    autoSessions.push(autoDrawnSession);
-    await waitFor(
-      "the session in the variation somebody had already drawn",
-      () => autoFrames.slice(drawnAt).find((f) => f.type === "session_started" && f.worktree === autoDrawnWt && f.backend.id === "omp"),
-      30_000,
-    );
-    await waitFor(
-      "its code read, so the room has decided",
-      () =>
-        autoFrames
-          .slice(drawnAt)
-          .find((f) => f.type === "graph" && f.worktree === autoDrawnWt && f.graph.reality.extractedAt !== null),
-      30_000,
-    );
-    // the room decides as the extraction lands, so a beat after it is a beat
-    // after the decision
-    await sleep(1000);
-    const drawnGraphs = autoFrames
-      .slice(drawnAt)
-      .filter((f) => f.type === "graph" && f.worktree === autoDrawnWt)
-      .map((f) => f.graph);
-    check(
-      "a canvas that already has bubbles is left exactly as it is: no skeleton over it, no mark",
-      drawnGraphs.length > 0 &&
-        drawnGraphs.every(
-          (g) => g.nodes.map((n) => n.id).join(",") === "the-front-door,the-vault" && g.surveyed === undefined,
+        controlFrames.find(
+          (frame) =>
+            frame.type === "graph" &&
+            frame.worktree === branchA &&
+            frame.graph.nodes.some((node) => node.id === "ctl-auth") &&
+            frame.graph.nodes.some((node) => node.id === "ctl-db"),
         ),
-      JSON.stringify(drawnGraphs.map((g) => g.nodes.map((n) => n.id).join("+"))),
+      30_000,
     );
     check(
-      "what the code did since is shown as drift on it, and nobody is asked to redraw it",
-      (drawnGraphs.at(-1).drift["the-front-door"] ?? []).some((note) => note.includes("no edge is declared")) &&
-        ompFrames(autoDrawnSession.log).every((f) => f.__dir !== "in"),
-      JSON.stringify(drawnGraphs.at(-1).drift),
-    );
-    check(
-      "and the room filed a line for the canvases it drew and for no others",
-      [
-        ...new Set(
-          (dbRowsIn(
-            autoDb,
-            "SELECT worktree FROM audit WHERE tenant = ? AND key = ?",
-            "local",
-            projectKeyOf(autoTarget),
-          ) ?? []).map((r) => r.worktree),
-        ),
-      ]
-        .sort()
-        .join(",") === [autoWt, autoVarWt].sort().join(","),
-      JSON.stringify(
-        dbRowsIn(autoDb, "SELECT worktree FROM audit WHERE tenant = ? AND key = ?", "local", projectKeyOf(autoTarget)),
-      ),
+      "the explicit map is the branch's visible graph",
+      mappedGraph.graph.edges.some((edge) => edge.id === "ctl-auth--ctl-db"),
+      JSON.stringify(mappedGraph.graph),
     );
 
-    // --- a session that comes back --------------------------------------------
-    // The pane was closed and reopened on the same session: it greets the link
-    // again, so the room hears the session start again — and a room that mapped
-    // again here would redraw the project on every reconnect forever.
-    const backAt = autoFrames.length;
-    const linesFor = (worktree) =>
-      (dbRowsIn(
-        autoDb,
-        "SELECT entry FROM audit WHERE tenant = ? AND key = ? AND worktree = ?",
-        "local",
-        projectKeyOf(autoTarget),
-        worktree,
-      ) ?? []).length;
-    const linesBefore = linesFor(autoWt);
-    const sessionId = (
-      await waitFor("the session id the harness greeted with", () =>
-        autoFrames.find((f) => f.type === "session_started" && f.worktree === autoWt && f.backend.id === "omp"),
-      )
-    ).session.sessionId;
-    await autoMain.stop();
+    await requestControl(controlPort, "explicit-live-start", {
+      type: "live_update",
+      repository,
+      branch: branchA,
+      sessionId: "bridge-smoke-live",
+      state: "start",
+      note: "bridge smoke live session",
+    });
+    const liveAt = controlFrames.length;
+    const live = await requestControl(controlPort, "explicit-live", {
+      type: "live_update",
+      repository,
+      branch: branchA,
+      sessionId: "bridge-smoke-live",
+      state: "working",
+      ops: [
+        {
+          op: "upsert_node",
+          node: {
+            id: "ctl-live",
+            parentId: null,
+            label: "Work in progress",
+            summary: "A live-only edit that has not been mapped.",
+            phase: "idea",
+          },
+        },
+      ],
+      note: "editing an unmapped idea",
+    });
+    check(
+      "live_update advances the visible branch without changing its checkpoint",
+      live.type === "live_updated" && live.mappedCommit === commit && live.revision > committed.revision,
+      JSON.stringify(live),
+    );
     await waitFor(
-      "session_stopped for the pane that was closed",
-      () => autoFrames.slice(backAt).find((f) => f.type === "session_stopped" && f.worktree === autoWt),
-      30_000,
-    );
-    const again = startSession({ worktree: autoTarget, port: autoPort, resume: sessionId });
-    autoSessions.push(again);
-    const reGreeted = await waitFor(
-      "session_started for the session that came back",
+      "the live overlay on the browser",
       () =>
-        autoFrames
-          .slice(backAt)
-          .find((f) => f.type === "session_started" && f.worktree === autoWt && f.backend.id === "omp"),
+        controlFrames
+          .slice(liveAt)
+          .find(
+            (frame) =>
+              frame.type === "graph" &&
+              frame.worktree === branchA &&
+              frame.graph.nodes.some((node) => node.id === "ctl-live"),
+          ),
+      30_000,
+    );
+    const baseline = await requestControl(controlPort, "explicit-baseline", {
+      type: "map_read",
+      repository,
+      branch: branchA,
+    });
+    check(
+      "map_read keeps the committed baseline distinct from live overlay edits",
+      baseline.type === "map_state" &&
+        baseline.mappedCommit === commit &&
+        baseline.revision === live.revision &&
+        baseline.doc.nodes.some((node) => node.id === "ctl-auth") &&
+        !baseline.doc.nodes.some((node) => node.id === "ctl-live"),
+      JSON.stringify(baseline),
+    );
+    await requestControl(controlPort, "explicit-live-stop", {
+      type: "live_update",
+      repository,
+      branch: branchA,
+      sessionId: "bridge-smoke-live",
+      state: "stop",
+    });
+
+    const refreshedAt = controlFrames.length;
+    controlSocket.send(JSON.stringify({ type: "select_project", projectId: repository.id }));
+    const refreshed = await waitFor(
+      "hello after the explicit map",
+      () => controlFrames.slice(refreshedAt).find((frame) => frame.type === "hello"),
       30_000,
     );
     check(
-      "a session that reconnects is announced again, as the same session",
-      reGreeted.session.sessionId === sessionId,
-      `${String(reGreeted.session.sessionId)} / ${sessionId}`,
-    );
-    await sleep(1000);
-    check(
-      "and the map is not drawn a second time for it: nothing new drawn, nothing new filed",
-      linesFor(autoWt) === linesBefore &&
-        autoFrames
-          .slice(backAt)
-          .filter((f) => f.type === "transcript" && f.worktree === autoWt && f.role === "tool")
-          .length === 0,
-      JSON.stringify({
-        before: linesBefore,
-        after: linesFor(autoWt),
-        lines: autoFrames.slice(backAt).filter((f) => f.type === "transcript" && f.role === "tool").map((f) => f.text),
-      }),
+      "public branch metadata exposes the committed checkpoint",
+      refreshed.session.branches.find((branch) => branch.id === branchA)?.mappedCommit === commit,
+      JSON.stringify(refreshed.session.branches),
     );
   } catch (err) {
-    check("the automatic map run completed", false, String(err));
+    check("the explicit mapping run completed", false, String(err));
   } finally {
-    for (const session of autoSessions) await session.stop();
-    autoSocket?.close();
-    autoBridge?.kill("SIGKILL");
+    await controlSession?.stop();
+    controlSocket?.close();
+    controlBridge?.kill("SIGKILL");
     await sleep(100);
-    await rm(autoVar, { recursive: true, force: true });
-    await rm(autoDrawn, { recursive: true, force: true });
-    await rm(autoTarget, { recursive: true, force: true });
-    await rm(autoHome, { recursive: true, force: true });
+    await rm(controlTarget, { recursive: true, force: true });
+    await rm(controlHome, { recursive: true, force: true });
   }
 }
 
-// --- the map turned off -----------------------------------------------------
-// The one knob over the block above: an operator who does not want a room
-// writing onto a canvas by itself sets SHAPE_AUTO_MAP=0, and then the same
-// project — code on disk, canvas empty, a session reporting in — is left alone.
-{
-  const offTarget = await mkdtemp(join(tmpdir(), "vh-smoke-nomap-"));
-  const offHome = await mkdtemp(join(tmpdir(), "vh-smoke-nomap-home-"));
-  await seedWorkspace(offTarget, "off");
-  const offWt = realpathSync(offTarget);
-  const offDb = join(offHome, "shape.db");
-  const offPort = PORT + 8;
-  const offFrames = [];
-  let offBridge = null;
-  let offSocket = null;
-  let offSession = null;
-  try {
-    offBridge = spawn(
-      process.execPath,
-      ["src/index.ts", "--cwd", offTarget, "--port", String(offPort), "--db", offDb],
-      {
-        cwd: process.cwd(),
-        env: { ...process.env, ...NO_AUTO_MAP, SHAPE_HOME: offHome, HOME: offHome },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    let offErr = "";
-    offBridge.stderr.setEncoding("utf8");
-    offBridge.stderr.on("data", (d) => {
-      offErr += d;
-    });
-    await waitFor("bridge listening with the automatic map off", () => offErr.includes("canvas at ws://"), 30_000);
-    offSocket = await openSocket(`ws://127.0.0.1:${offPort}/ws`, offFrames);
-    const offHello = await waitFor("hello with the automatic map off", () => offFrames.find((f) => f.type === "hello"), 30_000);
-    check(
-      "the project this knob is tested on is the one the room would have mapped",
-      offHello.session.targetHasCode === true && offHello.graphs[offWt].nodes.length === 0,
-      JSON.stringify({ code: offHello.session.targetHasCode, nodes: offHello.graphs[offWt].nodes.length }),
-    );
-    const offAt = offFrames.length;
-    offSession = startSession({ worktree: offTarget, port: offPort });
-    await waitFor(
-      "the session reporting in with the map off",
-      () => offFrames.slice(offAt).find((f) => f.type === "session_started" && f.worktree === offWt && f.backend.id === "omp"),
-      30_000,
-    );
-    await sleep(1500);
-    check(
-      "with the automatic map off a session start draws nothing and files nothing",
-      !offFrames.slice(offAt).some((f) => f.type === "graph" && f.graph.nodes.length > 0) &&
-        (dbRowsIn(offDb, "SELECT entry FROM audit WHERE tenant = ? AND key = ?", "local", projectKeyOf(offTarget)) ?? [])
-          .length === 0,
-      JSON.stringify(offFrames.slice(offAt).filter((f) => f.type === "graph").map((f) => f.graph.nodes.length)),
-    );
-  } catch (err) {
-    check("the map-off run completed", false, String(err));
-  } finally {
-    await offSession?.stop();
-    offSocket?.close();
-    offBridge?.kill("SIGKILL");
-    await sleep(100);
-    await rm(offTarget, { recursive: true, force: true });
-    await rm(offHome, { recursive: true, force: true });
-  }
-}
 
 console.log(`\n${results.join("\n")}\n`);
 console.log(failed === 0 ? "SMOKE OK" : `SMOKE FAILED (${failed})`);

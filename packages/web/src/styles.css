@@ -49,9 +49,9 @@
      apart. --- */
   --correctness: #a6c85c;
 
-  /* --- variations: one colour per open worktree, assigned by id order and
-     stable for as long as the repo has that checkout. These are hues, not
-     meanings — a variation is not a phase, a layer or a verdict — so they sit
+  /* --- variations: one colour per mapped branch, assigned by id order and
+     stable for as long as the branch remains in the project. These are hues,
+     not meanings — a variation is not a phase, a layer or a verdict — so they sit
      outside every other palette here. --- */
   --wt-0: #5fa8fa;
   --wt-1: #3fd0c9;
@@ -642,6 +642,110 @@ button {
 }
 .conn-mock {
   color: var(--phase-idea);
+}
+
+/* A disconnected canvas keeps its destination visible and accepts credentials
+   in-page, without putting them in navigation or the surrounding UI. */
+.connection-setup {
+  position: absolute;
+  z-index: 7;
+  top: calc(var(--s7) + var(--s7));
+  right: var(--s5);
+  width: min(380px, calc(100% - var(--s7)));
+  padding: var(--s4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+
+.connection-setup-kicker {
+  margin: 0 0 var(--s1);
+  color: var(--phase-failed);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.connection-setup h2 {
+  margin: 0;
+  font-size: var(--t-lg);
+}
+
+.connection-setup-body {
+  margin: var(--s2) 0 var(--s3);
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.connection-setup-destination {
+  display: grid;
+  gap: var(--s1);
+  margin: 0 0 var(--s3);
+  color: var(--text-faint);
+  font-size: var(--t-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.connection-setup-destination code {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.connection-setup-form > label {
+  display: block;
+  margin-bottom: var(--s1);
+  color: var(--text-dim);
+  font-size: var(--t-sm);
+}
+
+.connection-setup-actions {
+  display: flex;
+  gap: var(--s2);
+}
+
+.connection-setup-actions input {
+  min-width: 0;
+  flex: 1;
+  padding: 7px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.connection-setup-actions button {
+  flex: none;
+  padding: 7px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.connection-setup-actions button:hover {
+  background: var(--surface-3);
+}
+
+.connection-setup-note,
+.connection-setup-error {
+  margin: var(--s2) 0 0;
+  font-size: var(--t-xs);
+  line-height: 1.4;
+}
+
+.connection-setup-note {
+  color: var(--text-faint);
+}
+
+.connection-setup-error {
+  color: var(--phase-failed);
 }
 
 /* fixture warning: solid fill, dark text — reads as a label on the build, not
@@ -2947,7 +3051,7 @@ kbd {
   transform-origin: center;
 }
 
-/* --- variation switcher: which copy of the project you are looking at --- */
+/* --- variation switcher: which mapped branch you are looking at --- */
 
 .variation .project-menu {
   width: 420px;
@@ -2960,12 +3064,10 @@ kbd {
   color: var(--text-faint);
 }
 
-.variation-detached {
+.variation-checkpoint {
   flex: none;
   font-family: var(--font-mono);
   font-size: var(--t-xs);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   color: var(--text-faint);
 }
 
@@ -3945,24 +4047,24 @@ kbd {
   background: var(--surface-3);
 }
 
+.variation-pick .project-recent-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .variation-live {
   flex: none;
   display: inline-flex;
   align-items: center;
   gap: 4px;
   font-size: var(--t-xs);
-  color: var(--text-faint);
-}
-
-.variation-live .dot {
-  background: var(--text-faint);
-}
-
-.variation-live[data-on="true"] {
   color: var(--phase-built);
 }
 
-.variation-live[data-on="true"] .dot {
+.variation-live .dot {
   background: var(--phase-built);
 }
 

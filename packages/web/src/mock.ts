@@ -15,6 +15,7 @@
 import {
   emptyGraph,
   type AgentState,
+  type CanvasBranchInfo,
   type BackendInfo,
   type ClientMsg,
   type EntityDelta,
@@ -156,20 +157,43 @@ export function trioGraph(): GraphDoc {
 }
 
 /** the main worktree of the fixture project, and the two beside it */
-const MOCK_MAIN = "/Users/you/code/vireo";
-const MOCK_SPIKE = "/Users/you/code/vireo-spike-voice";
-const MOCK_QUIET = "/Users/you/code/vireo-offline-sync";
+const MOCK_MAIN_PATH = "/Users/you/code/vireo";
+const MOCK_SPIKE_PATH = "/Users/you/code/vireo-spike-voice";
+const MOCK_QUIET_PATH = "/Users/you/code/vireo-offline-sync";
+
+/** opaque branch identities carried by every canvas-keyed wire value */
+const MOCK_MAIN = "refs/heads/main";
+const MOCK_SPIKE = "refs/heads/spike/voice";
 
 /**
- * Three variations of the same project: two with a harness running in them, so
- * the merge, the pips, the per-variation rings and the target chip are all
- * visible with no bridge, and one detached checkout with no session at all,
- * which is what the "open" action in the variations menu is for.
+ * Three physical checkouts of the fixture project. The detached checkout has
+ * no branch identity and therefore remains routing metadata only.
  */
 const MOCK_WORKTREES: readonly WorktreeInfo[] = [
-  { id: MOCK_MAIN, path: MOCK_MAIN, branch: "main", head: "8f2c1ab" },
-  { id: MOCK_SPIKE, path: MOCK_SPIKE, branch: "spike/voice", head: "3d91c04" },
-  { id: MOCK_QUIET, path: MOCK_QUIET, branch: null, head: "b71e2fa" },
+  { id: MOCK_MAIN_PATH, path: MOCK_MAIN_PATH, branch: "main", head: "8f2c1ab" },
+  { id: MOCK_SPIKE_PATH, path: MOCK_SPIKE_PATH, branch: "spike/voice", head: "3d91c04" },
+  { id: MOCK_QUIET_PATH, path: MOCK_QUIET_PATH, branch: null, head: "b71e2fa" },
+];
+
+const MOCK_BRANCHES: CanvasBranchInfo[] = [
+  {
+    id: MOCK_MAIN,
+    branch: "main",
+    head: "8f2c1ab",
+    mappedCommit: "72a60de",
+    live: true,
+    path: MOCK_MAIN_PATH,
+    isDefault: true,
+  },
+  {
+    id: MOCK_SPIKE,
+    branch: "spike/voice",
+    head: "3d91c04",
+    mappedCommit: "3d91c04",
+    live: true,
+    path: MOCK_SPIKE_PATH,
+    isDefault: false,
+  },
 ];
 
 /**
@@ -226,9 +250,10 @@ const MOCK_MODEL = { provider: "anthropic", id: "claude-fable-5" };
 
 export function mockSession(targetHasCode: boolean): SessionInfo {
   return {
-    cwd: MOCK_MAIN,
+    cwd: MOCK_MAIN_PATH,
     targetHasCode,
     worktrees: MOCK_WORKTREES.map((entry) => ({ ...entry })),
+    branches: MOCK_BRANCHES.map((entry) => ({ ...entry })),
     sessions: mockRunning(),
     agentConnected: true,
     // the mock has no agent behind it, so there is no directive on disk
@@ -295,6 +320,7 @@ const MINUTE_MS = 60_000;
 /** what a real agent derives from machine + realpath(cwd); fixed here */
 const MOCK_PROJECT_ID = "mock-machine:/Users/you/code/vireo";
 const MOCK_PICKED_MAIN = "/Users/you/code/field-notes";
+const MOCK_PICKED_BRANCH = "refs/heads/main";
 const MOCK_PICKED_PROJECT_ID = `mock-machine:${MOCK_PICKED_MAIN}`;
 const MOCK_PICKER_DELAY_MS = 900;
 
@@ -319,6 +345,17 @@ function mockPickedSession(): SessionInfo {
     cwd: MOCK_PICKED_MAIN,
     targetHasCode: true,
     worktrees: [{ id: MOCK_PICKED_MAIN, path: MOCK_PICKED_MAIN, branch: "main", head: "a11ce33" }],
+    branches: [
+      {
+        id: MOCK_PICKED_BRANCH,
+        branch: "main",
+        head: "a11ce33",
+        mappedCommit: null,
+        live: false,
+        path: MOCK_PICKED_MAIN,
+        isDefault: true,
+      },
+    ],
     sessions: [],
     agentConnected: true,
     directivePath: null,
@@ -1048,10 +1085,10 @@ export function mockSend(msg: ClientMsg): void {
       mockRegistry = [picked, ...mockRegistry.filter((entry) => entry.projectId !== picked.projectId)];
       store.ingest({
         type: "hello",
-        graphs: { [MOCK_PICKED_MAIN]: emptyGraph() },
+        graphs: { [MOCK_PICKED_BRANCH]: emptyGraph() },
         session: mockPickedSession(),
-        agents: { [MOCK_PICKED_MAIN]: "idle" },
-        catchUps: { [MOCK_PICKED_MAIN]: { state: "idle", at: Date.now() } },
+        agents: { [MOCK_PICKED_BRANCH]: "idle" },
+        catchUps: { [MOCK_PICKED_BRANCH]: { state: "idle", at: Date.now() } },
         projects: mockRegistry.map((entry) => ({ ...entry })),
         projectId: MOCK_PICKED_PROJECT_ID,
         revisions: {},

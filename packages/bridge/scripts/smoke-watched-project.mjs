@@ -18,8 +18,6 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 
-import { SYNC_TAB_LABEL } from "../src/agent/launcher/herdr.ts";
-
 const results = [];
 let failed = 0;
 
@@ -173,6 +171,7 @@ await chmod(fakeMgr, 0o755);
 
 const pathA = await realpath(repoA);
 const pathB = await realpath(repoB);
+const pickedBranchId = "refs/heads/picked-smoke";
 const pathNonRepo = await realpath(nonRepo);
 const before = {
   a: await fingerprint(pathA),
@@ -208,7 +207,6 @@ function launchAgent() {
         ...process.env,
         HOME: home,
         SHAPE_HOME: home,
-        SHAPE_AUTO_MAP: "0",
         SHAPE_FORCE_HARNESSES: "omp",
         SHAPE_FORCE_LAUNCHERS: "herdr",
         SHAPE_LAUNCHER: "herdr",
@@ -353,10 +351,25 @@ try {
     JSON.stringify(pickedRow),
   );
   check(
-    "success selects only the requesting browser with a fresh hello",
+    "success selects only the requesting browser with an empty public branch canvas",
     pickedHello.session.sessions.length === 0 &&
+      pickedHello.session.branches.some(
+        (branch) =>
+          branch.id === pickedBranchId &&
+          branch.branch === "picked-smoke" &&
+          branch.path === pathB &&
+          branch.isDefault === true &&
+          branch.mappedCommit === null,
+      ) &&
+      Object.keys(pickedHello.graphs).length === 1 &&
+      pickedHello.graphs[pickedBranchId].nodes.length === 0 &&
+      pickedHello.graphs[pickedBranchId].edges.length === 0 &&
       !observerFrames.slice(observerAt).some((frame) => frame.type === "hello" && frame.projectId === keyB),
-    JSON.stringify(observerFrames.slice(observerAt).map((frame) => `${frame.type}:${frame.projectId ?? ""}`)),
+    JSON.stringify({
+      branches: pickedHello.session.branches,
+      graphs: pickedHello.graphs,
+      observer: observerFrames.slice(observerAt).map((frame) => `${frame.type}:${frame.projectId ?? ""}`),
+    }),
   );
   check(
     "success broadcasts the new project list",
@@ -379,8 +392,7 @@ try {
     (frame) => frame.type === "__call" && !String(frame.id).startsWith("smoke-"),
   );
   // A manager is looked for by listing the tabs of ONE workspace, so every such
-  // listing has to be the root project's: none may name the watched project's,
-  // which has no manager tab and whose own synchronization never lists tabs.
+  // listing has to be the root project's: the watched project has no manager tab.
   const tabListWorkspaces = launcherCallsAfterFirstWatch
     .filter((frame) => frame.method === "tab.list")
     .map((frame) => frame.params.workspace_id);
@@ -524,23 +536,20 @@ try {
     frames.find(
       (frame) =>
         frame.type === "session_started" &&
-        frame.worktree === pathB &&
+        frame.worktree === pickedBranchId &&
         frame.backend.capabilities.terminal === "none",
     ),
   );
   const focusAt = frames.length;
-  socket.send(JSON.stringify({ type: "focus_terminal", worktree: pathB }));
+  socket.send(JSON.stringify({ type: "focus_terminal", worktree: pickedBranchId }));
   await waitFor("observation-only focus refusal", () =>
     frames.slice(focusAt).find((frame) => frame.type === "error" && frame.message.includes("no terminal")),
   );
   const finalLauncherCalls = (await jsonl(herdrLog))
     .filter((frame) => frame.type === "__call" && !String(frame.id).startsWith("smoke-"))
     .slice(launcherCallsBeforeWatchedSession);
-  // Shape's own dedicated synchronization launch is the project's, not this
-  // session's: what is left is everything the watched session could have caused.
-  const sessionLauncherCalls = finalLauncherCalls.filter(
-    (call) => call.params.label !== SYNC_TAB_LABEL && call.params.name !== SYNC_TAB_LABEL,
-  );
+  // A reported watched session must not cause launcher activity.
+  const sessionLauncherCalls = finalLauncherCalls;
   check(
     "a watched session exposes no focusable terminal and causes no prompt, launch, or focus",
     watchedSession.backend.capabilities.terminal === "none" &&
@@ -569,14 +578,6 @@ try {
         frame.tools.launcher === null,
     ),
   );
-  await waitFor("watched-project synchronization settled after restart", () =>
-    frames.slice(restartedAt).some(
-      (frame) =>
-        frame.type === "catch_up" &&
-        frame.worktree === pathB &&
-        (frame.catchUp.state === "idle" || frame.catchUp.state === "failed"),
-    ),
-  );
   const restartLauncherCalls = (await jsonl(herdrLog))
     .filter((frame) => frame.type === "__call" && !String(frame.id).startsWith("smoke-"))
     .slice(launcherCallsBeforeRestart);
@@ -588,9 +589,7 @@ try {
       managerCallsAfterRestart.some((call) => call.cwd === pathA) &&
       managerCallsAfterRestart.every((call) => call.cwd !== pathB) &&
       !restartLauncherCalls.some((frame) => {
-        // the project's own dedicated synchronization is the one launch Shape
-        // is allowed to make; anything else starting an agent is not
-        if (frame.method === "agent.start") return frame.params.name !== SYNC_TAB_LABEL;
+        if (frame.method === "agent.start") return true;
         if (frame.method === "agent.prompt" || frame.method === "agent.focus") {
           return frame.params.target === watchedManagerPane || frame.params.target === "watched-manager";
         }

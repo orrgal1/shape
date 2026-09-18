@@ -18,8 +18,8 @@
  *                  goes away), refuses a `select_project` for it, and writes
  *                  the status down
  *   active again — flipping it back reopens the room from the row, and
- *                  `select_project` answers with a hello whose worktrees are
- *                  A's: no data was lost by parking it
+ *                  `select_project` answers with a hello retaining A's
+ *                  physical worktree and public full-ref branch identity
  *   untouched    — the herdr tab is exactly as it was. Shape reads the user's
  *                  terminal and writes nothing to it, in either direction
  *
@@ -137,6 +137,7 @@ await seedRepo(repoB, "left-alone");
 
 const pathA = realpathSync(repoA);
 const pathB = realpathSync(repoB);
+const branchA = "refs/heads/worked-in";
 
 const frames = [];
 let bridge = null;
@@ -275,9 +276,15 @@ try {
     30_000,
   );
   check(
-    "and its room is open again, with the repo's own worktrees on it",
-    hello.session.worktrees.some((w) => w.id === pathA),
-    JSON.stringify(hello.session.worktrees.map((w) => w.id)),
+    "and its room is open again with both the repo's physical worktree and public branch identity",
+    hello.session.worktrees.some((worktree) => worktree.id === pathA) &&
+      hello.session.branches.some(
+        (branch) => branch.id === branchA && branch.branch === "worked-in" && branch.path === pathA && branch.isDefault,
+      ),
+    JSON.stringify({
+      worktrees: hello.session.worktrees.map((worktree) => worktree.id),
+      branches: hello.session.branches,
+    }),
   );
 
   // --- the user's terminal, after all that ---------------------------------

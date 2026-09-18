@@ -21,8 +21,7 @@
  * served exactly like a local one.
  */
 
-import { randomUUID } from "node:crypto";
-import { basename, isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { diffSnapshots } from "../../../shared/src/delta.ts";
 import { symbolRefOf } from "../../../shared/src/index.ts";
 import type {
@@ -32,10 +31,17 @@ import type {
   AgentState,
   AgentToServerMsg,
   BackendInfo,
-  CanvasOp,
+  CanvasBranchInfo,
   CatchUpState,
   ClientMsg,
+  ControlErrorResponse,
   GraphDoc,
+  LiveUpdateRequest,
+  LiveUpdatedResponse,
+  MapCommitRequest,
+  MapCommittedResponse,
+  MapReadRequest,
+  MapStateResponse,
   ProjectSummary,
   ProjectTools,
   RealityLayer,
@@ -50,9 +56,8 @@ import type {
 import type { ServerEnd } from "../transport.ts";
 import { computeDrift } from "./drift.ts";
 import { importLegacyProject } from "./legacy.ts";
-import { composeSyncPrompt } from "./onboarding.ts";
 import { SnapshotStore } from "./snapshots.ts";
-import { mainWorktreeOf, type AuditBody, type Storage, type StoredProject } from "./storage.ts";
+import { type Storage, type StoredBranchState, type StoredProject } from "./storage.ts";
 import { GraphStore } from "./store.ts";
 
 /** the frame that opens a room, or re-binds the one its agent already holds */
@@ -75,35 +80,52 @@ function sameReality(left: RealityLayer, right: RealityLayer): boolean {
   return JSON.stringify(leftSemantic) === JSON.stringify(rightSemantic);
 }
 
+/** Git's short branch spelling is physical metadata; canvas ids are full refs. */
+function branchIdOf(branch: string | null): string | null {
+  if (branch === null || branch.length === 0) return null;
+  return branch.startsWith("refs/") ? branch : `refs/heads/${branch}`;
+}
+
+const LIVE_BACKEND: BackendInfo = {
+  id: "shape-live",
+  label: "Shape live",
+  capabilities: {
+    steerMidTurn: false,
+    hostTool: false,
+    events: "reported",
+    resume: false,
+    terminal: "none",
+  },
+};
+
 /**
- * One variation of the project: its canvas and everything that is true of that
- * canvas alone. Two worktrees of one repo share nothing here — not the graph,
- * not what the session in it is doing — which is why every frame in and out of
- * the room names the worktree it belongs to.
+ * One persistent branch canvas. Physical worktrees only supply routing and
+ * checkout metadata; a branch can exist here without any checkout or agent.
  */
 interface WorktreeState {
-  /** worktree id: the realpath of its directory, as the agent resolved it */
+  /** opaque persistent branch id (normally a full refs/heads/* ref) */
   readonly id: string;
-  /** the worktree's directory; the paths its harness reports are relative to it */
-  path: string;
-  /** the branch checked out there; what the user is shown, never the path */
-  branch: string | null;
+  /** display-only checkout path, null when this branch has no checkout */
+  path: string | null;
+  /** full branch ref */
+  branch: string;
+  head: string | null;
+  mappedCommit: string | null;
+  live: boolean;
+  isDefault: boolean;
   store: GraphStore;
   snapshots: SnapshotStore;
   /** bubbles the harness is working in right now */
   activity: Set<string>;
   agent: AgentState;
+  /** last state reported by the physical harness, independent of explicit live sessions */
+  physicalAgent: AgentState;
   /** the harness reporting in from here, or null when none is */
   session: AgentSession | null;
   /** the harness's backend; null exactly when `session` is */
   backend: BackendInfo | null;
   catchUp: CatchUpState;
-  inspecting: boolean;
-  inspectionTimer: NodeJS.Timeout | null;
-  /** A material attach-time update that the following inspection must account for. */
-  realityChanged: boolean;
-  sync: { id: string; head: string | null; persisted: boolean } | null;
-  /** Serializes job writes and completion so persistence always precedes acknowledgement. */
+  /** serializes physical writes for this branch */
   writing: Promise<void>;
   /**
    * The assistant message being written right now, folded from `text_delta`.
@@ -117,6 +139,11 @@ interface WorktreeState {
   nowDirty: boolean;
   /** the last `now` text broadcast, so clearing an already-clear line says nothing */
   nowSent: string | null;
+}
+
+interface ControlSession {
+  branch: string;
+  state: AgentState;
 }
 
 export interface ProjectRoomOptions {
@@ -216,22 +243,23 @@ export class ProjectRoom {
   readonly #importLegacy: boolean;
   /** assigned by retarget() or restore(), which always run before anything else reaches the room */
   #project!: AgentProject;
-  /**
-   * Per worktree, the project key an older Shape would have stored its canvas
-   * under. Only an `attach` fills this: the agent is the one that knows the
-   * directories, and `restore()` reopens a room with no agent — a room nobody
-   * is attached to must never go claiming graphs it cannot have named.
-   */
+  /** legacy project keys reported by the physical agent, including namespaced older generations */
   #legacyKeys: Record<string, string> = {};
-  /** one canvas per worktree, in the order the agent listed them (main first) */
+  /** persistent branch states, keyed by opaque branch id */
   readonly #states = new Map<string, WorktreeState>();
-  /**
-   * Worktrees whose state is being read out of storage right now. An agent
-   * frame for a worktree nobody has heard of yet (a harness started in a
-   * worktree made after the last listing) waits on this instead of racing a
-   * second load of the same graph.
-   */
   readonly #pendingStates = new Map<string, Promise<WorktreeState>>();
+  /** current non-detached checkout route: physical worktree id -> branch id */
+  readonly #worktreeBranches = new Map<string, string>();
+  /** route captured when a physical session starts, so later checkout changes cannot retarget it */
+  readonly #sessionBranches = new Map<string, string>();
+  /** explicit remote live sessions, routed only by their caller-supplied id */
+  readonly #controlSessions = new Map<string, ControlSession>();
+  /** remote control-created rows keep repository.path inert until a real agent attaches */
+  #controlOnly = false;
+  /** every physical checkout refresh, in arrival order */
+  #worktreeSync: Promise<void> = Promise.resolve();
+  /** serializes control mutations and their browser broadcasts */
+  #controlWriting: Promise<void> = Promise.resolve();
   #loaded = false;
   /** an agent link is bound to this room right now; false ⇒ the canvases are read-only */
   #agentConnected = false;
@@ -311,88 +339,76 @@ export class ProjectRoom {
     };
   }
 
-  /**
-   * Worktrees with a live session right now: those reporting in on this room's
-   * link, plus those the last discovery scan saw a session in. A union, not a
-   * sum — one worktree with a herdr agent that also greeted on the link is one
-   * live session.
-   */
+  /** Count distinct persistent branches with a physical or explicit live session. */
   #liveSessions(): number {
-    const live = new Set(this.#seenLive);
+    const live = new Set<string>();
+    for (const worktree of this.#seenLive) {
+      const branch = this.#worktreeBranches.get(worktree);
+      if (branch !== undefined) live.add(branch);
+    }
     for (const state of this.#states.values()) {
       if (state.session !== null) live.add(state.id);
     }
+    for (const session of this.#controlSessions.values()) live.add(session.branch);
     return live.size;
   }
 
-  /**
-   * Open the project the agent attached to. A runtime observes one project for
-   * its whole life, so a second `attach` on a room is the same project coming
-   * back: the canvases are flushed and re-read, and every worktree is opened
-   * again, with a session in it or not. `link` is the connection the attach
-   * arrived on — a reconnecting agent brings a fresh one to a room that kept
-   * its graphs while it was away. The `attached` answer goes out last, so
-   * nothing the agent sends next finds a half-loaded room.
-   */
+  /** Bind a physical agent while keeping persistent branch canvases authoritative. */
   async retarget(attach: AttachMsg, link: ServerEnd): Promise<void> {
     if (this.#loaded) await this.#closeStates();
 
     const project = attach.project;
+    this.#controlOnly = false;
     this.#project = project;
     this.#legacyKeys = project.legacyKeys;
-    // Before anything reads a graph: a canvas stored under the key this
-    // machine used to derive is this project's canvas, and it moves onto the
-    // current key first — ahead of the pre-database import below, which would
-    // otherwise fill the new key with an older `.shape/graph.json` and make the
-    // adoption look like an overwrite of a canvas someone had drawn.
-    for (const id of Object.keys(this.#legacyKeys)) await this.#adoptLegacy(id);
-    // a canvas drawn before Shape kept state in a database is this project's
-    // too: taken over once, on the first attach that finds it
+    this.#worktreeBranches.clear();
+    this.#sessionBranches.clear();
+
+    // Migrate each physical legacy graph before associating its checkout with
+    // a branch. These rows remain uncommitted overlays; adoption never invents
+    // a mapping baseline.
+    for (const info of attach.worktrees) await this.#adoptLegacy(info.id);
     if (this.#importLegacy) await importLegacyProject(this.#storage, this.#tenant, project);
 
-    this.#worktrees = attach.worktrees;
+    await this.#loadPersistentBranches();
+    await this.#scheduleWorktrees(attach.worktrees);
+
     for (const info of attach.worktrees) {
-      const state = await this.#openState(info.id, info);
-      // reality is per worktree: two variations sit on two HEADs
+      const state = this.#stateForWorktree(info.id);
+      if (state === null) continue;
       const reality = attach.realities[info.id];
       if (reality !== undefined && !sameReality(state.store.doc.reality, reality)) {
         state.store.setReality(reality, computeDrift(state.store.doc, reality));
-        state.realityChanged = true;
         await this.#graphChanged(state);
       }
     }
-    // a session in a worktree the listing missed still gets its canvas
     for (const running of attach.sessions) {
-      const state = await this.#openState(running.worktree, null);
+      const state = this.#stateForWorktree(running.worktree);
+      if (state === null) continue;
+      this.#sessionBranches.set(running.worktree, state.id);
       state.session = running.session;
       state.backend = running.backend;
       state.agent = running.state;
+      state.physicalAgent = running.state;
     }
-    // a target with no worktrees at all (a listing that failed) is still one
-    // canvas: the project's own directory, which is what its records are keyed by
-    if (this.#states.size === 0) await this.#openState(mainWorktreeOf(project.cwd), null);
 
     this.#loaded = true;
     this.#agentConnected = true;
     this.#lastSeen = new Date().toISOString();
     this.#link = link;
     this.#link.send({ type: "attached", projectId: project.key });
-    for (const state of this.#states.values()) this.#inspect(state);
   }
 
   /**
-   * Reopen a project from the registry with no agent behind it: every worktree
-   * the row remembers gets its canvas and its opening snapshot exactly as an
-   * attach loads them, and `agentConnected` starts false — the very state a
-   * room lands in when its agent leaves, so the agent coming back later is the
-   * ordinary re-bind and not a second path. No session is restored: the
-   * harnesses the row names died with the server that wrote it.
+   * Reopen only durable branch records. Registry worktree paths are display
+   * metadata, never filesystem authority; an agentless control-created room
+   * with no worktrees therefore performs no path resolution or fallback load.
    */
   async restore(row: StoredProject): Promise<void> {
+    this.#controlOnly = row.controlOnly;
     this.#project = row.project;
-    this.#worktrees = row.worktrees;
-    for (const info of row.worktrees) await this.#openState(info.id, info);
-    if (this.#states.size === 0) await this.#openState(mainWorktreeOf(row.project.cwd), null);
+    await this.#loadPersistentBranches();
+    await this.#scheduleWorktrees(row.worktrees);
     this.#loaded = true;
     this.#lastSeen = row.lastSeen;
     this.#statusChangedAt = row.statusChangedAt;
@@ -426,7 +442,7 @@ export class ProjectRoom {
         );
       });
     if (same) return;
-    void this.#syncWorktrees(worktrees).then(() => this.#broadcastSession());
+    void this.#scheduleWorktrees(worktrees).then(() => this.#broadcastSession());
   }
 
   /**
@@ -446,6 +462,7 @@ export class ProjectRoom {
       tenant: this.#tenant,
       worktrees: this.#worktrees,
       sessions: this.#runningSessions(),
+      controlOnly: this.#controlOnly,
       liveSessions: this.#liveSessions(),
       status: "active",
       statusChangedAt: this.#statusChangedAt,
@@ -511,7 +528,7 @@ export class ProjectRoom {
     const worktrees = await this.#request<WorktreeInfo[]>((id) => ({ type: "list_worktrees", id })).catch(
       () => this.#worktrees,
     );
-    await this.#syncWorktrees(worktrees);
+    await this.#scheduleWorktrees(worktrees);
 
     const states = [...this.#states.values()];
     const lists = await Promise.all(states.map((state) => state.snapshots.list()));
@@ -522,9 +539,11 @@ export class ProjectRoom {
     states.forEach((state, index) => {
       graphs[state.id] = state.store.doc;
       catchUps[state.id] = state.catchUp;
-      // a worktree with no session has no state to report: the client shows its
-      // canvas rather than drawing it as idle
-      if (state.session !== null) agents[state.id] = state.agent;
+      // Branch-keyed browser state includes physical sessions and explicit
+      // remote live sessions; checkout ids never escape this room.
+      const control = [...this.#controlSessions.values()].find((session) => session.branch === state.id);
+      if (control !== undefined) agents[state.id] = control.state;
+      else if (state.session !== null) agents[state.id] = state.agent;
       revisions[state.id] = lists[index] ?? [];
     });
 
@@ -542,6 +561,124 @@ export class ProjectRoom {
     };
   }
 
+  /** Read the committed mapping baseline, never the live effective overlay. */
+  async mapRead(request: MapReadRequest): Promise<MapStateResponse> {
+    const stored = await this.#storage.readBranch(this.#tenant, this.#project.key, request.branch);
+    return {
+      type: "map_state",
+      requestId: request.requestId,
+      repository: request.repository,
+      branch: request.branch,
+      revision: stored?.effective.rev ?? 0,
+      mappedCommit: stored?.info.mappedCommit ?? null,
+      doc: stored?.baseline ?? null,
+    };
+  }
+  mapCommit(request: MapCommitRequest): Promise<MapCommittedResponse | ControlErrorResponse> {
+    return this.#serializeControl(async () => {
+      const result = await this.#storage.mapCommit(this.#tenant, request, this.row());
+      if (result.type === "control_error") return result;
+      for (const [sessionId, session] of [...this.#controlSessions]) {
+        if (session.branch !== request.branch) continue;
+        this.#controlSessions.delete(sessionId);
+        this.#broadcast({ type: "session_stopped", worktree: request.branch, reason: "mapping committed" });
+      }
+      const state = await this.#refreshBranch(request.branch);
+      if (state !== null) {
+        this.#setActivity(state, []);
+        this.#setAgent(state, state.physicalAgent);
+      }
+      this.#broadcastSession();
+      this.#onProjectsChanged();
+      return result;
+    });
+  }
+
+  liveUpdate(request: LiveUpdateRequest): Promise<LiveUpdatedResponse | ControlErrorResponse> {
+    return this.#serializeControl(async () => {
+      const previous = this.#controlSessions.get(request.sessionId);
+      if (previous !== undefined && previous.branch !== request.branch) {
+        return {
+          type: "control_error",
+          requestId: request.requestId,
+          code: "invalid",
+          message: `live session ${request.sessionId} is already bound to ${previous.branch}`,
+        };
+      }
+      const result = await this.#storage.liveUpdate(this.#tenant, request);
+      if (result.type === "control_error") return result;
+      const state = await this.#refreshBranch(request.branch);
+      if (state === null) {
+        return {
+          type: "control_error",
+          requestId: request.requestId,
+          code: "not_mapped",
+          message: `branch ${request.branch} is not mapped; run shape map first`,
+        };
+      }
+
+      if (request.state === "stop") {
+        this.#controlSessions.delete(request.sessionId);
+        if (previous !== undefined) {
+          this.#broadcast({ type: "session_stopped", worktree: previous.branch, reason: "shape live stopped" });
+        }
+      } else {
+        const agentState: AgentState = request.state === "working" ? "streaming" : "idle";
+        this.#controlSessions.set(request.sessionId, { branch: request.branch, state: agentState });
+        if (previous === undefined) {
+          this.#broadcast({
+            type: "session_started",
+            worktree: request.branch,
+            session: { sessionId: request.sessionId, sessionName: "shape live", model: null },
+            backend: LIVE_BACKEND,
+          });
+        }
+      }
+      const explicit = [...this.#controlSessions.values()].find((session) => session.branch === state.id);
+      this.#setAgent(state, explicit?.state ?? state.physicalAgent);
+
+      if (request.state === "idle" || request.state === "stop") {
+        this.#setActivity(state, []);
+      } else {
+        const active = new Set(request.files === undefined ? [] : this.#nodesForFiles(state, request.files));
+        const existing = new Set(state.store.doc.nodes.map((node) => node.id));
+        for (const op of request.ops ?? []) {
+          if (op.op === "upsert_node" && existing.has(op.node.id)) active.add(op.node.id);
+          else if (op.op === "set_phase" && existing.has(op.id)) active.add(op.id);
+          else if (op.op === "upsert_edge") {
+            if (existing.has(op.edge.source)) active.add(op.edge.source);
+            if (existing.has(op.edge.target)) active.add(op.edge.target);
+          }
+        }
+        this.#setActivity(state, [...active]);
+      }
+      const detail = request.note ?? request.tool;
+      if (detail !== undefined && detail.length > 0) {
+        this.#broadcast({ type: "transcript", worktree: state.id, role: "tool", text: `shape live: ${detail}` });
+      }
+      this.#broadcastSession();
+      this.#onProjectsChanged();
+      return result;
+    });
+  }
+
+  #serializeControl<T>(run: () => Promise<T>): Promise<T> {
+    const result = this.#controlWriting.then(run);
+    this.#controlWriting = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  async #refreshBranch(branch: string): Promise<WorktreeState | null> {
+    const stored = await this.#storage.readBranch(this.#tenant, this.#project.key, branch);
+    if (stored === null) return null;
+    const state = await this.#openState(stored);
+    this.#broadcast({ type: "graph", worktree: state.id, graph: state.store.doc });
+    this.#broadcast({ type: "revisions", worktree: state.id, revisions: await state.snapshots.list() });
+    return state;
+  }
   /**
    * The link dropped, or the agent detached: nothing of this project reports in
    * any more, every canvas is frozen as it stands, and everything a browser was
@@ -552,20 +689,20 @@ export class ProjectRoom {
     console.error(`[bridge] ${line}`);
     // a `detached` frame already told us; the close that follows is not news
     if (!this.#agentConnected) return;
+
     this.#agentConnected = false;
     this.#lastSeen = new Date().toISOString();
     for (const state of this.#states.values()) {
-      if (state.session !== null) {
-        state.session = null;
-        state.backend = null;
-        this.#broadcast({ type: "session_stopped", worktree: state.id, reason: line });
-      }
-      this.#setAgent(state, "idle");
-      this.#setActivity(state, []);
-      // whatever was being written stopped mid-sentence with the link
+      if (state.session === null) continue;
+      state.session = null;
+      state.backend = null;
+      const explicit = [...this.#controlSessions.values()].find((session) => session.branch === state.id);
+      this.#broadcast({ type: "session_stopped", worktree: state.id, reason: line });
+      this.#setAgent(state, explicit?.state ?? "idle");
+      if (explicit === undefined) this.#setActivity(state, []);
       this.#clearNow(state);
-      this.#cancelSync(state, line);
     }
+    this.#sessionBranches.clear();
     this.#broadcastSession();
     for (const id of [...this.#pending.keys()]) {
       this.#cancelRequest(id, new Error(AGENT_GONE), false);
@@ -583,7 +720,6 @@ export class ProjectRoom {
    * nothing may fire onto a room the server has let go of.
    */
   async close(): Promise<void> {
-    for (const state of this.#states.values()) this.#cancelSync(state, "project is inactive");
     const line = `project ${this.#project.label} is inactive`;
     // marking a project inactive is a detach, and `lastSeen` is what orders it
     // among the inactive rows the switcher reveals
@@ -605,54 +741,57 @@ export class ProjectRoom {
   }
 
   // -------------------------------------------------------------------------
-  // worktree states
+  // persistent branch states and physical routing
   // -------------------------------------------------------------------------
 
-  /**
-   * This worktree's canvas, reading it out of storage the first time it is
-   * asked for. Two callers racing the same new worktree share one load, so a
-   * `session_started` and the `canvas_call` right behind it cannot open two
-   * stores over one graph.
-   */
-  #openState(id: string, info: WorktreeInfo | null): Promise<WorktreeState> {
-    const existing = this.#states.get(id);
+  #branchInfo(state: WorktreeState): CanvasBranchInfo {
+    return {
+      id: state.id,
+      branch: state.branch,
+      head: state.head,
+      mappedCommit: state.mappedCommit,
+      live: state.live || state.session !== null || [...this.#controlSessions.values()].some((s) => s.branch === state.id),
+      path: state.path,
+      isDefault: state.isDefault,
+    };
+  }
+
+  async #loadPersistentBranches(): Promise<void> {
+    const infos = await this.#storage.listBranches(this.#tenant, this.#project.key);
+    for (const info of infos) {
+      const stored = await this.#storage.readBranch(this.#tenant, this.#project.key, info.id);
+      if (stored !== null) await this.#openState(stored);
+    }
+  }
+
+  #openState(stored: StoredBranchState): Promise<WorktreeState> {
+    const existing = this.#states.get(stored.info.id);
     if (existing !== undefined) {
-      if (info !== null) {
-        existing.path = info.path;
-        existing.branch = info.branch;
-      }
+      this.#applyStored(existing, stored);
       return Promise.resolve(existing);
     }
-    const pending = this.#pendingStates.get(id);
+    const pending = this.#pendingStates.get(stored.info.id);
     if (pending !== undefined) return pending;
-    const opening = this.#loadState(id, info);
-    this.#pendingStates.set(id, opening);
+    const opening = this.#loadState(stored);
+    this.#pendingStates.set(stored.info.id, opening);
     return opening;
   }
 
-  /**
-   * Read one worktree's graph and file its opening snapshot, so the rev the
-   * room opened at is diffable and not just the ones it goes on to make. A
-   * storage that cannot be read costs this variation its history, never the
-   * project its room: the state opens on an empty canvas.
-   */
-  async #loadState(id: string, info: WorktreeInfo | null): Promise<WorktreeState> {
-    const key = this.#project.key;
-    // a worktree the attach did not list (a session that started in one made
-    // since) reaches its canvas through here, so the adoption is checked here too
-    await this.#adoptLegacy(id);
-    const store = new GraphStore(this.#storage, this.#tenant, key, id);
-    const snapshots = new SnapshotStore(this.#storage, this.#tenant, key, id);
-    try {
-      await store.load();
-    } catch (err) {
-      console.error(`[bridge] failed to load the canvas of ${id}: ${errText(err)}`);
-    }
+  async #loadState(stored: StoredBranchState): Promise<WorktreeState> {
+    const { info } = stored;
+    const store = new GraphStore(this.#storage, this.#tenant, this.#project.key, info.id);
+    store.doc = stored.effective;
+    const snapshots = new SnapshotStore(this.#storage, this.#tenant, this.#project.key, info.id);
     await snapshots.save(store.doc);
     const state: WorktreeState = {
-      id,
-      path: info?.path ?? id,
-      branch: info?.branch ?? null,
+      id: info.id,
+      path: info.path,
+      branch: info.branch,
+      head: info.head,
+      physicalAgent: "idle",
+      mappedCommit: info.mappedCommit,
+      live: info.live,
+      isDefault: info.isDefault,
       store,
       snapshots,
       activity: new Set(),
@@ -660,105 +799,155 @@ export class ProjectRoom {
       session: null,
       backend: null,
       catchUp: { state: "idle", at: Date.now() },
-      inspecting: false,
-      inspectionTimer: null,
-      realityChanged: false,
-      sync: null,
       writing: Promise.resolve(),
       now: "",
       nowTimer: null,
       nowDirty: false,
       nowSent: null,
     };
-    this.#pendingStates.delete(id);
-    this.#states.set(id, state);
+    this.#pendingStates.delete(info.id);
+    this.#states.set(info.id, state);
     return state;
   }
 
-  /**
-   * Move this worktree's canvas onto the current project key when the agent
-   * named an older key for it. Silent unless something moved: nearly every
-   * worktree on nearly every attach has nothing stored under its legacy key,
-   * and adoption is idempotent — the second call finds the old key empty. A
-   * storage that refuses costs this variation its old canvas, never the room:
-   * the state opens on whatever the current key holds.
-   */
-  async #adoptLegacy(id: string): Promise<void> {
-    const legacy = this.#legacyKeys[id];
-    if (legacy === undefined || legacy === this.#project.key) return;
-    try {
-      const adopted = await this.#storage.adoptLegacyKey(this.#tenant, legacy, this.#project.key, id);
-      if (adopted) console.error(`[bridge] adopted the canvas of ${id} from its previous project key`);
-    } catch (err) {
-      console.error(`[bridge] failed to adopt the previous canvas of ${id}: ${errText(err)}`);
+  #applyStored(state: WorktreeState, stored: StoredBranchState): void {
+    state.path = stored.info.path;
+    state.branch = stored.info.branch;
+    state.head = stored.info.head;
+    state.mappedCommit = stored.info.mappedCommit;
+    state.live = stored.info.live;
+    state.isDefault = stored.info.isDefault;
+    state.store.doc = stored.effective;
+  }
+
+  /** Adopt both earlier project-key generations for this physical worktree. */
+  async #adoptLegacy(worktree: string): Promise<void> {
+    const candidates = new Set(
+      [
+        this.#legacyKeys[worktree],
+        this.#legacyKeys[`repository:${worktree}`],
+        this.#legacyKeys[`worktree:${worktree}`],
+      ].filter((key): key is string => key !== undefined && key !== this.#project.key),
+    );
+    for (const legacy of candidates) {
+      try {
+        const adopted = await this.#storage.adoptLegacyKey(this.#tenant, legacy, this.#project.key, worktree);
+        if (adopted) console.error(`[bridge] adopted the canvas of ${worktree} from its previous project key`);
+      } catch (err) {
+        console.error(`[bridge] failed to adopt the previous canvas of ${worktree}: ${errText(err)}`);
+      }
     }
   }
 
-  /** Flush and drop every canvas: the room is being re-read, or it is closing. */
+  /** Flush and drop in-memory branch views before a retarget or close. */
   async #closeStates(): Promise<void> {
-    // a load still in flight would otherwise re-add its state after the clear
+    await this.#worktreeSync;
     await Promise.all([...this.#pendingStates.values()]);
+    await this.#controlWriting;
     const states = [...this.#states.values()];
-    for (const state of states) this.#cancelSync(state, "project canvas is closing");
     await Promise.all(states.map((state) => state.writing));
     this.#states.clear();
     this.#pendingStates.clear();
-    // a throttle timer left behind would fire on a canvas this room no longer has
     for (const state of states) this.#clearNow(state);
     await Promise.all(states.map((state) => state.store.persist()));
   }
 
   /**
-   * Take the agent's worktree listing as the truth: a variation that appeared
-   * gets its canvas, one that was removed leaves the view. A removed worktree
-   * with a session still reporting in from it stays — the agent is the
-   * authority on what is running, and its graph is still being written.
+   * Refresh physical checkout metadata and routes. Detached worktrees remain in
+   * `SessionInfo.worktrees`, but intentionally receive no durable branch route.
    */
+  #scheduleWorktrees(worktrees: WorktreeInfo[]): Promise<void> {
+    this.#worktreeSync = this.#worktreeSync
+      .then(() => this.#syncWorktrees(worktrees))
+      .catch((err: unknown) => this.#error(`worktree refresh failed: ${errText(err)}`));
+    return this.#worktreeSync;
+  }
+
   async #syncWorktrees(worktrees: WorktreeInfo[]): Promise<void> {
-    const previous = new Map(this.#worktrees.map((info) => [info.id, info.head]));
+    const previous = new Map(this.#worktrees.map((info) => [info.id, info]));
     this.#worktrees = worktrees;
+    this.#worktreeBranches.clear();
     for (const info of worktrees) {
-      const state = await this.#openState(info.id, info);
-      if (!previous.has(info.id) || previous.get(info.id) !== info.head) {
-        if (state.sync !== null && state.sync.head !== info.head) this.#cancelSync(state, "worktree HEAD changed");
-        this.#inspect(state);
+      const branch = branchIdOf(info.branch);
+      if (branch !== null) this.#worktreeBranches.set(info.id, branch);
+    }
+    const defaultBranch = worktrees.map((info) => branchIdOf(info.branch)).find((id) => id !== null) ?? null;
+
+    for (const info of worktrees) {
+      const branch = branchIdOf(info.branch);
+      if (branch === null) continue;
+      // Every route was published before this first await; state loading below
+      // may be slow, and physical frames wait on #worktreeSync before retrying.
+      const current = this.#states.get(branch);
+      const branchInfo: CanvasBranchInfo = {
+        id: branch,
+        branch: info.branch ?? branch,
+        head: info.head,
+        mappedCommit: current?.mappedCommit ?? null,
+        live: current?.live ?? false,
+        path: info.path,
+        isDefault: branch === defaultBranch,
+      };
+      await this.#storage.upsertBranch(this.#tenant, this.#project.key, branchInfo);
+      const stored = await this.#storage.readBranch(this.#tenant, this.#project.key, branch);
+      if (stored !== null) await this.#openState(stored);
+    }
+
+    const listed = new Set(worktrees.map((info) => info.id));
+    for (const [worktree, old] of previous) {
+
+      if (listed.has(worktree)) continue;
+      const branch = branchIdOf(old.branch);
+      if (branch === null) continue;
+      const state = this.#states.get(branch);
+      if (state === undefined || state.path === null) continue;
+      const info = { ...this.#branchInfo(state), path: null, live: state.live };
+      await this.#storage.upsertBranch(this.#tenant, this.#project.key, info);
+      state.path = null;
+    }
+    if (defaultBranch !== null) {
+      for (const state of this.#states.values()) {
+        const isDefault = state.id === defaultBranch;
+        if (state.isDefault === isDefault) continue;
+        state.isDefault = isDefault;
+        await this.#storage.upsertBranch(this.#tenant, this.#project.key, this.#branchInfo(state));
       }
     }
-    const listed = new Set(worktrees.map((info) => info.id));
-    for (const [id, state] of [...this.#states]) {
-      if (listed.has(id) || state.session !== null) continue;
-      this.#cancelSync(state, "worktree was removed");
-      this.#states.delete(id);
-      this.#clearNow(state);
-      await state.store.persist();
-    }
   }
 
-  /**
-   * Run something on a worktree's canvas, opening it first when the agent is
-   * talking about one the room has not heard of yet. Frames for the same new
-   * worktree run in arrival order: they all wait on the one load.
-   */
-  #withState(worktree: string, run: (state: WorktreeState) => void): void {
-    const state = this.#states.get(worktree);
-    if (state !== undefined) {
-      run(state);
-      return;
-    }
-    void this.#openState(worktree, null).then(run);
+  #stateForWorktree(worktree: string): WorktreeState | null {
+    const branch = this.#sessionBranches.get(worktree) ?? this.#worktreeBranches.get(worktree);
+    return branch === undefined ? null : this.#states.get(branch) ?? null;
   }
 
+  #withState(worktree: string, run: (state: WorktreeState) => void, missing?: () => void): void {
+    // Always cross the queued refresh boundary, even when the old route still
+    // has a loaded state: checkout A→B must bind the following frame to B.
+    const pending = this.#worktreeSync;
+    void pending.then(() => {
+      const loaded = this.#stateForWorktree(worktree);
+      if (loaded === null) missing?.();
+      else run(loaded);
+    });
+  }
   /** what the user is told a variation is called: its branch, never its path */
   #labelOf(state: WorktreeState): string {
-    return state.branch ?? basename(state.path);
+    return state.branch.replace(/^refs\/heads\//, "");
   }
 
-  /** the harnesses reporting in right now, one per worktree that has one */
   #runningSessions(): WorktreeSession[] {
     const running: WorktreeSession[] = [];
     for (const state of this.#states.values()) {
       if (state.session === null || state.backend === null) continue;
       running.push({ worktree: state.id, session: state.session, backend: state.backend, state: state.agent });
+    }
+    for (const [sessionId, live] of this.#controlSessions) {
+      running.push({
+        worktree: live.branch,
+        session: { sessionId, sessionName: "shape live", model: null },
+        backend: LIVE_BACKEND,
+        state: live.state,
+      });
     }
     return running;
   }
@@ -768,6 +957,7 @@ export class ProjectRoom {
       cwd: this.#project.cwd,
       targetHasCode: this.#project.targetHasCode,
       worktrees: this.#worktrees,
+      branches: [...this.#states.values()].map((state) => this.#branchInfo(state)),
       sessions: this.#runningSessions(),
       agentConnected: this.#agentConnected,
       directivePath: this.#project.directivePath,
@@ -775,11 +965,6 @@ export class ProjectRoom {
     };
   }
 
-  /**
-   * Session facts changed without any canvas changing (a harness came or went,
-   * the agent left, worktrees appeared). Clients take this without resetting
-   * selection, focus or transcript.
-   */
   #broadcastSession(): void {
     this.#broadcast({ type: "session", session: this.#sessionInfo() });
   }
@@ -818,18 +1003,16 @@ export class ProjectRoom {
         // taking the user to a session's own terminal is the one thing the
         // browser may still ask Shape to do, and only a session that is
         // actually reporting in has one
-        if (state.session === null) {
+        const route = [...this.#sessionBranches].find(([, branch]) => branch === state.id);
+        if (state.session === null || route === undefined) {
           this.#error(`nothing is reporting in from ${this.#labelOf(state)}`);
           return;
         }
-        // a harness whose terminal Shape cannot reach is not asked for one: the
-        // browser hides the button on the same capability, and a client that
-        // ignores that is owed the reason rather than silence
         if (state.backend?.capabilities.terminal === "none") {
           this.#error(`there is no terminal to go to on ${this.#labelOf(state)}`);
           return;
         }
-        this.#link.send({ type: "focus_terminal", worktree: state.id });
+        this.#link.send({ type: "focus_terminal", worktree: route[0] });
         return;
       }
       case "diff": {
@@ -845,140 +1028,6 @@ export class ProjectRoom {
     }
   }
 
-  /** Mechanical seed only: it never proves that a model has surveyed the project. */
-  async #seedSkeleton(state: WorktreeState): Promise<void> {
-    let ops: CanvasOp[];
-    try {
-      ops = await this.#request<CanvasOp[]>((id) => ({ type: "synthesize_skeleton", worktree: state.id, id }));
-    } catch (err) {
-      throw new Error(`skeleton synthesis failed: ${errText(err)}`);
-    }
-    if (!this.#agentConnected || this.#states.get(state.id) !== state || state.store.doc.nodes.length > 0) return;
-
-    // a repo with no workspace packages in it has no skeleton to draw, and the
-    // reader is told that rather than left wondering what the empty stage means
-    if (ops.length === 0) {
-      this.#broadcast({
-        type: "transcript",
-        worktree: state.id,
-        role: "tool",
-        text: "canvas: no workspace packages detected — nothing to draw yet",
-      });
-      return;
-    }
-
-    const outcome = state.store.applyCanvasCall(
-      {
-        ops,
-        note: `mechanical skeleton: ${state.store.doc.reality.nodes.length} workspace package(s)`,
-      },
-      // the skeleton is one flat pile of parts and nothing else yet: there is
-      // no product side for it to be connected to, and this receipt is the
-      // server's own, never read by anyone
-      { linkWarnings: false },
-    );
-    this.#broadcast({ type: "transcript", worktree: state.id, role: "tool", text: outcome.transcript });
-    if (outcome.changed) {
-      await this.#graphChanged(state);
-      this.#broadcast({ type: "graph", worktree: state.id, graph: state.store.doc });
-    }
-    if (outcome.isError) throw new Error(`skeleton synthesis rejected: ${outcome.text}`);
-    // the room's own record of the one write it makes without being asked
-    this.#audit(state, { kind: "onboard", ops: ops.length });
-  }
-
-  #setCatchUp(state: WorktreeState, catchUp: CatchUpState): void {
-    state.catchUp = catchUp;
-    this.#broadcast({ type: "catch_up", worktree: state.id, catchUp });
-    this.#onProjectsChanged();
-  }
-
-  #cancelSync(state: WorktreeState, reason: string): void {
-    clearTimeout(state.inspectionTimer ?? undefined);
-    state.inspectionTimer = null;
-    state.inspecting = false;
-    const job = state.sync;
-    state.sync = null;
-    if (job !== null && this.#agentConnected) this.#link.send({ type: "cancel_request", id: job.id });
-    if (state.catchUp.state === "queued" || state.catchUp.state === "running") {
-      this.#setCatchUp(state, { state: "failed", reason, at: Date.now() });
-    }
-  }
-
-  /** Attach/reactivation inspects every registered variation, with or without a live session. */
-  #inspect(state: WorktreeState): void {
-    if (!this.#agentConnected || state.inspecting || state.sync !== null || this.#closed !== null) return;
-    state.inspecting = true;
-    this.#setCatchUp(state, { state: "queued", at: Date.now() });
-    state.inspectionTimer = setTimeout(() => {
-      if (!state.inspecting) return;
-      state.inspecting = false;
-      state.inspectionTimer = null;
-      this.#setCatchUp(state, { state: "failed", reason: "reality extraction did not finish", at: Date.now() });
-    }, 60_000);
-    state.inspectionTimer.unref();
-    this.#link.send({ type: "extract_reality", worktree: state.id });
-  }
-
-  async #planSync(state: WorktreeState, realityChanged: boolean): Promise<void> {
-    const head = state.store.doc.reality.head;
-    if (!realityChanged && Object.keys(state.store.doc.drift).length === 0 &&
-        state.store.doc.nodes.length > 0 && state.store.doc.surveyed !== undefined &&
-        state.store.doc.surveyed !== null && state.store.doc.surveyed.head === head) {
-      this.#setCatchUp(state, { state: "idle", at: Date.now() });
-      return;
-    }
-    const job = { id: randomUUID(), head, persisted: false };
-    state.sync = job;
-    this.#setCatchUp(state, { state: "queued", at: Date.now() });
-    const survey = state.store.doc.nodes.length === 0;
-    try {
-      if (survey) await this.#seedSkeleton(state);
-      if (!this.#agentConnected || this.#closed !== null || state.sync !== job || this.#states.get(state.id) !== state) return;
-      if (state.store.doc.reality.head !== head) throw new Error("worktree HEAD changed while preparing synchronization");
-      const at = Date.parse(state.store.doc.surveyed?.at ?? "");
-      this.#link.send({
-        type: "catch_up", worktree: state.id, id: job.id,
-        prompt: composeSyncPrompt(state.store.doc, survey),
-        since: Number.isFinite(at) ? at : 0,
-      });
-    } catch (err) {
-      if (state.sync !== job) return;
-      state.sync = null;
-      this.#setCatchUp(state, { state: "failed", reason: errText(err), at: Date.now() });
-    }
-  }
-
-  async #syncState(state: WorktreeState, id: string, catchUp: CatchUpState): Promise<void> {
-    const job = state.sync;
-    if (job === null || job.id !== id || !this.#agentConnected || this.#closed !== null) return;
-    if (catchUp.state !== "idle") {
-      if (catchUp.state === "failed") state.sync = null;
-      this.#setCatchUp(state, catchUp);
-      return;
-    }
-    try {
-      if (!job.persisted) throw new Error("synchronization finished without persisting a canvas mutation");
-      if (state.store.doc.reality.head !== job.head) throw new Error("synchronization completed against a stale HEAD");
-      if (Object.keys(state.store.doc.drift).length > 0) throw new Error("synchronization completed with remaining drift");
-      // GraphStore.persist intentionally swallows errors. A completion receipt must not.
-      const doc = { ...state.store.doc, rev: state.store.doc.rev + 1, surveyed: { head: job.head, at: new Date().toISOString() } };
-      await this.#storage.saveGraph(this.#tenant, this.#project.key, state.id, doc);
-      if (state.sync !== job || !this.#agentConnected || this.#closed !== null) {
-        await this.#storage.saveGraph(this.#tenant, this.#project.key, state.id, state.store.doc);
-        return;
-      }
-      state.store.doc = doc;
-      void state.snapshots.save(doc).catch((err: unknown) => this.#error(`snapshot failed: ${errText(err)}`));
-      state.sync = null;
-      this.#broadcast({ type: "graph", worktree: state.id, graph: doc });
-      this.#setCatchUp(state, catchUp);
-    } catch (err) {
-      if (state.sync !== job) return;
-      state.sync = null;
-      this.#setCatchUp(state, { state: "failed", reason: errText(err), at: Date.now() });
-    }
-  }
 
   // -------------------------------------------------------------------------
   // agent -> browsers
@@ -987,54 +1036,68 @@ export class ProjectRoom {
   handleAgent(msg: AgentFrame): void {
     switch (msg.type) {
       case "session_started":
-        this.#withState(msg.worktree, (state) => {
-          state.session = msg.session;
-          state.backend = msg.backend;
-          state.agent = "idle";
-          this.#broadcast({
-            type: "session_started",
-            worktree: state.id,
-            session: msg.session,
-            backend: msg.backend,
-          });
-          this.#broadcastSession();
-          if (state.catchUp.state === "idle" && state.store.doc.reality.extractedAt === null) this.#inspect(state);
-        });
+        this.#withState(
+          msg.worktree,
+          (state) => {
+            this.#sessionBranches.set(msg.worktree, state.id);
+            state.session = msg.session;
+            state.backend = msg.backend;
+            state.physicalAgent = "idle";
+            state.agent = "idle";
+            this.#broadcast({
+              type: "session_started",
+              worktree: state.id,
+              session: msg.session,
+              backend: msg.backend,
+            });
+            this.#broadcastSession();
+          },
+          () => console.error(`[bridge] detached worktree session has no persistent branch: ${msg.worktree}`),
+        );
         return;
-      case "session_stopped": {
-        const state = this.#states.get(msg.worktree);
-        // a session of a project this room has moved off is not its business
-        if (state === undefined) return;
-        state.session = null;
-        state.backend = null;
-        this.#setAgent(state, "idle");
-        this.#setActivity(state, []);
-        // nothing is being written any more: the live line goes out empty
-        this.#clearNow(state);
-        this.#broadcast({ type: "session_stopped", worktree: state.id, reason: msg.reason });
-        this.#broadcastSession();
+      case "session_stopped":
+        this.#withState(
+          msg.worktree,
+          (state) => {
+            this.#sessionBranches.delete(msg.worktree);
+            state.session = null;
+            state.backend = null;
+            const explicit = [...this.#controlSessions.values()].find((session) => session.branch === state.id);
+            state.physicalAgent = "idle";
+            this.#setAgent(state, explicit?.state ?? "idle");
+            if (explicit === undefined) this.#setActivity(state, []);
+            this.#clearNow(state);
+            this.#broadcast({ type: "session_stopped", worktree: state.id, reason: msg.reason });
+            this.#broadcastSession();
+          },
+          () => this.#sessionBranches.delete(msg.worktree),
+        );
         return;
-      }
       case "agent_event":
         this.#withState(msg.worktree, (state) => this.#agentEvent(state, msg.event));
         return;
-      case "catch_up_state": {
-        const state = this.#states.get(msg.worktree);
-        if (state === undefined) return;
-        state.writing = state.writing.then(() => this.#syncState(state, msg.id, msg.catchUp));
+      case "catch_up_state":
+        // Skill-driven map commits own durable mapping. Old agents may finish
+        // a job started by an older server; it has no authority in this room.
         return;
-      }
       case "canvas_call":
-        this.#withState(msg.worktree, (state) => {
-          state.writing = state.writing.then(() => this.#canvasCall(state, msg.id, msg.args, msg.job));
-        });
+        this.#withState(
+          msg.worktree,
+          (state) => {
+            state.writing = this.#serializeControl(() => this.#canvasCall(state, msg.id, msg.args, msg.job));
+          },
+          () => this.#link.send({
+            type: "canvas_result",
+            id: msg.id,
+            text: "detached worktree has no persistent branch; check out a branch before writing the canvas",
+            isError: true,
+          }),
+        );
         return;
       case "reality":
         this.#withState(msg.worktree, (state) => {
-          state.writing = state.writing.then(() => this.#reality(state, { ...msg.reality, head: msg.head })).catch((err: unknown) => {
-            this.#cancelSync(state, errText(err));
-            this.#setCatchUp(state, { state: "failed", reason: errText(err), at: Date.now() });
-          });
+          state.writing = this.#serializeControl(() => this.#reality(state, { ...msg.reality, head: msg.head }))
+            .catch((err: unknown) => this.#error(`reality persistence failed: ${errText(err)}`));
         });
         return;
       case "worktrees":
@@ -1045,7 +1108,7 @@ export class ProjectRoom {
           return;
         }
         // unsolicited: the agent re-listed on its own
-        void this.#syncWorktrees(msg.worktrees).then(() => this.#broadcastSession());
+        void this.#scheduleWorktrees(msg.worktrees).then(() => this.#broadcastSession());
         return;
       case "picked_directory":
         this.#settle(msg.id, msg.project);
@@ -1086,7 +1149,11 @@ export class ProjectRoom {
   #agentEvent(state: WorktreeState, event: AgentEvent): void {
     switch (event.kind) {
       case "state":
-        this.#setAgent(state, event.state);
+        state.physicalAgent = event.state;
+        this.#setAgent(
+          state,
+          [...this.#controlSessions.values()].find((session) => session.branch === state.id)?.state ?? event.state,
+        );
         return;
       case "text":
         // the message of record has landed, so the deltas that built it are
@@ -1192,57 +1259,36 @@ export class ProjectRoom {
 
   /** Apply a canvas call to one worktree's graph and answer the caller with what landed. */
   async #canvasCall(state: WorktreeState, id: string, args: unknown, jobId?: string): Promise<void> {
-    const job = state.sync;
-    if (jobId !== undefined && (!this.#agentConnected || this.#closed !== null || job === null || job.id !== jobId || state.catchUp.state !== "running" || state.store.doc.reality.head !== job.head)) {
-      this.#link.send({ type: "canvas_result", id, text: "inactive, foreign or stale synchronization job", isError: true });
+    if (jobId !== undefined) {
+      this.#link.send({
+        type: "canvas_result",
+        id,
+        text: "automatic synchronization is disabled; run `shape map` explicitly",
+        isError: true,
+      });
       return;
     }
     try {
-    const outcome = state.store.applyCanvasCall(args);
-    this.#broadcast({ type: "transcript", worktree: state.id, role: "tool", text: outcome.transcript });
-    if (outcome.changed) {
-      state.store.doc.drift = computeDrift(state.store.doc, state.store.doc.reality);
-      if (jobId === undefined) await this.#graphChanged(state);
-      else {
-        await this.#storage.saveGraph(this.#tenant, this.#project.key, state.id, state.store.doc);
-        await state.snapshots.save(state.store.doc);
-        if (job !== null && state.sync === job && !outcome.isError) job.persisted = true;
-      }
-      this.#broadcast({ type: "graph", worktree: state.id, graph: state.store.doc });
-      if (jobId === undefined) {
-        // The canvas is the interface, so the bubbles an ordinary call just
-        // wrote are where the user session is. Synchronization is machine work
-        // and must never appear as ordinary session activity.
+      const outcome = state.store.applyCanvasCall(args);
+      this.#broadcast({ type: "transcript", worktree: state.id, role: "tool", text: outcome.transcript });
+      if (outcome.changed) {
+        state.store.doc.drift = computeDrift(state.store.doc, state.store.doc.reality);
+        await this.#graphChanged(state);
+        this.#broadcast({ type: "graph", worktree: state.id, graph: state.store.doc });
         this.#setActivity(state, outcome.touched);
       }
-    }
-    this.#link.send({ type: "canvas_result", id, text: outcome.text, isError: outcome.isError });
+      this.#link.send({ type: "canvas_result", id, text: outcome.text, isError: outcome.isError });
     } catch (err) {
-      if (jobId !== undefined && state.sync?.id === jobId) {
-        this.#cancelSync(state, errText(err));
-        this.#setCatchUp(state, { state: "failed", reason: errText(err), at: Date.now() });
-      }
       this.#link.send({ type: "canvas_result", id, text: `canvas persistence failed: ${errText(err)}`, isError: true });
     }
   }
 
-  /** Re-derived reality for one worktree: the agent decides when, on its own HEAD. */
+  /** Re-derived reality for one checked-out branch. */
   async #reality(state: WorktreeState, reality: RealityLayer): Promise<void> {
-    const changed = !sameReality(state.store.doc.reality, reality);
-    if (changed) {
-      state.store.setReality(reality, computeDrift(state.store.doc, reality));
-      await this.#graphChanged(state);
-      this.#broadcast({ type: "graph", worktree: state.id, graph: state.store.doc });
-    }
-    if (state.sync !== null && state.sync.head !== reality.head) this.#cancelSync(state, "worktree HEAD changed during synchronization");
-    if (state.inspecting) {
-      state.inspecting = false;
-      clearTimeout(state.inspectionTimer ?? undefined);
-      state.inspectionTimer = null;
-      const realityChanged = state.realityChanged || changed;
-      state.realityChanged = false;
-      await this.#planSync(state, realityChanged);
-    }
+    if (sameReality(state.store.doc.reality, reality)) return;
+    state.store.setReality(reality, computeDrift(state.store.doc, reality));
+    await this.#graphChanged(state);
+    this.#broadcast({ type: "graph", worktree: state.id, graph: state.store.doc });
   }
 
   /** Compare two stored revisions of one worktree; an unknown rev is the client's mistake. */
@@ -1265,14 +1311,27 @@ export class ProjectRoom {
    * file is working on the bubble that claims a part of it.
    */
   #nodesForPaths(state: WorktreeState, tokens: string[]): string[] {
-    if (tokens.length === 0) return [];
     const cwd = state.path;
+    if (cwd === null || tokens.length === 0) return [];
     const rels: string[] = [];
     for (const token of tokens) {
       const abs = isAbsolute(token) ? token : resolve(cwd, token);
       const rel = relative(cwd, abs);
       if (rel.length > 0 && !rel.startsWith("..")) rels.push(rel);
     }
+    return this.#nodesForRelativePaths(state, rels);
+  }
+
+  /** Match source-reported repository-relative files without treating repository.path as authority. */
+  #nodesForFiles(state: WorktreeState, files: string[]): string[] {
+    const relativeFiles = files
+      .filter((file) => !isAbsolute(file))
+      .map((file) => file.replace(/^\.\//, "").replace(/\/+$/, ""))
+      .filter((file) => file.length > 0 && file !== ".." && !file.startsWith("../"));
+    return this.#nodesForRelativePaths(state, relativeFiles);
+  }
+
+  #nodesForRelativePaths(state: WorktreeState, rels: string[]): string[] {
     if (rels.length === 0) return [];
     const hits: string[] = [];
     for (const node of state.store.doc.nodes) {
@@ -1374,36 +1433,22 @@ export class ProjectRoom {
   }
 
   /**
-   * One worktree's graph advanced: flush it and file a revision snapshot. A
-   * snapshot that actually landed grows the set of revisions clients can diff
-   * over, so they get that variation's fresh list. The stores are captured
-   * because a retarget may drop the state before the write settles.
+   * Persist a native branch mutation without swallowing storage failures, then
+   * refresh durable live metadata before projecting it to browsers.
    */
-  #graphChanged(state: WorktreeState): Promise<void> {
-    const persisted = state.store.persist();
-    const snapshots = state.snapshots;
-    void snapshots.save(state.store.doc).then(async (info) => {
-      if (info === null) return;
-      this.#broadcast({ type: "revisions", worktree: state.id, revisions: await snapshots.list() });
-    });
-    return persisted;
+  async #graphChanged(state: WorktreeState): Promise<void> {
+    const wasLive = state.live;
+    await this.#storage.saveGraph(this.#tenant, this.#project.key, state.id, state.store.doc);
+    const stored = await this.#storage.readBranch(this.#tenant, this.#project.key, state.id);
+    if (stored !== null) this.#applyStored(state, stored);
+
+    const saved = await state.snapshots.save(state.store.doc);
+    if (saved !== null) {
+      this.#broadcast({ type: "revisions", worktree: state.id, revisions: await state.snapshots.list() });
+    }
+    if (state.live !== wasLive) this.#broadcastSession();
   }
 
-  /**
-   * One line per canvas the room seeded by itself, stamped with where and which
-   * variation. An on-prem operator answers "why does this project have bubbles
-   * nobody drew" from the room's own storage; the write never blocks the
-   * seeding and never fails it (see `Storage.appendAudit`).
-   */
-  #audit(state: WorktreeState, body: AuditBody): void {
-    void this.#storage.appendAudit(this.#tenant, this.#project.key, state.id, {
-      at: new Date().toISOString(),
-      tenant: this.#tenant,
-      projectId: this.#project.key,
-      worktree: state.id,
-      ...body,
-    });
-  }
 
   #error(message: string): void {
     console.error(`[bridge] ${message}`);
